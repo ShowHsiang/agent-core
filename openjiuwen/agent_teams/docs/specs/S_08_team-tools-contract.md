@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-08-10 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md |
+| 最近一次修订日期 | 2026-08-15 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md |
 
 ## 范围 / 边界
 
@@ -160,10 +160,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `TeamTaskManager.get_other_active_task_id(member, exclude_task_id)`（DB 层单列 `task_id`
     投影 + `LIMIT 1` 的存在性探测，`status IN (PLANNING, IN_PROGRESS, IN_REVIEW)`，不物化该成员
     的全部活跃行）校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim / re-assign / re-start
-    同一任务）；`UpdateTaskTool` 的校验落在 reassignment reset **之前**，
-    拒绝时原任务与当前 owner 均不受扰动。改派执行中任务走
-    `TeamTaskManager.reassign`——DAO 层**原子 CAS 交换 assignee**（任务全程 IN_PROGRESS，
-    不经 PENDING），发 `TASK_REVOKED` 通知原 owner、`TASK_CLAIMED` 通知新 owner，
+    同一任务）；`UpdateTaskTool` 的校验落在改派**之前**，
+    拒绝时原任务与当前 owner 均不受扰动。改派已有 owner 的任务走
+    `TeamTaskManager.reassign`——DAO 层**原子 CAS 交换 assignee**，`SET` 只动 assignee，
+    因此**任务保持原状态、不经 PENDING**。可改派状态集是 `TASK_REASSIGNABLE_STATUSES`
+    = {`PENDING`, `BLOCKED`, `IN_PROGRESS`}（`schema/status.py`）：前两个是"有主但没开工"
+    （调度模式的常驻态、以及创建时预指派的自主任务），交接不丢任何在途工作，是**最安全**
+    的改派时机；`IN_PROGRESS` 代价是原 owner 的在途推理，由 `TASK_REVOKED` 让它停手。
+    两个 gate（`PLANNING` / `IN_REVIEW`）被排除——各自有一份绑在**当前** owner 身上的产物
+    （已提交的计划 / 正在被评判的成果），换人会让产物归属到没做过它的人头上。
+    改派发 `TASK_REVOKED` 通知原 owner、`TASK_CLAIMED` 通知新 owner，
     **不发 `TASK_RELEASED`**（不会 spurious 唤醒空闲 teammate）、**不再** `cancel_member`
     （那会连带取消原 owner 的其它 claim 与 in-flight round）。见 F_54 / F_56。
 17. **取消 / 编辑执行中任务用任务级信号，不取消成员**：cancel 一个执行中任务、或改其

@@ -109,7 +109,7 @@ blueprint.py       # TeamAgentSpec / LeaderSpec / TransportSpec / StorageSpec �
 deep_agent_spec.py # DeepAgentSpec / SubAgentSpec / RailSpec 等 —— DeepAgent 侧的 Spec。RailSpec/BuiltinToolSpec 只走 provider（class registry _RAIL_TYPE_REGISTRY/_TOOL_TYPE_REGISTRY 已删，见 F_32）；DeepAgentSpec.resolve_parts/build 分离
 team.py            # TeamSpec / TeamRole / TeamLifecycle / TeamRuntimeContext / TeamMemberSpec
 events.py          # EventMessage / TeamTopic —— 跨进程事件
-status.py          # MemberStatus / ExecutionStatus —— 状态机枚举 + 三组成员状态子集（departed / settled / quiescent）
+status.py          # MemberStatus / ExecutionStatus / TaskStatus —— 状态机枚举 + 三组成员状态子集（departed / settled / quiescent）+ 任务状态子集 TASK_REASSIGNABLE_STATUSES（归属可原地转移的状态，见 F_82）
 stream.py          # TeamOutputSchema —— OutputSchema 子类，带 source_member / role 成员归属字段；`is_team_event_marker` 判定框架标记 chunk
 task.py            # TaskSummary / TaskDetail —— 任务返回模型
 ```
