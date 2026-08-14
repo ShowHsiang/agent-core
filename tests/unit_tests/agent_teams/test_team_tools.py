@@ -281,9 +281,9 @@ class TestBuildTeamTool:
     async def test_recovered_leader_may_rebuild_a_disbanded_team(self, agent_team_without_team, t, db, message_bus):
         """The refusal keys on the team row, not on the recovery alone.
 
-        A recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path calls clean_team) has no team left and
-        genuinely needs to build one.
+        A recovered leader whose team was disbanded (its own clean_team, or
+        the operator's delete_agent_team) has no team left and genuinely
+        needs to build one.
         """
         args = {
             "display_name": "My Team",
