@@ -754,12 +754,14 @@ class UpdateTaskTool(TeamTool):
             if content:
                 updated.append("content")
 
-        # Assign task to member. When the task is already claimed by a
-        # different member, treat this as a leader-driven reassignment:
-        # reset the task back to PENDING and hand it to the new member. The
-        # former assignee is told via a targeted TASK_REVOKED event (not a
-        # member-wide cancel), so only this one task moves — its other
-        # claims and in-flight round survive. Same-member is idempotent.
+        # Assign task to member. When the task is already owned by a
+        # different member, treat this as a leader-driven reassignment: the
+        # assignee is swapped in place and the status is preserved, so an
+        # assigned-but-not-yet-started task (the scheduled mode's resting
+        # state) stays waiting for its owner rather than being started or
+        # released. The former assignee is told via a targeted TASK_REVOKED
+        # event (not a member-wide cancel), so only this one task moves — its
+        # other claims and in-flight round survive. Same-member is idempotent.
         if assignee:
             # One active task per member: reject before any state change so a
             # rejected assign never disturbs the current owner or this task.
