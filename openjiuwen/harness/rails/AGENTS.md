@@ -191,7 +191,14 @@ WARNING），只有 tool 事件才真中断。
 模型在读父 skill 之前就看到本该渐进给出的细节。
 
 **因此 `skill_tool(skill_name="designer")` 对一个嵌套 skill 会报 `Skill not found`**——它
-没有被注册成顶层 skill，只能经父 skill 的 `relative_file_path` 到达。
+没有被注册成顶层 skill，只能经父 skill 的 `relative_file_path` 到达。这恰好是模型读完父
+skill 后最直觉的下一步，所以 "## Nested skills" 那段文案**点名说这个调用不成立**，并用父
+skill 的真实名字拼出可用的那条调用。
+
+这段文案要能被读到，`skill_tool` 就必须**无条件**设 `data["content"]`：
+`AbilityManager._build_tool_message_content` 只在有 `content` 时按原文渲染，否则回落
+`str(result)`——把 skill 正文连同这段附录一起埋进整个 `ToolOutput` 的 pydantic repr。
+`data` 的其余键（`skill_directory` / `discovered_skill_names` …）仍留给程序消费者。
 
 发现侧跳过隐藏目录与 `_SKILL_SCAN_SKIP_DIRS`；后者与 `skill_tool._TREE_SKIP_DIR_NAMES` 取值
 恰好相同但**是两个独立常量**，回答的是不同问题（"别进去找" vs "别在目录树里展示"）。
