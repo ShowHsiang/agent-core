@@ -270,8 +270,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       准则还在其中，且那条 tool result 由 `team_policy` 重注入保证**不会被压缩掉**——再调一次
       永远拿不到新信息，只白烧一轮。`BuildTeamTool.invoke` 在 `backend.rejects_rebuild()` 为真时
       直接返回失败。判据是 `_history_restored`（由 `TeamAgent.recover_from_session` 置位，该方法
-      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若在本轮被
-      `CoordinationKernel.start` 的"上次清理没做完"分支执行了 `clean_team`，团队行已消失，
+      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若接的是一个已被
+      解散的团队（自己的 `clean_team`，或 operator 的 `delete_agent_team`），团队行已消失，
       那时它确实需要重新建队。
 
 21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
