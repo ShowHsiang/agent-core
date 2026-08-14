@@ -2159,10 +2159,10 @@ class TeamBackend:
         confused about whether its team exists, which the refusal corrects.
 
         Both conditions are required. ``_history_restored`` alone is not
-        enough: a recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path in ``CoordinationKernel.start`` calls
-        ``clean_team``) has no team row left and genuinely does need to build
-        one. The team row is what says a team is there to be rejoined.
+        enough: a recovered leader whose team was disbanded (its own
+        ``clean_team``, or the operator's ``delete_agent_team``) has no team
+        row left and genuinely does need to build one. The team row is what
+        says a team is there to be rejoined.
 
         Returns:
             True when the leader is already attached, with history, to a team
