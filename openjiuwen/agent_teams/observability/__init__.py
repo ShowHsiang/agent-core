@@ -23,10 +23,12 @@ Quickstart::
 
 from openjiuwen.agent_teams.observability.rail import ObservabilityRail
 from openjiuwen.agent_teams.observability.setup import (
+    acquire_observability,
     attach_to_team_agent,
     finalize_team_trace,
     init_observability,
     is_initialized,
+    release_observability,
     shutdown_observability,
 )
 from openjiuwen.agent_teams.observability.span_context import (
@@ -38,11 +40,13 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 __all__ = [
     "ObservabilityConfig",
     "ObservabilityRail",
+    "acquire_observability",
     "attach_to_team_agent",
     "clear_ambient_team_span",
     "finalize_team_trace",
     "init_observability",
     "is_initialized",
+    "release_observability",
     "set_ambient_team_span",
     "shutdown_observability",
 ]
