@@ -114,6 +114,12 @@ DA_TASK_ITERATION = "deepagent.task.iteration"
 DA_TASK_IS_FOLLOW_UP = "deepagent.task.is_follow_up"
 DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
 
+# Identifies which agent an agent-tier span belongs to, without assuming the
+# agent is a team member. The rail reads it back off a leftover span to tell an
+# own orphan from another agent's span inherited through a ContextVar snapshot,
+# so it must stay independent of the team-only ``agentteam.*`` namespace.
+DA_AGENT_NAME = "deepagent.agent.name"
+
 
 # ---------------------------------------------------------------------------
 # langfuse.* — Langfuse OTel ingestion processor attributes

@@ -509,7 +509,7 @@ class OtelCallbackHandler:
         DO NOT close agent span here! (managed by Rail)
         Sets root span output from the FINAL invoke result — this is the
         overall agent output, distinct from per-iteration results written by
-        ObservabilityRail.after_task_iteration.
+        AgentObservabilityRail.after_task_iteration.
         """
         try:
             result = kwargs.get("result")
@@ -1025,7 +1025,8 @@ class OtelCallbackHandler:
         """Stamp ``agentteam.member.name`` from the current agent span.
 
         The current agent iteration/invoke span carries ``AT_MEMBER_NAME``
-        (stamped by ``ObservabilityRail._stamp_agent_attributes``).  Child
+        (contributed by ``TeamObservabilityRail`` when the agent runs in a
+        team; absent otherwise).  Child
         llm.call / reasoning / tool spans do not, so this copies the member
         name down so every child span stays attributable.
 

@@ -1,241 +1,662 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Agent-tier span wiring for single-agent runs.
+"""Agent-tier observability rail — the agent span every DeepAgent gets.
 
-``ObservabilityRail`` is what produces the ``agent.<type>.invoke`` /
-``agent.<member>.task_iteration.<n>`` tier of the span tree. Team mode mounts it
-through the team blueprint; a single agent has no blueprint doing that, and a
-sub-agent it dispatches is built inside the SDK, so this module supplies the
-equivalent wiring:
+This rail owns one thing: the ``agent.*`` tier of the span tree, for any
+DeepAgent whatsoever — a single agent, a team member, a dispatched sub-agent.
+It knows nothing about teams.
 
-* :func:`mark_single_agent_team` — stamp the synthetic team marker the rail
-  keys its agent-tier spans off.
-* :func:`apply_single_agent_team_attr_suppression` — keep the redundant
-  ``agentteam.*`` block off single-agent spans.
-* :func:`attach_subagent_observability` /
-  :func:`install_subagent_observability_hook` — give every dispatched
-  sub-agent a rail of its own, whichever tool dispatched it.
+Span tree::
 
-The rail class itself still lives in :mod:`openjiuwen.agent_teams.observability`
-alongside the Team monitor. It is imported lazily here so importing this module
-never pulls the Team stack into a single-agent process.
+  <run root>                              (team.{name} / agent.{mode}.{session})
+  ├── agent.{name}.task_iteration.1       [AGENT]
+  │     ├── llm.call                      [GENERATION]
+  │     └── tool.xxx                      [TOOL]
+  └── agent.{name}.invoke                 [AGENT]  single-round agents
+
+Layers that need more on the same span — the Team layer stamping its
+``agentteam.*`` identity block, say — do not subclass this rail and do not
+re-open the span. They mount their own rail with a *higher* priority and park
+an :class:`AgentSpanDecoration` on the callback context; this rail applies it
+when it opens and closes the span. One callback context is shared by every rail
+in a hook chain and by the before/after pair of one iteration or invoke, which
+is what makes that handoff exact — no ContextVar guessing about which span a
+contribution belongs to.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
+from opentelemetry import context as otel_context
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Status,
+    StatusCode,
+    Tracer,
+    set_span_in_context,
+)
+
 from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.observability.constants import SINGLE_AGENT_TEAM_NAME
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.extensions.observability.redaction import (
+    redact_completion,
+    redact_prompt,
+)
+from openjiuwen.extensions.observability.semconv import (
+    DA_AGENT_NAME,
+    DA_TASK_IS_FOLLOW_UP,
+    DA_TASK_ITERATION,
+    DA_TASK_LOOP_EVENT,
+    LANGFUSE_OBSERVATION_INPUT,
+    LANGFUSE_OBSERVATION_OUTPUT,
+    LANGFUSE_OBSERVATION_TYPE,
+    LANGFUSE_SESSION_ID,
+)
+# Imported as a module, never by name: the run-root fallback installs itself by
+# rebinding ``get_root_span`` on this module, and a name bound at import time
+# would keep calling the unwrapped accessor.
+from openjiuwen.extensions.observability import span_context as shared_span_context
+from openjiuwen.extensions.observability.span_context import (
+    cascade_close_children,
+    clear_tool_span_context,
+    get_current_agent_span,
+    get_current_tool_span,
+    set_current_agent_span,
+)
+from openjiuwen.harness.observability.span_context import current_session_id
+from openjiuwen.harness.rails.base import DeepAgentRail
 
-# Idempotency marker so the rail patch is applied at most once per process.
-_RAIL_TEAM_ATTR_PATCH_ATTR = "openjiuwen_single_agent_attr_patch"
-
-# Private rail method this module rebinds via getattr/setattr.
-_RAIL_STAMP_METHOD = "_stamp_agent_attributes"
-
-# Attribute namespace carried by real team members only.
-_TEAM_ATTR_PREFIX = "agentteam."
-
-# Marker stamped on the ``create_subagent`` wrapper so a second install
-# recognizes its own work and leaves it alone.
-_SUBAGENT_HOOK_MARKER_ATTR = "openjiuwen_observability_hooked"
+_TRACER_NAME = "openjiuwen.harness.observability.rail"
 
 
-def mark_single_agent_team(agent: Any) -> None:
-    """Stamp the synthetic team marker the observability rail keys off.
+@dataclass(frozen=True)
+class AgentSpanDecoration:
+    """Extra attributes another rail contributes to the agent span.
 
-    ``ObservabilityRail.before_invoke`` returns early for an agent with no
-    ``team_name``, and a single-round agent (``enable_task_loop=False``) gets
-    its span from that hook alone — ``before_task_iteration`` never fires. A
-    single agent has no team, so without this marker it produces **no
-    agent-tier span at all**: its llm/tool spans and any sub-agent's
-    ``agent.<type>.invoke`` span both attach straight to the run's root span,
-    which is what flattens a task-tool sub-agent into the agent layer instead
-    of nesting it under the dispatching agent.
+    A contributing rail builds one in its ``before_*`` hook and parks it with
+    :meth:`park`; :class:`AgentObservabilityRail` applies it to the span it
+    opens. The two mirror lists exist because the contributor's namespace often
+    duplicates the generic input/output attributes under its own keys, and the
+    output is only known when the span closes.
 
-    ``team_name`` is a plain attribute on DeepAgent. An agent that already
-    carries one is a real team member and is left alone. Best-effort: tracing
-    setup must never break a run.
-
-    Args:
-        agent: The DeepAgent instance about to run (main agent or sub-agent).
+    Attributes:
+        attributes: Applied verbatim when the span opens.
+        input_attribute_keys: Keys the redacted query is mirrored into.
+        output_attribute_keys: Keys the redacted result is mirrored into at close.
     """
-    if agent is None:
-        return
-    if getattr(agent, "team_name", ""):
-        return
-    try:
-        agent.team_name = SINGLE_AGENT_TEAM_NAME
-    except Exception as exc:
-        logger.debug("[AgentObservability] set team_name on agent failed: %s", exc)
+
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    input_attribute_keys: tuple[str, ...] = ()
+    output_attribute_keys: tuple[str, ...] = ()
+
+    # One ctx.extra key for the pending contribution. Parked per callback
+    # context, so contributions never leak across agents or asyncio tasks.
+    _CTX_KEY = "_otel_agent_span_decoration"
+
+    def park(self, ctx: AgentCallbackContext) -> None:
+        """Offer this contribution to the agent span about to be opened."""
+        ctx.extra[self._CTX_KEY] = self
+
+    @classmethod
+    def collect(cls, ctx: AgentCallbackContext) -> AgentSpanDecoration:
+        """Return the contribution parked on this context, or an empty one."""
+        parked = ctx.extra.get(cls._CTX_KEY)
+        if isinstance(parked, cls):
+            return parked
+        return cls()
 
 
-def apply_single_agent_team_attr_suppression() -> None:
-    """Drop the ``agentteam.*`` block from single-agent spans.
+class AgentSpanScope:
+    """Owns the lifecycle of one open agent span and its nesting decision.
 
-    The marker stamped by :func:`mark_single_agent_team` is a synthetic team,
-    not a real one, so the team identity attributes it drags onto every span
-    are noise. This patches ``ObservabilityRail._stamp_agent_attributes`` to
-    rebind a single-agent span's ``set_attribute`` so any ``agentteam.*`` key
-    (including the inline input/output stamped later on the same span) is
-    discarded; real team members keep the original stamping.
+    Nesting is decided structurally: the current agent span (from the
+    ``_current_agent_span`` ContextVar) is the legitimate parent whenever it is
+    still recording — regardless of which agent it belongs to. No tier enum is
+    consulted. The scope remembers the parent it nested under so ``close`` can
+    restore it as current when the child returns.
 
-    Best-effort and idempotent — a second call recognizes its own patch.
+    The scope does NOT touch the inherited llm/tool stacks on the nested path:
+    those belong to the still-open parent and are closed by the parent's own
+    scope. Cascade-close runs only when this scope is the outermost agent.
+
+    The scope is parked on ``ctx.extra`` for the duration of one span — opened
+    in ``before_task_iteration`` / ``before_invoke`` and retrieved by the
+    matching ``after_*``. ``ctx.extra`` is per-callback-context, so it does not
+    leak across asyncio tasks the way a ContextVar would under
+    iteration/invoke nesting.
     """
-    try:
-        from openjiuwen.agent_teams.observability import rail as team_rail
-        from openjiuwen.extensions.observability.semconv import (
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
-        )
-    except Exception as exc:  # pragma: no cover - observability deps unavailable
-        logger.debug("[AgentObservability] rail patch import failed: %s", exc)
-        return
 
-    rail_cls = team_rail.ObservabilityRail
-    if getattr(rail_cls, _RAIL_TEAM_ATTR_PATCH_ATTR, False):
-        return
+    KIND_ITERATION = "iteration"
+    KIND_INVOKE = "invoke"
 
-    original_stamp = getattr(rail_cls, _RAIL_STAMP_METHOD)
+    # Single ctx.extra key for an open agent span scope. One handle owns both
+    # the iteration path (before_task_iteration) and the single-round invoke
+    # path (before_invoke) — the scope itself records which it is.
+    _CTX_KEY = "_otel_agent_scope"
+
+    def __init__(
+        self,
+        *,
+        span: Span,
+        kind: str,
+        parent_agent_span: Span | None,
+        is_outermost: bool,
+        config: Any,
+        output_attribute_keys: tuple[str, ...] = (),
+    ) -> None:
+        self.span = span
+        self.kind = kind
+        # The agent span that was current when this scope opened — restored
+        # as _current_agent_span on close. None when nested directly under
+        # the run root (no agent-tier parent).
+        self.parent_agent_span = parent_agent_span
+        # True when this scope owns the cascade-close of child llm/tool
+        # spans (iteration path, or an invoke scope with no agent parent).
+        self.is_outermost = is_outermost
+        # ObservabilityConfig captured at open time; None disables redaction
+        # and the close path stores the raw output string.
+        self._config = config
+        # Contributed keys the redacted output is mirrored into at close.
+        self._output_attribute_keys = output_attribute_keys
+
+    @classmethod
+    def current(cls, ctx: AgentCallbackContext) -> AgentSpanScope | None:
+        """Return the scope parked on this callback context, or None."""
+        return ctx.extra.get(cls._CTX_KEY)
+
+    def attach(self, ctx: AgentCallbackContext) -> None:
+        """Park this scope on the callback context for the matching after_*."""
+        ctx.extra[self._CTX_KEY] = self
+
+    @classmethod
+    def detach(cls, ctx: AgentCallbackContext) -> AgentSpanScope | None:
+        """Pop and return the scope parked on this callback context."""
+        return ctx.extra.pop(cls._CTX_KEY, None)
+
+    def close(self, *, output: Any, exception: BaseException | None) -> None:
+        """End this scope's span and restore the parent as current."""
+        span = self.span
+        if not span.is_recording():
+            return
+        if output:
+            output_str = str(output)
+            redacted = redact_completion(output_str, self._config) if self._config else output_str
+            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+            for key in self._output_attribute_keys:
+                span.set_attribute(key, redacted)
+
+        if self.is_outermost:
+            cascade_close_children()
+
+        if exception is not None:
+            span.record_exception(exception)
+            span.set_status(Status(StatusCode.ERROR, str(exception)))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        span.end()
+
+        # Restore the parent agent span (None when there was none) so the
+        # parent's subsequent llm/tool spans resume nesting correctly.
+        set_current_agent_span(self.parent_agent_span)
+        if self.parent_agent_span is not None and self.parent_agent_span.is_recording():
+            parent_ctx = set_span_in_context(self.parent_agent_span, otel_context.get_current())
+            otel_context.attach(parent_ctx)
+
+
+class AgentObservabilityRail(DeepAgentRail):
+    """Create an AGENT span around each task-loop iteration, or around one invoke."""
+
+    priority: int = 10
+
+    def __init__(self, *, tracer: Tracer | None = None) -> None:
+        super().__init__()
+        self._injected_tracer = tracer
+        # The invoke span currently open for this agent, when ``before_invoke``
+        # opened one. A rail instance belongs to a single agent and a DeepAgent
+        # runs one invoke at a time, so this needs no per-context storage —
+        # which is the point: the iteration hook fires in a task that may not
+        # inherit the invoke's ContextVars, and it still has to find this span
+        # to nest under. Without it an agent that gets both hooks emits the
+        # invoke and its iterations as siblings, the invoke empty.
+        self._open_invoke_span: Span | None = None
+
+    def _tracer(self) -> Tracer:
+        if self._injected_tracer is not None:
+            return self._injected_tracer
+        from openjiuwen.extensions.observability.setup import get_tracer
+
+        return get_tracer(_TRACER_NAME)
+
+    @staticmethod
+    def _config() -> Any:
+        """Return the active ObservabilityConfig, or None when tracing is off."""
+        from openjiuwen.extensions.observability.setup import get_config
+
+        return get_config()
+
+    async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        try:
+            inputs = ctx.inputs
+            iteration = int(getattr(inputs, "iteration", 0) or 0)
+            is_follow_up = bool(getattr(inputs, "is_follow_up", False))
+            agent = ctx.agent
+            agent_name = self.resolve_agent_name(agent)
+
+            root_span = shared_span_context.get_root_span()
+            if root_span is None:
+                # No run root — nothing to attach to, and an orphan root span
+                # would start a trace of its own. The host opens the root
+                # (Team: team.{name}; single agent: the run span).
+                logger.debug(
+                    "[AgentObservability] no run root span; skipping agent span for %s",
+                    agent_name,
+                )
+                return
+            if not root_span.is_recording():
+                logger.warning(
+                    "[AgentObservability] run root span already ended: name=%s "
+                    "agent=%s iteration=%s",
+                    getattr(root_span, "name", "<unknown>"),
+                    agent_name,
+                    iteration,
+                )
+                return
+
+            if AgentSpanScope.current(ctx) is not None:
+                old = AgentSpanScope.current(ctx).span
+                logger.warning(
+                    "[AgentObservability] duplicate agent span call, skipped: old=%s",
+                    getattr(old, "name", "<no-name>"),
+                )
+                return
+
+            # An iteration is always the outermost agent scope for its task —
+            # it owns the cascade-close of child llm/tool spans. Before opening,
+            # resolve any leftover agent span in the current context:
+            #   - same agent, still recording → orphan from a previous
+            #     iteration that never closed; drain its children and end it.
+            #   - different agent → stale ContextVar snapshot inherited via
+            #     asyncio.create_task; leave that agent's span alone, just
+            #     clear the inherited llm/tool stacks so this agent starts
+            #     clean and our cascade-close can't touch another agent's spans.
+            self._drain_or_clear_stale(agent_name, root_span)
+
+            label = agent_name or "unknown"
+            # One invoke, N iterations: when this agent also got an invoke span,
+            # the iterations belong under it, not beside it.
+            iteration_parent = root_span
+            if self._open_invoke_span is not None and self._open_invoke_span.is_recording():
+                iteration_parent = self._open_invoke_span
+            parent_ctx = set_span_in_context(iteration_parent, otel_context.get_current())
+            span = self._tracer().start_span(
+                name=f"agent.{label}.task_iteration.{iteration}",
+                context=parent_ctx,
+                kind=SpanKind.INTERNAL,
+            )
+
+            config = self._config()
+            decoration = AgentSpanDecoration.collect(ctx)
+            self._stamp_agent_attributes(span, agent_name=agent_name, decoration=decoration)
+            span.set_attribute(DA_TASK_ITERATION, iteration)
+            span.set_attribute(DA_TASK_IS_FOLLOW_UP, is_follow_up)
+
+            query = getattr(inputs, "query", "") or ""
+            if query:
+                redacted_query = redact_prompt(query, config) if config else str(query)
+                span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_query)
+                for key in decoration.input_attribute_keys:
+                    span.set_attribute(key, redacted_query)
+            loop_event = getattr(inputs, "loop_event", None)
+            if loop_event is not None:
+                span.set_attribute(DA_TASK_LOOP_EVENT, str(loop_event))
+
+            set_current_agent_span(span)
+            agent_ctx = set_span_in_context(span, otel_context.get_current())
+            otel_context.attach(agent_ctx)
+
+            logger.debug(
+                "[AgentObservability] agent span opened: agent.%s.task_iteration.%s "
+                "span_id=%016x trace_id=%032x",
+                label,
+                iteration,
+                span.context.span_id,
+                span.context.trace_id,
+            )
+
+            AgentSpanScope(
+                span=span,
+                kind=AgentSpanScope.KIND_ITERATION,
+                # An iteration never nests under another agent span — it is
+                # the agent tier of its own task. parent_agent_span is None
+                # after drain/clear; recorded only for restore symmetry.
+                parent_agent_span=None,
+                is_outermost=True,
+                config=config,
+                output_attribute_keys=decoration.output_attribute_keys,
+            ).attach(ctx)
+        except Exception as exc:
+            logger.warning("[AgentObservability] before_task_iteration failed: %s", exc)
+
+    async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        try:
+            scope: AgentSpanScope | None = AgentSpanScope.detach(ctx)
+            if scope is None:
+                return
+
+            output = None
+            inputs = getattr(ctx, "inputs", None)
+            if inputs is not None:
+                output = getattr(inputs, "result", None)
+
+            scope.close(output=output, exception=ctx.exception)
+
+            # Iteration close restores current to None (parent_agent_span is
+            # None), leaving the ended agent span as the ambient OTel context.
+            # Re-attach the run root so anything that follows this round —
+            # another rail's work, the host's own spans — still nests correctly
+            # instead of hanging off a span that has ended.
+            root_span = shared_span_context.get_root_span()
+            if root_span is not None and root_span.is_recording():
+                root_ctx = set_span_in_context(root_span, otel_context.get_current())
+                otel_context.attach(root_ctx)
+
+            logger.debug(
+                "[AgentObservability] agent span closed: name=%s has_output=%s",
+                scope.span.name,
+                output is not None,
+            )
+        except Exception as exc:
+            logger.warning("[AgentObservability] after_task_iteration failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Invoke-level fallback (covers single-round agents and sub-agents)
+    # ------------------------------------------------------------------
+    # Sub-agents (plan/code/explore/...) default to enable_task_loop=False, so
+    # they run via _run_single_round_invoke which never fires
+    # BEFORE_TASK_ITERATION / AFTER_TASK_ITERATION. Without these hooks their
+    # LLM/tool spans would fall back to the run root (or be skipped), leaving
+    # the trace without an agent layer.
+    #
+    # before_invoke opens an agent span ONLY for single-round agents
+    # (enable_task_loop=False). The multi-round path gets its iteration span
+    # from before_task_iteration and is skipped here so the two never
+    # double-open.
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        try:
+            if AgentSpanScope.current(ctx) is not None:
+                return
+
+            inputs = ctx.inputs
+            agent = ctx.agent
+
+            # Decide by execution mode, NOT by whether an iteration span is
+            # already open: BEFORE_INVOKE fires BEFORE BEFORE_TASK_ITERATION,
+            # so at this point _current_agent_span is still None on the
+            # multi-round path. A multi-round agent gets an iteration span per
+            # round from before_task_iteration — it must NOT get an invoke
+            # span. Only single-round agents fall through here.
+            deep_config = getattr(agent, "deep_config", None)
+            enable_task_loop = bool(getattr(deep_config, "enable_task_loop", False))
+            if enable_task_loop:
+                return
+
+            agent_name = self.resolve_agent_name(agent) or "unknown"
+
+            root_span = shared_span_context.get_root_span()
+            if root_span is None:
+                # No run root (e.g. a sub-agent invoked outside any run) —
+                # there is no parent span to attach to, so skip rather than
+                # create an orphan root span.
+                return
+            if not root_span.is_recording():
+                return
+
+            # Nesting is decided structurally: the current agent span is the
+            # legitimate parent whenever it is still recording — regardless of
+            # which agent it belongs to. A sub-agent runs as a synchronous
+            # await inside the parent iteration (task_tool) or as an
+            # asyncio.create_task snapshot of it; in both cases nesting under
+            # the still-recording parent yields the correct
+            # root -> iteration -> subagent.invoke -> llm/tool tree. When the
+            # parent has already ended, fall back to the run root.
+            prev = get_current_agent_span()
+            parent_span: Span
+            is_outermost: bool
+            if prev is not None and prev.is_recording():
+                parent_span = prev
+                # Nested under a live agent span — the parent owns cascade-
+                # close. This scope must NOT touch the inherited llm/tool
+                # stacks (they carry the parent's still-open children).
+                is_outermost = False
+            else:
+                parent_span = root_span
+                # No live agent parent — this scope is the outermost agent
+                # tier for its task and owns cascade-close.
+                is_outermost = True
+                if prev is not None:
+                    # Stale (ended) agent span left in the context — drop it
+                    # so the run root becomes the ambient parent.
+                    set_current_agent_span(None)
+
+            # A sub-agent is dispatched *from* a tool call and runs to
+            # completion inside it, so the dispatching tool span — not the
+            # agent span the tool itself hangs off — is its span parent. Only
+            # a tool span opened directly under the parent resolved above
+            # qualifies, which keeps this to the actual dispatch and never
+            # re-parents across a trace or an unrelated branch. The agent tier
+            # is unaffected: ``parent_agent_span`` below still records the
+            # agent span to restore, and ``is_outermost`` still follows it.
+            dispatch_tool_span = get_current_tool_span()
+            otel_parent: Span = parent_span
+            if (
+                dispatch_tool_span is not None
+                and dispatch_tool_span.parent is not None
+                and dispatch_tool_span.parent.span_id == parent_span.context.span_id
+            ):
+                otel_parent = dispatch_tool_span
+
+            parent_ctx = set_span_in_context(otel_parent, otel_context.get_current())
+            span = self._tracer().start_span(
+                name=f"agent.{agent_name}.invoke",
+                context=parent_ctx,
+                kind=SpanKind.INTERNAL,
+            )
+
+            config = self._config()
+            decoration = AgentSpanDecoration.collect(ctx)
+            self._stamp_agent_attributes(span, agent_name=agent_name, decoration=decoration)
+
+            query = getattr(inputs, "query", "") or ""
+            if query:
+                redacted_query = redact_prompt(query, config) if config else str(query)
+                span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_query)
+                for key in decoration.input_attribute_keys:
+                    span.set_attribute(key, redacted_query)
+
+            set_current_agent_span(span)
+            agent_ctx = set_span_in_context(span, otel_context.get_current())
+            otel_context.attach(agent_ctx)
+
+            # parent_agent_span is the live agent span we nested under (so
+            # close can restore it), or None when we fell back to the run root.
+            parent_agent_span = prev if parent_span is prev else None
+            AgentSpanScope(
+                span=span,
+                kind=AgentSpanScope.KIND_INVOKE,
+                parent_agent_span=parent_agent_span,
+                is_outermost=is_outermost,
+                config=config,
+                output_attribute_keys=decoration.output_attribute_keys,
+            ).attach(ctx)
+            # Published for ``before_task_iteration``: an agent that gets both
+            # hooks nests its iterations under this span.
+            self._open_invoke_span = span
+
+            logger.debug(
+                "[AgentObservability] invoke span opened (single-round): agent.%s "
+                "span_id=%016x nested=%s",
+                agent_name,
+                span.context.span_id,
+                parent_agent_span is not None,
+            )
+        except Exception as exc:
+            logger.warning("[AgentObservability] before_invoke failed: %s", exc)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        try:
+            scope: AgentSpanScope | None = AgentSpanScope.detach(ctx)
+            if scope is None or scope.kind != AgentSpanScope.KIND_INVOKE:
+                # before_invoke skipped (multi-round path) — nothing to close.
+                return
+            if scope.span is self._open_invoke_span:
+                self._open_invoke_span = None
+
+            output = None
+            inputs = getattr(ctx, "inputs", None)
+            if inputs is not None:
+                output = getattr(inputs, "result", None)
+
+            scope.close(output=output, exception=ctx.exception)
+
+            logger.debug(
+                "[AgentObservability] invoke span closed: name=%s", scope.span.name
+            )
+        except Exception as exc:
+            logger.warning("[AgentObservability] after_invoke failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _drain_or_clear_stale(self, agent_name: str, root_span: Span) -> None:
+        """Resolve a leftover agent span in the current context before opening a new one.
+
+        Own orphan (same agent, same trace) → drain child llm/tool spans and
+        end it. Anything else → a ContextVar snapshot inherited from another
+        agent's task, or from a concurrent run of the *same* agent in another
+        session: leave that span alone, clear the inherited llm/tool stacks so
+        this round starts clean. Always clears ``_current_agent_span``
+        afterwards.
+
+        The trace check is what keeps overlapping sessions safe. A process
+        serves several runs at once, and the same agent name appears in all of
+        them, so name equality alone would let one session's fresh round end
+        another session's still-open span — its remaining llm/tool spans would
+        then have no parent and its trace would break mid-run.
+
+        Args:
+            agent_name: Name of the agent about to open a span.
+            root_span: Run root this round will attach to; its trace is the one
+                a leftover must belong to before it can be treated as an orphan.
+        """
+        prev = get_current_agent_span()
+        if prev is None or not prev.is_recording():
+            return
+        if prev is self._open_invoke_span:
+            # This agent's own live invoke span, which the iteration is about
+            # to nest under — not a leftover, and ending it here would cut the
+            # request's span short at its first round.
+            return
+        prev_name = prev.attributes.get(DA_AGENT_NAME, "")
+        prev_trace_id = getattr(getattr(prev, "context", None), "trace_id", None)
+        same_run = prev_trace_id == root_span.context.trace_id
+        if prev_name == agent_name and same_run:
+            logger.warning(
+                "[AgentObservability] closing orphan agent span: %s",
+                getattr(prev, "name", "unknown"),
+            )
+            cascade_close_children()
+            prev.end()
+        else:
+            logger.info(
+                "[AgentObservability] clearing stale agent span inherited from %s "
+                "(current agent: %s, same_run=%s)",
+                prev_name,
+                agent_name,
+                same_run,
+            )
+            # Clear the tool span ContextVar so the new agent starts clean.
+            # LLM spans need no equivalent cleanup: ActiveSpanTracker indexes
+            # them by the id of the request that opened them, so an inherited
+            # context can never make this agent resolve another agent's span.
+            clear_tool_span_context()
+        set_current_agent_span(None)
+
+    @staticmethod
+    def resolve_agent_name(agent: Any) -> str:
+        """Return the stable identifier used to name this agent's spans.
+
+        Source priority:
+          1. ``agent.member_name`` — TeamAgent property (spawned teammates),
+             the authoritative member id.
+          2. ``agent.build_context.member_name`` — NativeHarness/DeepAgent
+             exposes the build context whose ``member_name`` was derived
+             from the runtime context. This is the team leader's source: the
+             leader runs as a NativeHarness (no ``member_name`` attribute),
+             and its ``card.name`` carries the display_name, so without
+             this source the leader span would be named after the
+             display_name instead of the member id.
+          3. ``agent.card.name`` — fallback for agents with neither of the
+             above (e.g. sub-agents, whose card.name is the sub-agent type).
+
+        Every source is coerced to ``str``; a non-string value (notably a
+        MagicMock in tests, or a display_name leaked into card.name) is
+        rejected so the fallback chain continues instead of producing an
+        unusable span name.
+        """
+        ctx_src = getattr(agent, "member_name", None)
+        if not isinstance(ctx_src, str) or not ctx_src:
+            build_ctx = getattr(agent, "build_context", None)
+            ctx_src = getattr(build_ctx, "member_name", None) if build_ctx else None
+        if isinstance(ctx_src, str) and ctx_src:
+            return ctx_src
+        card_src = getattr(getattr(agent, "card", None), "name", None)
+        if isinstance(card_src, str) and card_src:
+            return card_src
+        return ""
 
     @staticmethod
     def _stamp_agent_attributes(
-        span: Any,
+        span: Span,
         *,
-        agent: Any,
-        member_name: str,
-        team_name: str,
-        session_id: str,
-        is_leader: bool,
+        agent_name: str,
+        decoration: AgentSpanDecoration,
     ) -> None:
-        """Stamp agent attributes, minus the team block for a single agent."""
-        if team_name != SINGLE_AGENT_TEAM_NAME:
-            original_stamp(
-                span,
-                agent=agent,
-                member_name=member_name,
-                team_name=team_name,
-                session_id=session_id,
-                is_leader=is_leader,
-            )
-            return
-
-        # Rebind this span's set_attribute to drop agentteam.* keys. The rail's
-        # later inline input/output stamps hit the same span, so they are
-        # caught too.
-        try:
-            original_set_attribute = span.set_attribute
-
-            def _filter_attribute(key: Any, value: Any) -> None:
-                """Forward every attribute except the team-only namespace."""
-                if isinstance(key, str) and key.startswith(_TEAM_ATTR_PREFIX):
-                    return
-                original_set_attribute(key, value)
-
-            span.set_attribute = _filter_attribute  # type: ignore[method-assign]
-        except Exception as exc:
-            logger.debug("[AgentObservability] set_attribute rebind failed: %s", exc)
-            original_stamp(
-                span,
-                agent=agent,
-                member_name=member_name,
-                team_name=team_name,
-                session_id=session_id,
-                is_leader=is_leader,
-            )
-            return
-
-        # Keep the two non-agentteam attrs; everything else the original would
-        # set is agentteam.* and gets dropped by the filter above.
+        """Apply the attributes shared by iteration and invoke spans."""
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
+        if agent_name:
+            span.set_attribute(DA_AGENT_NAME, agent_name)
+        session_id = current_session_id()
         if session_id:
             span.set_attribute(LANGFUSE_SESSION_ID, session_id)
+        for key, value in decoration.attributes.items():
+            span.set_attribute(key, value)
 
-    setattr(rail_cls, _RAIL_STAMP_METHOD, _stamp_agent_attributes)
-    setattr(rail_cls, _RAIL_TEAM_ATTR_PATCH_ATTR, True)
 
+def maybe_agent_observability_rail() -> AgentObservabilityRail | None:
+    """Return an ``AgentObservabilityRail`` when observability is on, else None.
 
-def attach_subagent_observability(subagent: Any) -> None:
-    """Give *subagent* its own agent-tier span for the run that dispatches it.
-
-    Without a rail of its own a sub-agent produces no ``agent.<type>.invoke``
-    span, so its llm/tool spans attach to the **dispatching** agent's span —
-    the sub-agent's whole run then reads as if the parent had made those calls,
-    with nothing under the ``task_tool`` span it actually ran inside.
-
-    Attaching at build time is unreliable: the parent agent is constructed
-    once, typically before observability is initialized, so
-    ``maybe_observability_rail()`` would return None. By dispatch time
-    observability is up, and ``add_rail`` still lands before the sub-agent's
-    first ``_ensure_initialized()`` registers its hooks.
-
-    Idempotent, and a no-op when observability is off or *subagent* lacks the
-    DeepAgent rail API. Best-effort: tracing must never break a run.
-
-    Args:
-        subagent: The freshly created sub-agent DeepAgent.
+    Single source of truth for the "is observability initialized → build one
+    rail" guard shared by every mount point (manifest providers, the sub-agent
+    dispatch hook, platform adapters), so all of them stay safe unconditional
+    additions.
     """
-    if subagent is None:
-        return
-    try:
-        from openjiuwen.agent_teams.observability.rail import (
-            ObservabilityRail,
-            maybe_observability_rail,
-        )
+    from openjiuwen.extensions.observability.setup import is_initialized
 
-        rail = maybe_observability_rail()
-        if rail is None:
-            return  # observability not initialized -> nothing to trace
-        configured = subagent.configured_rails() if hasattr(subagent, "configured_rails") else []
-        if any(isinstance(item, ObservabilityRail) for item in configured):
-            return  # already attached — never add a second one
-        if hasattr(subagent, "add_rail"):
-            subagent.add_rail(rail)
-    except Exception as exc:
-        logger.debug("[AgentObservability] attach subagent rail failed: %s", exc)
-
-    # A sub-agent carries no team of its own, so it needs the same synthetic
-    # marker as the agent that dispatched it — both for the rail's agent-tier
-    # attributes and for the single-agent attribute suppression to key off.
-    mark_single_agent_team(subagent)
-
-
-def install_subagent_observability_hook() -> None:
-    """Trace every sub-agent, whichever tool dispatched it.
-
-    ``DeepAgent.create_subagent`` is the one point all dispatch paths share —
-    the SDK's builtin ``task_tool``, a platform's custom agent tool, and
-    background sub-agents. Wrapping it there is what makes tracing independent
-    of the dispatcher; hooking a single tool covers only that tool.
-
-    Idempotent — a second call sees the wrapper already installed. Best-effort:
-    never raises, and a failure only costs sub-agent spans.
-    """
-    try:
-        from openjiuwen.harness.deep_agent import DeepAgent
-    except Exception as exc:  # pragma: no cover - import cycle guard
-        logger.debug("[AgentObservability] subagent hook install skipped: %s", exc)
-        return
-
-    original = getattr(DeepAgent, "create_subagent", None)
-    if original is None or getattr(original, _SUBAGENT_HOOK_MARKER_ATTR, False):
-        return
-
-    def create_subagent_with_observability(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        """Create the sub-agent, then give it its own observability rail."""
-        subagent = original(self, *args, **kwargs)
-        attach_subagent_observability(subagent)
-        return subagent
-
-    setattr(create_subagent_with_observability, _SUBAGENT_HOOK_MARKER_ATTR, True)
-    DeepAgent.create_subagent = create_subagent_with_observability
+    if not is_initialized():
+        return None
+    return AgentObservabilityRail()
 
 
 __all__ = [
-    "apply_single_agent_team_attr_suppression",
-    "attach_subagent_observability",
-    "install_subagent_observability_hook",
-    "mark_single_agent_team",
+    "AgentObservabilityRail",
+    "AgentSpanDecoration",
+    "AgentSpanScope",
+    "maybe_agent_observability_rail",
 ]

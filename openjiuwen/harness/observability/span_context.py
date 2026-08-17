@@ -94,7 +94,7 @@ def resolve_run_root_span() -> Any:
     rather than a guess: attaching one run's spans to another run's trace is
     worse than the span being missing.
     """
-    session_id = _current_session_id()
+    session_id = current_session_id()
 
     span = _ROOT_SPANS.get(session_id)
     if _is_recording(span):
@@ -106,15 +106,27 @@ def resolve_run_root_span() -> Any:
     return None
 
 
-def _current_session_id() -> str:
-    """Read the ambient session id, tolerating a runtime that sets none."""
+def current_session_id() -> str:
+    """Read the ambient session id, tolerating a runtime that sets none.
+
+    Two sources, because no single one covers every runtime: a Team run binds
+    the session on its own ContextVar around agent execution, while a
+    single-agent run publishes it to the shared observability state when it
+    opens the run root. Whichever is set answers; neither being set is normal
+    (an agent invoked outside any host-managed session).
+    """
     try:
         from openjiuwen.agent_teams.context import get_session_id
 
-        return get_session_id() or ""
+        session_id = get_session_id() or ""
+        if session_id:
+            return session_id
     except Exception as exc:
-        logger.debug("[AgentObservability] session id lookup failed: %s", exc)
-        return ""
+        logger.debug("[AgentObservability] team session id lookup failed: %s", exc)
+
+    from openjiuwen.extensions.observability.span_context import get_current_session_id
+
+    return get_current_session_id() or ""
 
 
 def install_root_span_fallback() -> None:
@@ -158,6 +170,7 @@ def install_root_span_fallback() -> None:
 
 __all__ = [
     "ROOT_SPAN_FALLBACK_ATTR",
+    "current_session_id",
     "install_root_span_fallback",
     "register_run_root_span",
     "reset_run_root_spans",

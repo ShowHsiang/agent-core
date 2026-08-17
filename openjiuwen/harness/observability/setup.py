@@ -36,9 +36,6 @@ from openjiuwen.extensions.observability.setup import (
     shutdown_observability as shutdown_shared_observability,
 )
 from openjiuwen.extensions.observability.span_context import reset_state
-from openjiuwen.harness.observability.rail import (
-    apply_single_agent_team_attr_suppression,
-)
 from openjiuwen.harness.observability.span_context import (
     install_root_span_fallback,
     reset_run_root_spans,
@@ -64,7 +61,6 @@ def _init_agent_runtime(
         additional_span_processors=additional_span_processors,
     )
     install_root_span_fallback()
-    apply_single_agent_team_attr_suppression()
 
 
 def _shutdown_agent_runtime() -> None:

@@ -117,7 +117,7 @@ def stamp_run_output(handle: Any, output: str) -> None:
     """Write the run's final answer onto the root span as the trace output.
 
     Team mode fills the equivalent attribute on its ``team.<name>`` span from
-    the leader's iteration result (``ObservabilityRail.after_task_iteration``),
+    the leader's iteration result (``TeamObservabilityRail.after_task_iteration``),
     which keys off ``TeamRole.LEADER`` and therefore never fires for a single
     agent — leaving the trace with an empty top-level output. The single-agent
     counterpart is the run's final answer, stamped here.
