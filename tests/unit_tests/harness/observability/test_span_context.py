@@ -50,7 +50,7 @@ def test_run_is_resolved_by_session_id_when_available(monkeypatch) -> None:
     mine = _root_span("mine")
     agent_span_context.register_run_root_span(_root_span("other"), session_id="sess-A")
     agent_span_context.register_run_root_span(mine, session_id="sess-B")
-    monkeypatch.setattr(agent_span_context, "_current_session_id", lambda: "sess-B")
+    monkeypatch.setattr(agent_span_context, "current_session_id", lambda: "sess-B")
     try:
         assert agent_span_context.resolve_run_root_span() is mine
     finally:

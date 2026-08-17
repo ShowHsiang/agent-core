@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import MagicMock
 
@@ -26,13 +27,15 @@ from opentelemetry.trace import SpanKind
 
 from openjiuwen.agent_teams.observability import (
     ObservabilityConfig,
-    ObservabilityRail,
+    TeamObservabilityRail,
     init_observability,
     shutdown_observability,
 )
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
+    AT_AGENT_OUTPUT,
     AT_MEMBER_NAME,
     AT_PLAN_APPROVED,
     AT_TASK_STATUS,
@@ -128,6 +131,38 @@ def in_memory_exporter() -> Iterator[InMemorySpanExporter]:
     )
     yield exporter
     shutdown_observability()
+
+
+
+class _TeamRails:
+    """The two rails a team member mounts, fired in their production order.
+
+    Team tracing is a pair: ``TeamObservabilityRail`` contributes the
+    ``agentteam.*`` block (higher priority, so it runs first and the
+    contribution is parked before the span exists) and
+    ``AgentObservabilityRail`` owns the agent span itself. Tests drive the
+    hooks directly, so they need the same ordering the callback framework
+    would apply.
+    """
+
+    def __init__(self) -> None:
+        self.team = TeamObservabilityRail()
+        self.agent = AgentObservabilityRail()
+
+    async def before_task_iteration(self, ctx: Any) -> None:
+        await self.team.before_task_iteration(ctx)
+        await self.agent.before_task_iteration(ctx)
+
+    async def after_task_iteration(self, ctx: Any) -> None:
+        await self.team.after_task_iteration(ctx)
+        await self.agent.after_task_iteration(ctx)
+
+    async def before_invoke(self, ctx: Any) -> None:
+        await self.team.before_invoke(ctx)
+        await self.agent.before_invoke(ctx)
+
+    async def after_invoke(self, ctx: Any) -> None:
+        await self.agent.after_invoke(ctx)
 
 
 def _spans_by_name(exporter: InMemorySpanExporter, name: str) -> list[Any]:
@@ -522,7 +557,7 @@ async def test_tool_call_nests_under_agent_span(
     mock_card.name = "leader"
     mock_agent.card = mock_card
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -610,7 +645,7 @@ async def test_child_spans_inherit_member_name_from_agent_span(
     )
 
     mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -688,7 +723,7 @@ async def test_reasoning_span_inherits_member_name_from_agent_span(
     )
 
     mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="think step by step", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1174,7 +1209,7 @@ async def test_observability_rail_opens_and_closes_iteration_span(
 
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=3, loop_event=None, is_follow_up=True)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
 
@@ -1223,7 +1258,7 @@ async def test_observability_rail_marks_error_on_exception(
 
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     ctx.exception = ValueError("kaboom")
@@ -1426,7 +1461,7 @@ async def test_team_span_survives_after_rail_iteration(
     # Step 2: Rail creates and closes agent span (iteration 1)
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="hello", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1492,7 +1527,7 @@ async def test_two_runs_produce_two_separate_traces(
     # Rail iteration
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="run 1 query", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1643,7 +1678,7 @@ async def test_span_tree_shape(
     # Step 2: Rail creates agent span (iteration 1)
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1815,7 +1850,7 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     session = MagicMock()
     session.get_session_id.return_value = "test_session"
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
 
     # --- Iteration 1: system + 3 user messages ---
     inputs1 = TaskIterationInputs(iteration=1, query="iter1", loop_event=None)
@@ -1932,7 +1967,7 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
     session = MagicMock()
     session.get_session_id.return_value = "test_session"
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="big", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -2315,7 +2350,7 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     set_current_agent_span(leader_span)
 
     # Simulate ObservabilityRail.before_invoke for a subagent (enable_task_loop=False).
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
         agent=type("A", (), {
@@ -2481,7 +2516,7 @@ async def test_subagent_invoke_nests_under_the_dispatching_tool_span(
         inputs={"subagent_type": "explore_agent"},
     )
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
         agent=type("A", (), {
@@ -2539,7 +2574,7 @@ async def test_subagent_without_team_name_still_gets_an_agent_span(
     )
     set_current_agent_span(agent_span)
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
         agent=type("A", (), {
@@ -2597,7 +2632,7 @@ async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
             exception=None,
         )
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     invoke_ctx, iter_ctx = _ctx(), _ctx()
     await rail.before_invoke(invoke_ctx)
     await rail.before_task_iteration(iter_ctx)
@@ -2740,3 +2775,129 @@ async def test_non_streaming_reasoning_span_sits_at_the_call_start(
     assert _attr(reasoning, "gen_ai.reasoning.duration_ms") is None
     assert _attr(reasoning, "gen_ai.reasoning.timing") == "unmeasured: non-streaming call"
     assert _attr(reasoning, "langfuse.observation.output") == "Six times seven."
+
+
+# ---------------------------------------------------------------------------
+# rail split: agent tier vs team contribution
+# ---------------------------------------------------------------------------
+
+
+def test_team_rail_runs_before_the_agent_rail():
+    """The contribution must be parked before the span it decorates exists.
+
+    Higher priority runs first in every hook chain, so this ordering is what
+    makes the ctx.extra handoff work in the before hooks — and it is the whole
+    reason the team layer needs no subclass of the agent rail.
+    """
+    assert TeamObservabilityRail.priority > AgentObservabilityRail.priority
+
+
+@pytest.mark.asyncio
+async def test_agent_rail_alone_produces_a_span_with_no_team_identity(in_memory_exporter):
+    """The agent tier is team-agnostic — ``agentteam.*`` comes from the team rail."""
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    mock_agent = MagicMock()
+    mock_agent.team_name = "test_team"
+    mock_agent.member_name = "leader"
+
+    rail = AgentObservabilityRail()
+    ctx = AgentCallbackContext(
+        agent=mock_agent,
+        inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+    )
+    await rail.before_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
+
+    spans = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")
+    assert len(spans) == 1
+    assert not [key for key in spans[0].attributes if key.startswith("agentteam.")]
+
+
+@pytest.mark.asyncio
+async def test_the_pair_puts_the_team_identity_back_on_the_same_span(in_memory_exporter):
+    """Mounted together, the team block lands on the agent rail's span."""
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    mock_agent = MagicMock()
+    mock_agent.team_name = "test_team"
+    mock_agent.member_name = "leader"
+
+    rails = _TeamRails()
+    ctx = AgentCallbackContext(
+        agent=mock_agent,
+        inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+    )
+    await rails.before_task_iteration(ctx)
+    ctx.inputs.result = "done"
+    await rails.after_task_iteration(ctx)
+
+    span = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")[0]
+    assert span.attributes[AT_AGENT_ID] == "test_team_leader"
+    assert span.attributes[AT_MEMBER_NAME] == "leader"
+    assert span.attributes[LANGFUSE_OBSERVATION_INPUT] == "hello"
+    assert span.attributes[AT_AGENT_OUTPUT] == "done"
+
+
+def test_both_rails_are_reachable_through_their_declared_element_names(in_memory_exporter):
+    """The mount wiring is what makes the split invisible to a team member.
+
+    ``core.observability`` is a harness builtin (the agent span) and
+    ``core.team.observability`` is the team contribution; the configurator
+    mounts the pair, so a member spec resolving only one of them would silently
+    lose either its agent spans or its team identity.
+    """
+    from openjiuwen.agent_teams.rails.registration import (
+        ensure_harness_elements_registered,
+    )
+    from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+    ensure_harness_elements_registered()
+
+    agent_rail = RailSpec(type="core.observability").build(language="en")
+    team_rail = RailSpec(type="core.team.observability").build(language="en")
+
+    assert isinstance(agent_rail, AgentObservabilityRail)
+    assert isinstance(team_rail, TeamObservabilityRail)
+
+
+def test_neither_rail_is_built_while_observability_is_off():
+    """Both providers are safe unconditional additions to any spec."""
+    from openjiuwen.agent_teams.rails.registration import (
+        ensure_harness_elements_registered,
+    )
+    from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+    ensure_harness_elements_registered()
+
+    assert RailSpec(type="core.observability").build(language="en") is None
+    assert RailSpec(type="core.team.observability").build(language="en") is None
+
+
+def test_a_subagent_spec_gets_the_agent_rail_only(in_memory_exporter):
+    """A sub-agent is dispatched work, not a member — no team identity on it.
+
+    Its ``agentteam.member.name`` would be the sub-agent *type*, asserting a
+    membership it does not have. Team attribution stays structural: the
+    sub-agent span nests under the dispatching member's span.
+    """
+    from openjiuwen.agent_teams.rails.subagent_elements import (
+        _attach_observability_rail,
+    )
+
+    spec = SimpleNamespace(rails=[])
+    _attach_observability_rail(spec)
+
+    assert [type(rail) for rail in spec.rails] == [AgentObservabilityRail]
+
+    # Idempotent: wrapping the same spec twice must not stack rails.
+    _attach_observability_rail(spec)
+    assert len(spec.rails) == 1
