@@ -52,7 +52,7 @@ agent_teams/
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
-├── observability/       # 团队 OpenTelemetry 观测；Codex 专用桥接 / OTLP 接收 / rollout trace 集中在 codex/ 子包。单 agent 的对称实现在 `harness/observability/`，两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider）
+├── observability/       # 团队 OpenTelemetry 观测；Codex 专用桥接 / OTLP 接收 / rollout trace 集中在 codex/ 子包。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider）
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
@@ -97,7 +97,7 @@ customizer 后处理）。
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
 | `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
 | `team_skill_use_rail.py` | `TeamSkillUseRail(SkillUseRail)` + `create_team_skill_use_rail`：Skill 实体唯一存放于 `paths.global_skills_dir()`，成员/团队各自只有一份 `skills-visibility.json`。**只覆写两个方法**——`_filter_skills`（先按声明重算 allow/deny 再调 `super()`）与 `_build_skills_snapshot_signature`（把合成后的授权本身并进签名，否则授权变了库里没动、提示词不刷新），另加 `get_skills_for_session` 复查（session 基线是持久化状态）。**单 agent 的 `harness/rails/skills/skill_use_rail.py` 一字未改**：team 行为靠继承 + `agent_configurator` 把 `skills=[]`/`enable_skill_discovery=False` 写进 `build_spec` 关掉通用 rail。见 F_79 |
-| `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`core.team.tool`/`core.team.policy`/`core.team.workspace`/`core.team.tool_approval`/`core.team.plan_mode`/`core.team.reliability`/`core.team.skill_use`）+ `core.observability`。**没有 `core.team.permission`**——`TeamPermissionRail` 由平台（jiuwenswarm）自己挂，`enable_permissions=True` 时替代 `TeamToolApprovalRail`，agent_teams 下不声明它 |
+| `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`core.team.tool`/`core.team.policy`/`core.team.workspace`/`core.team.tool_approval`/`core.team.plan_mode`/`core.team.reliability`/`core.team.skill_use`/`core.team.observability`）。agent span 的 `core.observability` 是 harness 内置，不在这里声明。**没有 `core.team.permission`**——`TeamPermissionRail` 由平台（jiuwenswarm）自己挂，`enable_permissions=True` 时替代 `TeamToolApprovalRail`，agent_teams 下不声明它 |
 | `team_context.py` | `TeamHandleKey` + accessor + `inject_team_handles`：team live handle 经 `BuildContext.extras` 的 key 常量 + 类型化读取。rail 不缓存——需跨重建存活的状态（如 `reliability_components`）作为复用对象注入，由每轮新建的 rail 包装 |
 | `builtin_elements.py` | openjiuwen 内置 `core.*` rail/tool（`core.task_planning`/`core.skill_use`/`core.web_search` 等）名字常量的**薄再导出**——声明的真身已上移到 `harness/manifest/builtin_elements.py`，本文件只为保持既有 import 路径（对象 `is`-一致） |
 | `registration.py` | `ensure_harness_elements_registered()`：import elements → `register_from_catalog()`，spec build 路径的统一注册入口 |

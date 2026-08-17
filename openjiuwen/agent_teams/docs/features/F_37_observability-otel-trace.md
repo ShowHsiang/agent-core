@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-07-23 |
-| 范围 | `openjiuwen/agent_teams/observability/` |
+| 范围 | `openjiuwen/agent_teams/observability/` + `openjiuwen/harness/observability/`（agent 层 span 的归属层） |
 | Refs | #1013 |
 
 ## 设计目标
@@ -65,7 +65,9 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 
 | 类 | 解决什么问题 |
 |----|-------------|
-| `ObservabilityRail` | agent span 的创建和关闭。`before_task_iteration` 创建 agent span，`after_task_iteration` 关闭并清理其下所有子 span |
+| `AgentObservabilityRail`（harness） | agent span 的创建和关闭，与 team 无关：`before_task_iteration` 创建 agent span，`after_task_iteration` 关闭并清理其下所有子 span。单 agent / team 成员 / subagent 用的是同一个实现 |
+| `TeamObservabilityRail`（agent_teams） | team 专有增量：把 `agentteam.*` 身份块作为 `AgentSpanDecoration` 停放到回调上下文，由 agent rail 在开 span 时套用；leader 轮次结果打到 team root span 上。**不继承 agent rail，也不重开 span** |
+| `AgentSpanDecoration` | 两个 rail 之间的交接契约：`attributes` 开 span 时套用，`input/output_attribute_keys` 指定把脱敏后的 query/result 再镜像到哪些键。停放在 `ctx.extra`（同一 hook 链与同一轮 before/after 共享同一个 ctx），因此不需要用 ContextVar 猜 span 归属 |
 | `AgentSpanScope` | agent span 的生命周期封装。`close()` 时统一做四件事：设 output → 清子 span → `span.end()` → 恢复父 agent span |
 | `OtelCallbackHandler` | LLM 和 tool span 的创建和关闭。响应回调框架的 LLM/Tool 事件，开/关对应的 OTel span |
 | `LlmSpanState` | LLM span 的运行时状态（启动时间、是否流式、首个 chunk 到达时间）。附着在 OTel Span 对象上，不受 asyncio task 切换影响 |
@@ -73,9 +75,10 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 
 ## 核心流程
 
-`ObservabilityRail` 和 `OtelCallbackHandler` 通过两套回调独立工作，二者共享 OTel Span 对象。
+agent rail 和 `OtelCallbackHandler` 通过两套回调独立工作，二者共享 OTel Span 对象。
 
-1. **agent span 打开**：`ObservabilityRail.before_task_iteration` 创建 agent span，存入 ContextVar
+0. **team 增量停放**：`TeamObservabilityRail.before_task_iteration`（priority 12，先跑）把 `agentteam.*` 停放到 `ctx.extra`
+1. **agent span 打开**：`AgentObservabilityRail.before_task_iteration`（priority 10）创建 agent span，套用停放的增量，存入 ContextVar
 2. **llm span 打开**：LLM 回调触发 → 创建 llm.call span，挂在当前 agent span 下。同时创建 `LlmSpanState` 附着在 span 上记录计时信息
 3. **流式 chunk**：每次 chunk 回调 → 在 trace 内按 parent span_id 查找当前 llm span → 记录事件和 timing
 4. **llm span 关闭**：LLM 结束回调 → 查找 span → 设 completion、usage 等属性 → `span.end()`
@@ -102,7 +105,8 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 |------|---------|------|
 | `__init__.py` | `init_observability(config)` | 启动 TracerProvider + 注册全部回调 |
 | | `shutdown_observability()` | 注销回调 + flush 残留 span + 关闭 TracerProvider |
-| | `ObservabilityRail` | DeepAgent rail，创建 agent 层 span |
+| | `TeamObservabilityRail` | DeepAgent rail，给 agent span 补 team 身份 |
+| | `maybe_observability_rails()` | team 成员要挂的两个 rail（team 增量 + harness agent span），挂载点只认这一个入口 |
 | | `ObservabilityConfig` | 配置：exporter、端点、采样率、脱敏、attribute 上限等 |
 | | `attach_to_team_agent(agent)` | 在 TeamAgent 上注册 team 事件监听 |
 | | `finalize_team_trace(team_name)` | Runner 结束时按 team 关 trace |
@@ -116,7 +120,7 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 
 | 层级 | 触发点 | 管理对象 |
 |------|--------|----------|
-| **Agent span 关闭** | `ObservabilityRail.after_task_iteration` / `after_invoke` | Agent span + 关闭其下所有子 LLM/tool span |
+| **Agent span 关闭** | `AgentObservabilityRail.after_task_iteration` / `after_invoke` | Agent span + 关闭其下所有子 LLM/tool span |
 | **Team span 关闭** | `Runner._maybe_finalize_trace()` (finally) | Team span + task span + `ActiveSpanTracker` 按 `trace_id` flush |
 
 具体生命周期：
@@ -124,8 +128,8 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 | Span 类型 | 创建 | 正常关闭 | 异常关闭 |
 |-----------|------|----------|----------|
 | Team | `Runner._maybe_attach_observability()` | `finalize_trace()` (finally) | `ActiveSpanTracker` (shutdown) |
-| Agent（iteration） | `ObservabilityRail.before_task_iteration` | `ObservabilityRail.after_task_iteration` → `AgentSpanScope.close()` | `AgentSpanScope.close()` + `ActiveSpanTracker` |
-| Agent（invoke，单轮 subagent） | `ObservabilityRail.before_invoke` | `ObservabilityRail.after_invoke` → `AgentSpanScope.close()` | 父 agent span 关闭时清理 |
+| Agent（iteration） | `AgentObservabilityRail.before_task_iteration` | `AgentObservabilityRail.after_task_iteration` → `AgentSpanScope.close()` | `AgentSpanScope.close()` + `ActiveSpanTracker` |
+| Agent（invoke，单轮 subagent） | `AgentObservabilityRail.before_invoke` | `AgentObservabilityRail.after_invoke` → `AgentSpanScope.close()` | 父 agent span 关闭时清理 |
 | LLM | LLM invoke 回调 | `OtelCallbackHandler.on_llm_output()` / `on_llm_invoke_output()` | agent span 关闭时按 parent span_id 清理 + trace 级 flush |
 | Tool | `OtelCallbackHandler.on_tool_call_started()` | `OtelCallbackHandler.on_tool_call_finished()` / `on_tool_call_error()` | agent span 关闭时清理 |
 | Task | `monitor_handler._open_task_span()` | `monitor_handler._close_task_span()` | `monitor_handler.close_team_spans()` / `close_all_spans()` |
@@ -135,7 +139,8 @@ agent span 关闭时，同时关闭其下所有未完成的子 span（tool span 
 关键设计决策：
 - **monitor_handler 不关闭 team span**（同前）。
 - **`AgentSpanScope` 管 agent span 完整生命周期**：`before_*` 构造 scope 存入 `ctx.extra`，`close()` 统一设 output+status+cascade+end+恢复父 current。`is_outermost` 控制是否级联排空：iteration 或独立 invoke 做，嵌套 subagent 不做（父 scope 负责）。
-- **Subagent 覆盖**：`subagent_elements.py` 在 team 侧 subagent 工厂注入 ObservabilityRail。`before_invoke` 通过 `enable_task_loop` 区分多轮 member（跳过）和单轮 subagent（开 invoke span）。nesting 判据为结构性 `current_agent_span.is_recording()`——不依赖枚举或 member_name。
+- **agent 层与 team 层分成两个独立 rail，不用继承**：agent span 的开关、嵌套判据、孤儿排空对单 agent 和 team 成员完全一致，之前只有一份实现放在 team 包里，单 agent 复用它要靠猴补丁抹掉 `agentteam.*` 并伪造一个合成 team_name。现在 agent 层归 `harness/observability/rail.py`，team 层只提供 `AgentSpanDecoration`。可行的前提是 priority（高者先跑，`after_*` 同序）加上 before/after 共享同一个 `ctx`：team rail priority 12 先停放增量，agent rail priority 10 开 span 时套用；输出镜像键随 scope 走到 `close()`，所以 team 不需要在 span 关掉后再补属性。挂载由 `core.observability`（harness 内置）+ `core.team.observability` 成对声明。
+- **Subagent 覆盖**：`subagent_elements.py` 在 team 侧 subagent 工厂只注入 agent rail，**不注入 team rail**——subagent 是被派发的工作而不是 member，没有 member id / role / 信箱，给它的 span 挂 `agentteam.*` 等于声称一个它没有的身份（member name 会变成 subagent 类型名）。归属靠结构：subagent span 嵌在派发它的 member span 下，team 身份在父级。`before_invoke` 通过 `enable_task_loop` 区分多轮 member（跳过）和单轮 subagent（开 invoke span）。nesting 判据为结构性 `current_agent_span.is_recording()`——不依赖枚举或 member_name。
 - **无有效 parent 时不创建 LLM/tool span**：`_get_parent_context_for_llm_tool()` 在无有效父 span 时返回 `None`，调用方跳过 span 创建，杜绝孤立 span。
 - **Team span output 双路径**：`on_agent_invoke_output`（正常）+ `after_task_iteration`（leader 兜底）。
 - **事件 span 的 input/output 按语义拆分**（`_event_span_io`）：task 事件 input={task_id}/output=结果；plan_request input=完整 payload/output={plan_id,status}；plan_response input={plan_id}/output={approved,feedback}；member.status_changed input={old_status}/output={new_status}；message 只放路由信息；generic/通知类 payload→input 只放一次不重复。
