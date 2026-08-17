@@ -1072,27 +1072,41 @@ class TeamAgent(BaseAgent):
     async def _reconcile_member_startup(self) -> None:
         """Start members the board has work for but nobody ever launched.
 
-        Runs on the leader's round-idle edge: whatever the round intended is
-        now fully expressed, so a roster still parked at UNSTARTED while the
-        board holds open work is a gap the code closes rather than one the
-        model has to notice. Registration and startup are deliberately
-        separate (``spawn_teammate`` only writes a DB row), which leaves
-        exactly this window open when nothing on the round happened to walk
-        the startup funnel.
+        The backstop behind the task-creation path's own auto-start, running
+        on the leader's round-idle edge: whatever this round intended is now
+        fully expressed, so a roster still parked at UNSTARTED while the board
+        holds open work is a gap the code closes rather than one the model has
+        to notice. Registration and startup are deliberately separate
+        (``spawn_teammate`` only writes a DB row), which leaves exactly this
+        window open when nothing on the round happened to walk the startup
+        funnel.
 
         Leader-only: nobody else owns a roster. The board is probed first
         because a team with no open task has nothing to be started *for* —
         a leader may well register members ahead of the work. That probe is
-        one aggregate COUNT, and ``auto_start_all`` is a no-op once the
+        one aggregate COUNT, and ``autostart_unstarted`` is a no-op once the
         UNSTARTED set is empty, so a settled team pays almost nothing per
         round. Best-effort throughout: this runs on a teardown-adjacent edge,
         and a failure here must not stop the completion poll behind it.
         """
         if self.role != TeamRole.LEADER:
             return
-        if await self.is_task_board_settled():
+        backend = self.team_backend
+        if backend is None:
             return
-        started = await self.auto_start_all()
+        try:
+            _, non_terminal = await backend.db.task.count_tasks_terminality(backend.team_name)
+            if non_terminal == 0:
+                return
+            started = await backend.autostart_unstarted()
+        except Exception as e:
+            team_logger.error(
+                "[{}] round-idle member startup reconcile failed: {}",
+                self._member_name() or "?",
+                e,
+                exc_info=True,
+            )
+            return
         if started:
             team_logger.info(
                 "[{}] round-idle reconcile started members: {}",

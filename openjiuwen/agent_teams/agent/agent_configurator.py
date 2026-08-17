@@ -778,7 +778,6 @@ class AgentConfigurator:
             workspace_manager=self.workspace_manager,
             model_allocator=self.model_allocator,
             messager=self.messager,
-            on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
@@ -990,6 +989,7 @@ class AgentConfigurator:
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
+            on_member_started=self._on_teammate_created,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 

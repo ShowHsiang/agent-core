@@ -43,7 +43,6 @@ from openjiuwen.harness.manifest.builtin_elements import (
 from openjiuwen.agent_teams.rails.team_context import (
     get_messager,
     get_model_allocator,
-    get_on_teammate_created,
     get_reliability_components,
     get_swarmflow_budget,
     get_swarmflow_concurrency_governor,
@@ -119,7 +118,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         lifecycle=inp.lifecycle,
         team_mode=inp.team_mode,
         language=inp.language,
-        on_teammate_created=get_on_teammate_created(context),
         model_config_allocator=model_config_allocator,
         exclude_tools=set(inp.exclude_tools) or None,
         workspace_manager=get_workspace_manager(context),

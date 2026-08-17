@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-08-15 |
+| 最近一次修订日期 | 2026-08-17 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md |
 
 ## 范围 / 边界
@@ -150,7 +150,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     用 `updated_at is not None` 守卫 `exclude_none` 剔除的情况）。
 15. **Card / Config 分层**：`ToolCard` 只承载可序列化的 `id` / `name` /
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
-    `on_teammate_created` 这类运行时句柄属于工具实例的私有字段，禁止下沉
+    `agent_team` 这类运行时句柄属于工具实例的私有字段，禁止下沉
     到 `ToolCard`。
 16. **一成员一活跃任务，改派不取消成员**：一个成员同一时刻至多持有一个**活跃**任务。
     "活跃" = `{PLANNING, IN_PROGRESS, IN_REVIEW}`——三个 owned 非终态处境（plan 闸 / 执行 /
@@ -314,6 +314,18 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     不按领域分，见「描述文本路径约定」）——
     让 LLM 事先知道界在哪，省掉一次撞墙往返；`test_tool_message.py` 断言描述里的数字与
     常量一致，防止两者漂移。
+23. **把活交给成员的工具，必须先确保成员起来了**（F_84）。注册与拉起分离（`S_05`
+    不变量 1），所以"写完就完事"的工具会把活留在一个没人订阅的看板 / 邮箱上。
+    autonomous 下有两条这样的交付路径，两条都走同一个入口
+    `TeamBackend.autostart_unstarted()`：`send_message`（三条投递路径，写库**之前**
+    拉起——成员必须先订阅 bus，MessageEvent 才有人收）与 `create_task`（`add_graph`
+    成功**之后**拉起——任务已经在板上，才谈得上有人来领）。该方法持有构造期注入的
+    `on_member_started` 回调并自带 leader 门与回调门，**调用方不再各自捎带 spawn 回调**；
+    幂等由下层 `startup_member` 的 CAS 保证。
+    两点边界：**scheduled 的 `create_task` 不拉人**（交接归 `TeamScheduler`，工具再插一手
+    就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
+    模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
+    补救交给 leader round-idle 对账（`S_05` 不变量 1 的第五个触发点）。
 
 ## 接口契约
 
@@ -326,7 +338,6 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     dispatch_mode: str = "autonomous",
-    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation" | None] | None = None,
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
@@ -342,7 +353,6 @@ def create_team_tools(
 | `dispatch_mode` | `"autonomous"` / `"scheduled"` | 任务如何到达成员。选择 `create_task` / `send_message` 的形态、`member_complete_task` 的 desc_key，以及成员工具集。未知值抛 `KeyError`。见不变量 18。 |
 | `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
 | `teammate_mode` | `"build_mode"` / `"plan_mode"` | plan_mode 门禁。非 plan_mode 时从 allowed 集合里减掉 `approve_plan` / `submit_plan`，且未启用 team permissions 时也减掉 `approve_tool`。 |
-| `on_teammate_created` | `Callable[[str], Awaitable[None]]` | leader 用 `send_message` 时若发现成员未启动，自动 startup 的回调；不传则没有 auto-start 行为。teammate / human_agent 不消费这个回调。 |
 | `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_teammate` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
 | `exclude_tools` | `set[str]` 或 `None` | **减法**——从该角色 allowed 集合里再减一遍。不存在于 allowed 的名字静默忽略（因为减法对空集是恒等）。 |
 | `lang` | `"cn"` / `"en"` | 选语言加载 `_desc`，缺省 `"cn"`。其它字符串走 cn 兜底（`make_translator` 内部 if/else）。 |
@@ -526,13 +536,13 @@ ShutdownMemberTool     → TeamBackend
 ApprovePlanTool        → TeamBackend
 ApproveToolCallTool    → TeamBackend
 ListMembersTool        → TeamBackend
-TaskCreateTool         → TeamBackend.task_manager
+TaskCreateTool         → TeamBackend.task_manager (+ autostart_unstarted()，autonomous 专有)
 ScheduledTaskCreateTool→ TeamBackend (task_manager + member_exists 校验 assignee)
 UpdateTaskTool         → TeamBackend (+ task_manager 通过 backend 取)
 ViewTaskToolV2         → TeamTaskManager
 ClaimTaskTool          → TeamTaskManager
 MemberCompleteTaskTool → TeamTaskManager
-SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + on_teammate_created)
+SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + autostart_unstarted())
 ReportToLeaderTool     → TeamMessageManager (+ TeamBackend.resolve_leader_member_name()：投递时把 "leader" 角色词解析成真实名，读 team_info DB 行并缓存；team 行缺失则 to="leader" 在 invoke 时软失败，非构造期)
 ```
 

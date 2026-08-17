@@ -4,7 +4,7 @@
 """Messaging tool: send_message (point-to-point, multicast, and broadcast)."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -50,7 +50,6 @@ class _SendMessageBase(TeamTool, ABC):
         message_manager: TeamMessageManager,
         t: Translator,
         team: TeamBackend | None = None,
-        on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
         *,
         desc_key: str,
         to_schema: dict,
@@ -65,7 +64,6 @@ class _SendMessageBase(TeamTool, ABC):
         self.message_manager = message_manager
         self.t = t
         self._team = team
-        self._on_teammate_created = on_teammate_created
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -250,11 +248,19 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _auto_start_members(self) -> None:
-        """Auto-start unstarted members if leader with startup callback."""
-        if self._team and self._on_teammate_created and self._team.is_leader:
-            started = await self._team.startup(on_created=self._on_teammate_created)
-            if started:
-                team_logger.info(f"Auto-started members: {started}")
+        """Auto-start unstarted members before a message is written.
+
+        Start-then-write: a member has to be subscribed to the event bus
+        before the MessageEvent goes out, or the wake-up signal is published
+        to nobody. The role and callback gates live in
+        ``autostart_unstarted`` — one funnel, shared with the task-creation
+        path, so neither carries its own spawn callback.
+        """
+        if self._team is None:
+            return
+        started = await self._team.autostart_unstarted()
+        if started:
+            team_logger.info(f"Auto-started members: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
         d = output.data
@@ -300,13 +306,11 @@ class SendMessageTool(_SendMessageBase):
         message_manager: TeamMessageManager,
         t: Translator,
         team: TeamBackend | None = None,
-        on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
             message_manager,
             t,
             team,
-            on_teammate_created,
             desc_key="send_message",
             to_schema={
                 "anyOf": [
@@ -355,13 +359,11 @@ class ReportToLeaderTool(_SendMessageBase):
         message_manager: TeamMessageManager,
         t: Translator,
         team: TeamBackend | None = None,
-        on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
             message_manager,
             t,
             team,
-            on_teammate_created,
             desc_key="send_message_scheduled",
             to_schema={
                 "type": "string",
