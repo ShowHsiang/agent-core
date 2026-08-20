@@ -17,8 +17,9 @@ class ToolDecisionKind(str, Enum):
 
     ALLOW = "allow"
     DENY = "deny"
+    REWRITE = "rewrite"
     ASK = "ask"
-    DEFER = "defer"
+    PROVIDER_POLICY = "provider_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,12 @@ class ToolDecision:
     reason: str | None = None
     updated_arguments: JsonObject | None = None
     additional_context: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.decision is ToolDecisionKind.REWRITE and self.updated_arguments is None:
+            raise ValueError("rewrite tool decision requires updated_arguments")
+        if self.decision is not ToolDecisionKind.REWRITE and self.updated_arguments is not None:
+            raise ValueError("updated_arguments is only valid for a rewrite tool decision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +118,7 @@ class HarnessHookDispatcher(Protocol):
         ...
 
     async def before_tool(self, context: BeforeToolContext) -> ToolDecision:
-        """Authorize, reject, defer, or rewrite a tool invocation."""
+        """Authorize, reject, rewrite, ask the host, or use provider policy."""
         ...
 
     async def after_tool(self, context: AfterToolContext) -> AfterToolResult:

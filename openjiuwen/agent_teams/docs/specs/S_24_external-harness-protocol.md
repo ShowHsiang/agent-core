@@ -44,7 +44,8 @@ Round 误用提供公共别名。
 5. 每个 Turn 有且只有一个 STARTED 和一个 terminal event；PAUSED/RESUMED 是同一 Turn 内的非终态
    转换，terminal event 必须携带状态匹配的 `TurnResult`。
 6. `send` 只确认接受，不等待执行完成，并在 receipt 中返回该输入关联的 `turn_id`。
-7. 可选行为以 `ExternalHarnessCard.capabilities` 声明；未声明能力不得静默 no-op。
+7. Harness 可选行为以 `ExternalHarnessCard.capabilities` 声明；Card 同时声明 compatible protocol
+   versions 和 required/optional `HostCapability`，start 前必须完成协商，缺必需能力不得降级。
 8. events 是观测面；interactions 是 SDK 请求/响应控制面；hooks 是生命周期策略控制面。
 9. checkpoint 由 provider 解释，必须有版本、可 JSON 序列化、绑定 `member_agent_id`、携带幂等 ID 和
    单调 sequence，且不得包含凭据。
@@ -61,7 +62,7 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 
 | 成员 | 语义 |
 |---|---|
-| `card` | provider identity、implementation/protocol version、capabilities |
+| `card` | provider identity、implementation/protocol compatibility、harness/host capabilities |
 | `state` | 当前 `HarnessState` |
 | `session_id` | provider-native conversation/thread/session id |
 | `start(context)` | 绑定成员身份、宿主服务和恢复检查点并启动 cycle |
@@ -86,9 +87,10 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 `events()` 返回统一信封 `HarnessEvent`。`sequence`、`timestamp`、`session_id`、`turn_id`、
 `item_id` 和 `correlation_id` 位于信封；载荷不重复这些公共字段。载荷包括：
 
-- `OutputEvent`：TEXT/REASONING/STRUCTURED 内容，支持 delta；
+- `OutputEvent`：稳定 `output_id` + content index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM
+  channel，以及 DELTA/SNAPSHOT/FINAL operation；
 - `ItemLifecycleEvent`：工具调用、命令、文件变更等 provider item 的生命周期；
-- `UsageUpdatedEvent`：标准化 token usage；
+- `UsageUpdatedEvent`：标准化 token usage，显式区分 DELTA/CUMULATIVE；
 - `StateChangedEvent` 和 `TurnLifecycleEvent`；
 - `HookObservedEvent` 和 `DiagnosticEvent`；
 - `ProviderEvent`：带 provider、event type、schema version 的 JSON 扩展。
@@ -108,8 +110,9 @@ SDK 的 `receive_messages()`/`receive_response()` 相同，不要求实现建立
 公共事件不依赖 `OutputSchema`，避免三方 SDK 消息在协议入口被过早压缩。未来
 MemberRuntime adapter 负责把 `HarnessEvent` 转成内部 stream schema。
 
-`TurnLifecycleEvent.result` 不允许 `Any`。terminal event 使用 `TurnResult` 表达 status、
-final/structured output、usage、error、cost、timing 和 provider extension data。
+`TurnLifecycleEvent.result` 不允许 `Any`。terminal event 使用 `TurnResult` 表达 status、有序
+message/content block、final/structured projection、termination/error、usage、精确货币微单位 cost、
+timing 和 provider extension data。`messages` 是标准化完整输出；projection 只为简单消费者提供便利。
 
 ### Interaction：HarnessInteractionHandler
 
@@ -127,6 +130,10 @@ Provider SDK 在 active Turn 内发起且必须等待回答的请求，通过
 request 类型配对；adapter 使用 `validate_interaction_response` 做统一校验。Provider 撤销请求时调用
 幂等 `cancel(request_id, reason=...)`；Turn abort 和 Harness stop 返回前必须取消该范围内全部 pending
 request。
+
+Interaction host 能力按 `TOOL_APPROVAL`、`USER_INPUT`、`MCP_ELICITATION`、`DYNAMIC_TOOL_CALL` 和
+`PROVIDER_INTERACTION` 分别协商，不使用一个粗粒度 HOST_INTERACTIONS 代替。Card 的 required 能力
+缺失时 start fail-fast；optional 能力缺失时，具体请求必须安全 decline/fail，不能默认授权。
 这些请求不能发到 events 后等待 event consumer 回写，否则会造成死锁、审批丢失和多消费者竞态。
 
 ### Hooks：HarnessHookDispatcher
@@ -134,7 +141,9 @@ request。
 before-prompt、before-tool、after-tool 与 on-stop 是 harness 生命周期上的宿主策略扩展。
 Harness await hook 并使用返回值改写/拒绝执行；`HookObservedEvent` 只用于日志、trace 和 UI。
 
-Hook 与 SDK interaction 可组合：例如 SDK 原生 approval request 先映射到 interaction handler；
+`ToolDecision` 的 REWRITE 必须携带替换参数；ASK 映射到 tool-approval interaction；
+PROVIDER_POLICY 交给已配置的 provider 原生权限策略。Hook 与 SDK interaction 可组合：例如 SDK
+原生 approval request 先映射到 interaction handler；
 adapter 若还需要执行 OpenJiuwen 的统一工具策略，可在实际执行前调用 before-tool hook。两者不互相替代。
 
 ## Tools 与 MCP
@@ -142,7 +151,8 @@ adapter 若还需要执行 OpenJiuwen 的统一工具策略，可在实际执行
 支持两条 provider-neutral 路径：
 
 - native SDK tool：`ExternalToolGateway.definitions/invoke`；
-- MCP：`McpServerConfig` 描述 stdio、HTTP 或 in-process server。
+- MCP：`McpServerConfig` 描述 stdio、HTTP 或 in-process server；command/url/instance 恰好一个，
+  HTTP headers 与进程 env 分开表达。
 
 Provider adapter 负责把通用结构转换成自己的 SDK options；不得把厂商配置字段加入公共模型。
 动态工具执行请求属于 active SDK interaction，和 host 预先暴露的 tool gateway 是不同方向。

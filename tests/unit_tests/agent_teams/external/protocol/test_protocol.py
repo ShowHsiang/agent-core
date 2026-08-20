@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.external.protocol import (
     CheckpointConflictError,
     CheckpointReason,
     CheckpointSaveReceipt,
+    ContentBlock,
     DeliveryMode,
     ExternalHarnessCard,
     ExternalHarnessContext,
@@ -31,12 +32,17 @@ from openjiuwen.agent_teams.external.protocol import (
     HarnessInteractionHandler,
     HarnessInteractionRequest,
     HarnessInteractionResponse,
+    HostCapability,
     InteractionCancelReason,
     InteractionResponseStatus,
     McpServerConfig,
     McpTransport,
+    MessageRole,
+    MonetaryAmount,
+    OutputChannel,
     OutputEvent,
     OutputKind,
+    OutputOperation,
     ProviderEvent,
     ResumePolicy,
     SendReceipt,
@@ -44,11 +50,19 @@ from openjiuwen.agent_teams.external.protocol import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalResponse,
+    ToolDecision,
+    ToolDecisionKind,
     TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
+    TurnMessage,
     TurnResult,
     TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
+    TurnUsage,
+    UsageUpdatedEvent,
+    UsageUpdateMode,
     UserInputRequest,
     UserInputResponse,
     validate_interaction_response,
@@ -64,9 +78,9 @@ class _Harness:
             {
                 HarnessCapability.STEER,
                 HarnessCapability.CHECKPOINT,
-                HarnessCapability.HOST_INTERACTIONS,
             }
         ),
+        required_host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
     )
 
     def __init__(self) -> None:
@@ -99,7 +113,12 @@ class _Harness:
             HarnessEvent(
                 sequence=5,
                 timestamp=0.4,
-                event=OutputEvent(kind=OutputKind.TEXT, content="done"),
+                event=OutputEvent(
+                    output_id="answer-1",
+                    kind=OutputKind.TEXT,
+                    content="done",
+                    operation=OutputOperation.FINAL,
+                ),
                 turn_id=turn_id,
             ),
             HarnessEvent(
@@ -263,6 +282,12 @@ def test_card_is_immutable_and_reports_capabilities() -> None:
     assert card.protocol_version == PROTOCOL_VERSION == "4.0"
     assert card.supports(HarnessCapability.STEER)
     assert not card.supports(HarnessCapability.PAUSE_RESUME)
+    card.validate_host(protocol_version=PROTOCOL_VERSION, capabilities=frozenset({HostCapability.TOOL_APPROVAL}))
+
+    with pytest.raises(ExternalHarnessProtocolError, match="missing required capabilities"):
+        card.validate_host(protocol_version=PROTOCOL_VERSION, capabilities=frozenset())
+    with pytest.raises(ExternalHarnessProtocolError, match="is not supported"):
+        card.validate_host(protocol_version="99.0", capabilities=frozenset({HostCapability.TOOL_APPROVAL}))
 
     with pytest.raises(FrozenInstanceError):
         card.name = "changed"  # type: ignore[misc]
@@ -292,6 +317,7 @@ def test_context_keeps_checkpoint_and_host_services() -> None:
         member_agent_id="team-a_member-a",
         team_session_id="session-a",
         system_prompt="You are a teammate.",
+        host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
         resume_policy=ResumePolicy.REQUIRE_RESUME,
         checkpoint=checkpoint,
         checkpoint_sink=checkpoint_sink,
@@ -303,6 +329,7 @@ def test_context_keeps_checkpoint_and_host_services() -> None:
     assert context.checkpoint is checkpoint
     assert context.checkpoint_sink is checkpoint_sink
     assert context.interactions is interactions
+    assert context.host_capabilities == frozenset({HostCapability.TOOL_APPROVAL})
     assert context.mcp_servers == (mcp,)
 
 
@@ -466,8 +493,33 @@ def test_mcp_config_rejects_missing_transport_target(transport, kwargs, message)
         McpServerConfig(name="team", transport=transport, **kwargs)
 
 
+def test_mcp_config_rejects_multiple_transport_targets() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        McpServerConfig(
+            name="team",
+            transport=McpTransport.STDIO,
+            command=("team-mcp",),
+            url="https://example.invalid/mcp",
+        )
+
+    with pytest.raises(ValueError, match="headers are only valid"):
+        McpServerConfig(
+            name="team",
+            transport=McpTransport.STDIO,
+            command=("team-mcp",),
+            headers={"Authorization": "redacted"},
+        )
+
+
 def test_event_envelope_carries_neutral_output_and_correlation() -> None:
-    payload = OutputEvent(kind=OutputKind.TEXT, content="done", is_delta=True)
+    payload = OutputEvent(
+        output_id="answer-1",
+        kind=OutputKind.TEXT,
+        content="done",
+        operation=OutputOperation.DELTA,
+        channel=OutputChannel.ANSWER,
+        content_index=1,
+    )
 
     event = HarnessEvent(
         sequence=1,
@@ -481,6 +533,47 @@ def test_event_envelope_carries_neutral_output_and_correlation() -> None:
     assert event.event is payload
     assert event.turn_id == "turn-1"
     assert event.correlation_id == "message-1"
+    assert payload.operation is OutputOperation.DELTA
+    assert payload.content_index == 1
+
+    usage = UsageUpdatedEvent(usage=TurnUsage(input_tokens=4), mode=UsageUpdateMode.DELTA)
+    assert usage.mode is UsageUpdateMode.DELTA
+
+
+def test_turn_result_preserves_messages_termination_and_exact_cost() -> None:
+    block = ContentBlock(block_id="block-1", kind="text", content="partial")
+    message = TurnMessage(message_id="message-1", role=MessageRole.ASSISTANT, content=(block,))
+    completed = TurnResult(
+        status=TurnStatus.COMPLETED,
+        messages=(message,),
+        final_output="partial",
+        cost=MonetaryAmount(micros=125_000),
+    )
+    interrupted = TurnResult(
+        status=TurnStatus.INTERRUPTED,
+        termination=TurnTermination(kind=TurnTerminationKind.USER_ABORT, message="cancelled by user"),
+    )
+
+    assert completed.messages == (message,)
+    assert completed.cost == MonetaryAmount(micros=125_000, currency="USD")
+    assert interrupted.termination is not None
+
+    with pytest.raises(ValueError, match="requires termination"):
+        TurnResult(status=TurnStatus.INTERRUPTED)
+
+
+def test_tool_decision_distinguishes_rewrite_ask_and_provider_policy() -> None:
+    rewrite = ToolDecision(
+        decision=ToolDecisionKind.REWRITE,
+        updated_arguments={"command": "pwd"},
+    )
+
+    assert rewrite.updated_arguments == {"command": "pwd"}
+    assert ToolDecision(decision=ToolDecisionKind.ASK).decision is ToolDecisionKind.ASK
+    assert ToolDecision(decision=ToolDecisionKind.PROVIDER_POLICY).decision is ToolDecisionKind.PROVIDER_POLICY
+
+    with pytest.raises(ValueError, match="requires updated_arguments"):
+        ToolDecision(decision=ToolDecisionKind.REWRITE)
 
 
 def test_turn_terminal_event_requires_matching_structured_result() -> None:

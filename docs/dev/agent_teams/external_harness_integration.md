@@ -56,6 +56,7 @@ memory/middleware 等原子执行动作。
 from openjiuwen.agent_teams.external.protocol import (
     AbortMode,
     CheckpointReason,
+    ContentBlock,
     DeliveryMode,
     ExternalHarnessCard,
     ExternalHarnessContext,
@@ -64,18 +65,26 @@ from openjiuwen.agent_teams.external.protocol import (
     ExternalHarnessProtocolError,
     ExternalHarnessProvider,
     HarnessCapability,
+    HostCapability,
     HarnessCheckpoint,
     HarnessEvent,
     InteractionCancelReason,
+    MessageRole,
+    MonetaryAmount,
     OutputEvent,
+    OutputChannel,
     OutputKind,
+    OutputOperation,
     SendReceipt,
     ToolApprovalRequest,
     ToolInvocation,
     TurnResult,
     TurnEventKind,
     TurnLifecycleEvent,
+    TurnMessage,
     TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
     TurnUsage,
     UnsupportedHarnessCapabilityError,
     validate_interaction_response,
@@ -122,6 +131,14 @@ TERMINATED + events EOF
 | `AUTO` | IDLE 时启动新 Turn；RUNNING 时排为 follow-up |
 | `STEER` | 注入当前 Turn；要求 `HarnessCapability.STEER` |
 | `FOLLOW_UP` | 当前 Turn 完成后启动后继 Turn |
+
+### Capability negotiation
+
+`HarnessCapability` 描述 Harness 自身支持的命令，例如 STEER、PAUSE_RESUME；`HostCapability` 描述
+实现依赖的宿主服务，例如 TOOL_APPROVAL、USER_INPUT、MCP_ELICITATION。Provider 在 Card 中分别声明
+required/optional host capability 和 compatible protocol versions，并在 `start()` 创建 SDK client、
+进程或网络连接前调用 `card.validate_host(...)`。required 缺失时 fail-fast，optional 缺失时对具体请求
+安全 decline/fail，不能默认授权。
 
 `FORCE` abort 只要求尽快停止，不承诺回滚已经发生的命令、文件或外部系统副作用。
 
@@ -188,9 +205,12 @@ event = HarnessEvent(
     turn_id=turn_id,
     correlation_id=accepted_message_id,
     event=OutputEvent(
+        output_id="answer-1",
         kind=OutputKind.TEXT,
         content="partial answer",
-        is_delta=True,
+        operation=OutputOperation.DELTA,
+        channel=OutputChannel.ANSWER,
+        content_index=0,
     ),
 )
 await event_queue.put(event)
@@ -200,7 +220,7 @@ await event_queue.put(event)
 
 | 载荷 | 用途 |
 |---|---|
-| `OutputEvent` | TEXT、REASONING、STRUCTURED 内容或 delta |
+| `OutputEvent` | 稳定 block ID/index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM channel，DELTA/SNAPSHOT/FINAL operation |
 | `ItemLifecycleEvent` | tool call、command、file change 等 provider item |
 | `UsageUpdatedEvent` | 标准化 token usage |
 | `StateChangedEvent` | Harness state 转换 |
@@ -217,9 +237,17 @@ Terminal Turn 必须携带结构化结果，并保证事件与状态匹配：
 ```python
 result = TurnResult(
     status=TurnStatus.COMPLETED,
+    messages=(
+        TurnMessage(
+            message_id="assistant-1",
+            role=MessageRole.ASSISTANT,
+            content=(ContentBlock(block_id="answer-1", kind="text", content="final answer"),),
+        ),
+    ),
     final_output="final answer",
     structured_output={"answer": "final answer"},
     usage=TurnUsage(input_tokens=120, output_tokens=48, total_tokens=168),
+    cost=MonetaryAmount(micros=25_000, currency="USD"),
     duration_ms=1320,
     provider_data={"provider_stop_reason": "end_turn"},
 )
@@ -229,6 +257,10 @@ payload = TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=result)
 终态对应关系是 FINISHED/COMPLETED、ABORTED/INTERRUPTED、FAILED/FAILED。PAUSED 和 RESUMED 不带
 `TurnResult`，并保持原 `turn_id`。失败结果必须携带 `TurnError`；不要把原始 exception、client
 object 或可能包含 credential 的响应塞进事件。
+
+`messages` 是标准化完整输出；`final_output`/`structured_output` 只是便捷投影。多个 Claude content
+block 或 Codex item 不得挤进一个字符串。INTERRUPTED 必须携带 `TurnTermination` 说明 user abort、
+timeout、policy、provider 或 harness stop；货币成本使用 micros + currency，禁止 float 累计。
 
 ## 6. Provider-initiated interactions
 
@@ -265,9 +297,9 @@ cancel、Turn abort 或连接关闭时，adapter 对仍待处理的请求调用
 `await context.interactions.cancel(request_id, reason=...)`；cancel 必须可重复。`abort()` 和
 `stop()` 返回前必须取消其范围内的所有 pending request，避免 provider 等待泄漏。
 
-如果 adapter 声明 `HOST_INTERACTIONS`，但运行场景没有 handler，它必须采取安全且明确的行为：
-在 `start` 拒绝必需交互的配置，或把偶发请求明确映射为 deny/decline。禁止默认 allow，也禁止把
-请求发成 event 后无限等待。
+如果 adapter 将某个 interaction `HostCapability` 声明为 required，但 host 未提供，必须在 `start`
+拒绝；optional 能力缺失时把偶发请求明确映射为 deny/decline。禁止默认 allow，也禁止把请求发成
+event 后无限等待。
 
 ### interactions 与 tools 的关系
 
@@ -279,6 +311,10 @@ team tool policy，但不能跳过权限和成员可见性规则。
 
 `HarnessHookDispatcher` 提供 before-prompt、before-tool、after-tool 和 on-stop 生命周期策略。
 例如 adapter 真正执行 team tool 前 await `before_tool`，使用 `ToolDecision` 拒绝或改写参数。
+
+Tool decision 语义固定为：ALLOW 直接执行；DENY 拒绝；REWRITE 使用必填 `updated_arguments`；ASK
+转为 `ToolApprovalRequest` 并 await interaction handler；PROVIDER_POLICY 交给明确配置的 provider
+原生权限策略。ASK/PROVIDER_POLICY 都不能通过 observation event 等待回写。
 
 `HookObservedEvent` 只能表示 hook 开始或结束。对 Claude Agent SDK 一类同时提供 callback hooks
 和 hook event message 的 SDK：callback 映射到 dispatcher，event message 映射到 observation。
@@ -309,7 +345,8 @@ async def execute_tool(call_id: str, name: str, arguments: dict):
 ```
 
 如果三方 Agent 使用 MCP，从 `context.mcp_servers` 读取配置，按 `McpTransport` 转成厂商 SDK
-options。不要把 Claude/Codex/Jiuwen 的配置对象写回公共模型。
+options。command、url、instance 必须恰好一个；stdio env 与 HTTP headers 分开处理。不要把
+Claude/Codex/Jiuwen 的配置对象写回公共模型。
 
 ## 9. Checkpoint 和恢复
 
@@ -381,8 +418,11 @@ from openjiuwen.agent_teams.external.protocol import (
     HarnessCapability,
     HarnessCheckpoint,
     HarnessEvent,
+    HostCapability,
+    OutputChannel,
     OutputEvent,
     OutputKind,
+    OutputOperation,
     SendReceipt,
     StateChangedEvent,
     TERMINAL_TURN_EVENT_KINDS,
@@ -391,6 +431,8 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnLifecycleEvent,
     TurnResult,
     TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
     UnsupportedHarnessCapabilityError,
     validate_interaction_response,
 )
@@ -410,9 +452,9 @@ class AcmeHarness:
                 HarnessCapability.GRACEFUL_ABORT,
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
-                HarnessCapability.HOST_INTERACTIONS,
             }
         ),
+        required_host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
     )
 
     def __init__(self, sdk_client):
@@ -442,6 +484,10 @@ class AcmeHarness:
 
     async def start(self, context: ExternalHarnessContext):
         self._context = context
+        self.card.validate_host(
+            protocol_version=context.protocol_version,
+            capabilities=context.host_capabilities,
+        )
         restored = self._validate_checkpoint(context.checkpoint)
         self._session_id = await self._client.connect(
             checkpoint=restored,
@@ -483,7 +529,13 @@ class AcmeHarness:
                 elif text := self._text_delta(sdk_message):
                     final_output = text
                     await self._emit(
-                        OutputEvent(kind=OutputKind.TEXT, content=text, is_delta=True),
+                        OutputEvent(
+                            output_id="answer-1",
+                            kind=OutputKind.TEXT,
+                            content=text,
+                            operation=OutputOperation.DELTA,
+                            channel=OutputChannel.ANSWER,
+                        ),
                         turn_id=turn_id,
                         correlation_id=message_id,
                     )
@@ -491,7 +543,10 @@ class AcmeHarness:
             terminal = TurnEventKind.FINISHED
         except Exception as exc:
             if self._abort_requested:
-                result = TurnResult(status=TurnStatus.INTERRUPTED)
+                result = TurnResult(
+                    status=TurnStatus.INTERRUPTED,
+                    termination=TurnTermination(kind=TurnTerminationKind.USER_ABORT),
+                )
                 terminal = TurnEventKind.ABORTED
             else:
                 result = TurnResult(
@@ -673,19 +728,20 @@ class AcmeProvider:
 3. `events()` 在多个 Turn 之间不结束，stop 后正常 EOF；
 4. `turn_events(receipt.turn_id)` 包含 STARTED 和 terminal，跨 PAUSED/RESUMED，terminal 后 EOF；
 5. 两种流视图不能并发消费，交替调用不会重复或重排 event；
-6. event sequence 跨所有 payload 严格递增；
-7. 每轮恰好一个 STARTED 和一个状态匹配的 terminal `TurnResult`；
+6. event sequence 跨所有 payload 严格递增；output block 可按 ID/index/channel/operation 无损重建；
+7. 每轮恰好一个 STARTED 和一个状态匹配的 terminal `TurnResult`，messages 保留多 block 输出；
 8. AUTO/FOLLOW_UP/STEER 在 IDLE/RUNNING 下符合定义；
 9. abort、stop 和正常完成竞争时不产生两个 terminal event；
-10. capability 与真实行为一致，未支持命令显式报错；
+10. harness capability 与真实行为一致；required/optional host capability 和 protocol version 正确协商；
 11. interaction request/response 的 id 和类型一致，deadline 生效，abort/stop cancel 全部 pending；
 12. 缺 interaction handler 时不会默认授权或永久等待；
-13. hook deny 确实阻止执行，hook event consumer 不参与授权；
+13. hook deny 阻止执行，rewrite/ask/provider-policy 路径明确，hook event consumer 不参与授权；
 14. checkpoint envelope JSON round-trip、member/provider/version/id/sequence 校验和恢复失败路径；
 15. session 激活和 turn 完成主动调用 sink，retry 幂等，stale/CAS 冲突不覆盖新状态；
 16. event consumer 慢时背压有界，不会无限占用内存；
 17. SDK 鉴权、限流、崩溃和超时落为 FAILED + `TurnError`，并且诊断不泄露凭据；
 18. 未安装 Claude/Codex 等可选 SDK 时，protocol 包仍可导入。
+19. MCP command/url/instance 缺失、错配或多填时都在启动 provider 前失败。
 
 ## 14. 当前限制与后续接线
 

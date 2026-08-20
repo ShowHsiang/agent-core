@@ -46,7 +46,7 @@ class ExternalHarnessProtocol(Protocol):
         ...
 
     async def start(self, context: ExternalHarnessContext) -> None:
-        """Start one runtime cycle and settle in ``HarnessState.IDLE``."""
+        """Validate host compatibility, start a cycle, and settle in IDLE."""
         ...
 
     async def stop(self) -> None:

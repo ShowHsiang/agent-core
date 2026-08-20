@@ -35,11 +35,33 @@ TERMINAL_TURN_EVENT_KINDS = frozenset(
 
 
 class OutputKind(str, Enum):
-    """Portable category of output content."""
+    """Portable representation of output content."""
 
     TEXT = "text"
-    REASONING = "reasoning"
     STRUCTURED = "structured"
+
+
+class OutputChannel(str, Enum):
+    """Semantic channel carrying an output block."""
+
+    ANSWER = "answer"
+    REASONING = "reasoning"
+    SYSTEM = "system"
+
+
+class OutputOperation(str, Enum):
+    """How an output update changes the identified content block."""
+
+    DELTA = "delta"
+    SNAPSHOT = "snapshot"
+    FINAL = "final"
+
+
+class UsageUpdateMode(str, Enum):
+    """Whether a usage update is incremental or cumulative."""
+
+    DELTA = "delta"
+    CUMULATIVE = "cumulative"
 
 
 class ItemEventKind(str, Enum):
@@ -68,13 +90,22 @@ class DiagnosticLevel(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class OutputEvent:
-    """Provider-neutral output content or delta."""
+    """Provider-neutral update for one stable output content block."""
 
+    output_id: str
     kind: OutputKind
     content: JsonValue
-    is_delta: bool = False
+    operation: OutputOperation = OutputOperation.SNAPSHOT
+    channel: OutputChannel = OutputChannel.ANSWER
+    content_index: int = 0
     content_type: str | None = None
     data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.output_id:
+            raise ValueError("output_id must not be empty")
+        if self.content_index < 0:
+            raise ValueError("output content_index must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +122,7 @@ class UsageUpdatedEvent:
     """Cumulative or incremental normalized usage information."""
 
     usage: TurnUsage
-    is_delta: bool = False
+    mode: UsageUpdateMode = UsageUpdateMode.CUMULATIVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,11 +232,14 @@ __all__ = [
     "ItemEventKind",
     "ItemLifecycleEvent",
     "OutputEvent",
+    "OutputChannel",
     "OutputKind",
+    "OutputOperation",
     "ProviderEvent",
     "StateChangedEvent",
     "TERMINAL_TURN_EVENT_KINDS",
     "TurnEventKind",
     "TurnLifecycleEvent",
+    "UsageUpdateMode",
     "UsageUpdatedEvent",
 ]

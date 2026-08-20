@@ -65,6 +65,16 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
     和 stop 返回前按明确 reason 取消全部 pending interaction。
 15. **Checkpoint 防止乱序覆盖**：增加 checkpoint 幂等 ID、scope 内单调 sequence、可选 CAS 和持久化
     receipt；stale write 明确失败。
+16. **输出流可无损重建**：`OutputEvent` 使用稳定 output ID、content index、answer/reasoning/system
+    channel 和 DELTA/SNAPSHOT/FINAL operation；usage 同样显式区分 delta/cumulative。
+17. **TurnResult 保留完整消息**：有序 message/content block 是标准化终态输出，`final_output` 仅作便捷
+    投影；interrupt 使用结构化 termination，cost 使用货币微单位避免 float 精度损失。
+18. **细分 Host capability**：Card 声明兼容协议版本以及 required/optional `HostCapability`；start 在创建
+    provider 工作前 fail-fast，不再用单一 HOST_INTERACTIONS 掩盖 approval/input/elicitation 差异。
+19. **闭合 Hook 决策**：REWRITE 显式携带新参数；ASK 进入 tool-approval interaction；
+    PROVIDER_POLICY 明确交给 provider 原生策略，不保留含义不清的 DEFER。
+20. **严格校验 MCP transport target**：command、url、instance 恰好一个；HTTP headers 独立承载，
+    transport 不接受互相矛盾的 target。
 
 ## 拒绝的方案
 

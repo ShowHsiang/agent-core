@@ -47,14 +47,16 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 - `ExternalHarnessProvider`: provider-owned configuration validation and
   construction of an unstarted harness.
 - `ExternalHarnessCard`: static identity, protocol version, and optional
-  capabilities.
+  harness capabilities, compatible protocol versions, and required/optional
+  host capabilities.
 - `ExternalHarnessContext`: member identity plus host services injected at
   `start`, including tools, MCP, hooks, interactions, and checkpoint storage.
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
-- `TurnResult`: a typed terminal result containing normalized status, output,
-  usage, failure, timing, cost, and provider extension data.
+- `TurnResult`: a typed terminal result containing normalized messages,
+  convenience output projections, termination/failure, usage, exact monetary
+  cost, timing, and provider extension data.
 - `HarnessInteractionHandler`: awaited request/response control plane for tool
   approvals, user input, MCP elicitation, dynamic tool calls, and provider
   extensions.
@@ -108,7 +110,7 @@ ends. A second active iterator must fail with `ExternalHarnessStateError`.
 from openjiuwen.agent_teams.external.protocol import (
     ExternalHarnessCard,
     ExternalHarnessProtocol,
-    HarnessCapability,
+    HostCapability,
 )
 
 
@@ -116,7 +118,7 @@ class MyHarness:
     card = ExternalHarnessCard(
         name="my-agent",
         implementation_version="1.0.0",
-        capabilities=frozenset({HarnessCapability.HOST_INTERACTIONS}),
+        required_host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
     )
 
     # Implement every member of ExternalHarnessProtocol.
@@ -149,7 +151,12 @@ class MyHarness:
    sink rejects stale or failed compare-and-set writes.
 9. Interaction responses match both the request ID and request type. Requests
    may declare a deadline; abort and stop cancel all pending interactions.
-10. Environment values, credentials, and provider client objects must never be
+10. Output blocks have stable IDs, channels, indexes, and explicit
+    DELTA/SNAPSHOT/FINAL operations. Terminal messages are authoritative;
+    `final_output` is a convenience projection.
+11. Provider startup validates the host protocol version and every required
+    fine-grained host capability before doing work.
+12. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
 
 ## Documents

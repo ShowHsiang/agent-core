@@ -73,6 +73,7 @@ class McpServerConfig:
     url: str | None = None
     instance: Any = None
     env: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Reject incomplete transport configurations early."""
@@ -82,6 +83,13 @@ class McpServerConfig:
             raise ValueError("HTTP MCP server requires url")
         if self.transport is McpTransport.IN_PROCESS and self.instance is None:
             raise ValueError("in-process MCP server requires instance")
+        if self.transport is not McpTransport.STDIO and self.env:
+            raise ValueError("MCP env is only valid for stdio transport")
+        if self.transport is not McpTransport.HTTP and self.headers:
+            raise ValueError("MCP headers are only valid for HTTP transport")
+        target_count = int(bool(self.command)) + int(self.url is not None) + int(self.instance is not None)
+        if target_count != 1:
+            raise ValueError("MCP server requires exactly one of command, url, or instance")
 
 
 __all__ = [

@@ -19,6 +19,77 @@ class TurnStatus(str, Enum):
     FAILED = "failed"
 
 
+class MessageRole(str, Enum):
+    """Portable role of a message retained in a terminal turn result."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+    TOOL = "tool"
+
+
+class TurnTerminationKind(str, Enum):
+    """Reason a turn ended without reaching a normal completion."""
+
+    USER_ABORT = "user_abort"
+    TIMEOUT = "timeout"
+    POLICY = "policy"
+    PROVIDER = "provider"
+    HARNESS_STOP = "harness_stop"
+
+
+@dataclass(frozen=True, slots=True)
+class ContentBlock:
+    """One ordered, provider-neutral message content block."""
+
+    block_id: str
+    kind: str
+    content: JsonValue
+    data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.block_id or not self.kind:
+            raise ValueError("content block id and kind must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnMessage:
+    """One normalized message retained by the terminal turn result."""
+
+    message_id: str
+    role: MessageRole
+    content: tuple[ContentBlock, ...]
+    data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.message_id:
+            raise ValueError("turn message_id must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnTermination:
+    """Structured cause for an interrupted turn."""
+
+    kind: TurnTerminationKind
+    message: str | None = None
+    code: str | None = None
+    provider_data: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class MonetaryAmount:
+    """Exact monetary amount represented in one-millionth currency units."""
+
+    micros: int
+    currency: str = "USD"
+
+    def __post_init__(self) -> None:
+        if self.micros < 0:
+            raise ValueError("monetary micros must be non-negative")
+        if not self.currency:
+            raise ValueError("monetary currency must not be empty")
+
+
 @dataclass(frozen=True, slots=True)
 class TurnUsage:
     """Normalized token usage with room for provider-specific counters."""
@@ -44,15 +115,21 @@ class TurnError:
 
 @dataclass(frozen=True, slots=True)
 class TurnResult:
-    """Complete provider-neutral terminal result for one turn."""
+    """Complete provider-neutral terminal result for one turn.
+
+    ``messages`` is the lossless normalized output. ``final_output`` and
+    ``structured_output`` are convenience projections for simple consumers.
+    """
 
     status: TurnStatus
+    messages: tuple[TurnMessage, ...] = ()
     final_output: JsonValue = None
     structured_output: JsonValue = None
     stop_reason: str | None = None
+    termination: TurnTermination | None = None
     error: TurnError | None = None
     usage: TurnUsage | None = None
-    cost_usd: float | None = None
+    cost: MonetaryAmount | None = None
     started_at: float | None = None
     completed_at: float | None = None
     duration_ms: int | None = None
@@ -63,6 +140,21 @@ class TurnResult:
             raise ValueError("failed turn result requires error")
         if self.status is not TurnStatus.FAILED and self.error is not None:
             raise ValueError("only failed turn result may contain error")
+        if self.status is TurnStatus.INTERRUPTED and self.termination is None:
+            raise ValueError("interrupted turn result requires termination")
+        if self.status is not TurnStatus.INTERRUPTED and self.termination is not None:
+            raise ValueError("only interrupted turn result may contain termination")
 
 
-__all__ = ["TurnError", "TurnResult", "TurnStatus", "TurnUsage"]
+__all__ = [
+    "ContentBlock",
+    "MessageRole",
+    "MonetaryAmount",
+    "TurnError",
+    "TurnMessage",
+    "TurnResult",
+    "TurnStatus",
+    "TurnTermination",
+    "TurnTerminationKind",
+    "TurnUsage",
+]

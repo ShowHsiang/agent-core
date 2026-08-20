@@ -45,7 +45,9 @@ these concepts.
    and hooks are lifecycle policy control. An event consumer can never be
    required to return an authorization decision.
 3. Optional behavior is capability-gated. Unsupported commands raise
-   `UnsupportedHarnessCapabilityError` instead of degrading silently.
+   `UnsupportedHarnessCapabilityError` instead of degrading silently. Provider
+   startup validates compatible protocol versions and every required
+   fine-grained `HostCapability`.
 4. Public commands are concurrency-safe by contract. Implementations must
    serialize their own state transitions.
 5. The event stream is single-consumer, cycle-long, and strictly ordered. The
@@ -66,12 +68,20 @@ these concepts.
 8. Context environment and credentials are sensitive. Never render them in
    events, exceptions, examples, or logs.
 9. Terminal turn events carry a structured `TurnResult` whose status matches
-   the event kind. Shared event and result fields stay provider-neutral;
-   namespaced JSON extensions preserve vendor-specific data.
+   the event kind. Ordered messages are the lossless normalized output;
+   final/structured output fields are projections. Shared event and result
+   fields stay provider-neutral; namespaced JSON extensions preserve
+   vendor-specific data.
 10. Interaction responses must match request IDs and response types. Requests
     may declare a deadline; cancellation is idempotent and abort/stop cancel
     every pending request. Missing host interaction support must fail or
     decline safely; it must never default to approval.
+11. Output events identify stable blocks and use explicit operation, channel,
+    and content-index fields. Do not replace delta/snapshot/final semantics
+    with a boolean or encode reasoning as a content representation.
+12. Hook ASK resolves through tool-approval interaction; PROVIDER_POLICY
+    delegates to an explicitly configured provider-native policy. Neither is
+    an observational event response.
 
 ## Compatibility
 
