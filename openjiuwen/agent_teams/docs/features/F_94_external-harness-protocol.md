@@ -75,6 +75,16 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
     PROVIDER_POLICY 明确交给 provider 原生策略，不保留含义不清的 DEFER。
 20. **严格校验 MCP transport target**：command、url、instance 恰好一个；HTTP headers 独立承载，
     transport 不接受互相矛盾的 target。
+21. **冻结协议 JSON 边界**：输入、事件、结果、interaction、hook、tool 和 checkpoint 的 JSON 数据在
+    构造时递归校验/复制/冻结；拒绝 NaN、Infinity、任意 Python object 和可变别名。
+22. **事件具备明确 scope 与因果关系**：信封携带 team session/member；correlation 表示逻辑 trace，
+    causation IDs 表示实际触发消息/请求；所有 ID 的作用域在 spec 中固定。
+23. **背压有界且不可丢终态**：Harness 暴露 `EventBufferConfig`；retention 由 payload 推导，required
+    事件只能阻塞生产者，snapshot/cumulative 可合并，低级诊断/hook observation 才可 best-effort drop。
+24. **事件 cursor 可显式关闭**：`HarnessEventCursor.aclose()` 幂等释放单消费者 lease，替代无法由类型
+    保证 close 的普通 `AsyncIterator`。
+25. **增加官方 wire codec**：event envelope 使用稳定 `event_type + schema_version` JSON shape，已知
+    事件强类型恢复，未知事件无损保留；checkpoint JSON 大小限制为 4 MiB。
 
 ## 拒绝的方案
 

@@ -58,6 +58,7 @@ from openjiuwen.agent_teams.external.protocol import (
     CheckpointReason,
     ContentBlock,
     DeliveryMode,
+    EventBufferConfig,
     ExternalHarnessCard,
     ExternalHarnessContext,
     ExternalHarnessInput,
@@ -68,6 +69,7 @@ from openjiuwen.agent_teams.external.protocol import (
     HostCapability,
     HarnessCheckpoint,
     HarnessEvent,
+    HarnessEventCursor,
     InteractionCancelReason,
     MessageRole,
     MonetaryAmount,
@@ -87,6 +89,9 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnTerminationKind,
     TurnUsage,
     UnsupportedHarnessCapabilityError,
+    event_retention,
+    harness_event_from_dict,
+    harness_event_to_dict,
     validate_interaction_response,
 )
 ```
@@ -191,7 +196,8 @@ FINISHED/ABORTED/FAILED 产出后
 
 实现必须为 observation channel 加 consumer lease；第二个 active iterator 立即抛
 `ExternalHarnessStateError`，不能让两个 async generator 竞争同一个 queue。Iterator 正常结束或
-被 `aclose()` 后释放 lease，后续调用才能继续消费。
+被幂等 `aclose()` 后释放 lease，后续调用才能继续消费；因此公开返回类型使用
+`HarnessEventCursor`，不是无法保证 close 的普通 `AsyncIterator`。
 
 复杂 team runtime 应只启动一个长期 `events()` consumer，并自行按 `turn_id` 聚合，不应同时调用
 `turn_events()`。每条 `HarnessEvent` 的 `sequence` 必须跨所有载荷类型严格递增；`timestamp`
@@ -201,9 +207,12 @@ FINISHED/ABORTED/FAILED 产出后
 event = HarnessEvent(
     sequence=next_sequence(),
     timestamp=time.time(),
+    team_session_id=context.team_session_id,
+    member_agent_id=context.member_agent_id,
     session_id=provider_session_id,
     turn_id=turn_id,
     correlation_id=accepted_message_id,
+    causation_ids=(accepted_message_id, *steering_message_ids),
     event=OutputEvent(
         output_id="answer-1",
         kind=OutputKind.TEXT,
@@ -215,6 +224,10 @@ event = HarnessEvent(
 )
 await event_queue.put(event)
 ```
+
+`correlation_id` 用于把事件聚合到同一逻辑 trace，`causation_ids` 列出实际造成该事件的输入/request。
+message/turn ID 在 member + team session 内唯一，item/call ID 在 Turn 内唯一，request ID 在 cycle 内
+唯一。timestamp/deadline 使用有限 UTC Unix seconds；duration 使用 monotonic clock 计算的毫秒数。
 
 公共载荷包括：
 
@@ -231,6 +244,14 @@ await event_queue.put(event)
 
 不要先转成 OpenJiuwen 内部 `OutputSchema`。未来 `MemberRuntime` adapter 才负责该转换，协议入口
 应保留 SDK item、reasoning、usage 和扩展信息。
+
+Observation buffer 必须有正 capacity。retention 只能由 `event_retention(payload)` 推导：lifecycle、
+delta、final、warning/error、provider/unknown event 是 REQUIRED；snapshot/cumulative usage 可合并；
+debug/info diagnostic 和 hook observation 才可 best-effort drop。队列满且没有安全候选时必须阻塞
+producer，禁止丢 terminal 或 delta。
+
+跨进程传输只使用 `harness_event_to_dict` / `harness_event_from_dict`。codec 产生稳定
+`event_type + schema_version`；新版本未知事件会成为 `UnknownEvent`，不得在 adapter 中静默删除。
 
 Terminal Turn 必须携带结构化结果，并保证事件与状态匹配：
 
@@ -393,7 +414,8 @@ provider 发出 checkpoint 通知。相同 `checkpoint_id` 用于 retry；每次
 错配或不可迁移必须失败，不能悄悄创建新 session。
 
 `data` 必须 JSON-safe，不能包含 token、完整 env、SDK client、event loop、文件句柄或任意 Python
-对象。Provider 自己负责旧 schema 的兼容和迁移。
+对象，且 checkpoint data 不得超过 4 MiB。所有 JSON 字段在构造时递归复制并冻结，NaN/Infinity
+立即失败；Provider 自己负责旧 schema 的兼容和迁移。
 
 ## 10. 核心实现骨架
 
@@ -443,6 +465,7 @@ _END = object()
 
 
 class AcmeHarness:
+    event_buffer_config = EventBufferConfig(capacity=1024)
     card = ExternalHarnessCard(
         name="acme-code-agent",
         implementation_version="1.0.0",
@@ -645,6 +668,8 @@ class AcmeHarness:
             HarnessEvent(
                 sequence=self._sequence,
                 timestamp=time.time(),
+                team_session_id=self._context.team_session_id,
+                member_agent_id=self._context.member_agent_id,
                 session_id=self._session_id,
                 event=payload,
                 **correlation,
@@ -742,6 +767,11 @@ class AcmeProvider:
 17. SDK 鉴权、限流、崩溃和超时落为 FAILED + `TurnError`，并且诊断不泄露凭据；
 18. 未安装 Claude/Codex 等可选 SDK 时，protocol 包仍可导入。
 19. MCP command/url/instance 缺失、错配或多填时都在启动 provider 前失败。
+20. cursor 提前 `aclose()` 后释放 lease，后续 consumer 可继续；
+21. JSON 字段无可变别名，NaN/Infinity/object/超大 checkpoint 被拒绝；
+22. event codec JSON round-trip，未知 type/version decode/re-encode 不丢 payload；
+23. required event 在背压下不丢，只有 derived coalescible/best-effort 类别按 policy 处理；
+24. ID scope、correlation/causation 与 Unix/monotonic 时间语义符合 spec。
 
 ## 14. 当前限制与后续接线
 

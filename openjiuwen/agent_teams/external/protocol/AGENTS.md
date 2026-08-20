@@ -15,6 +15,8 @@ directory until their explicit migrations.
 - `checkpoints.py`: versioned checkpoint envelope and durable sink Protocol.
 - `hooks.py`: awaited control-plane hook types and dispatcher Protocol.
 - `tools.py`: native-tool gateway and provider-neutral MCP descriptions.
+- `stream.py`: explicitly closable single-consumer event cursor.
+- `serialization.py`: stable discriminator-bearing event JSON codec.
 - `errors.py`: errors crossing this protocol boundary.
 - `README.md`: package-level rationale and invariant summary.
 
@@ -82,6 +84,16 @@ these concepts.
 12. Hook ASK resolves through tool-approval interaction; PROVIDER_POLICY
     delegates to an explicitly configured provider-native policy. Neither is
     an observational event response.
+13. JSON values are recursively validated, copied, and frozen at construction.
+    NaN, infinity, mutable container aliases, and arbitrary Python objects do
+    not cross the provider-neutral boundary. In-process MCP instances are the
+    only explicitly local opaque object.
+14. Event buffers are bounded. Lifecycle, item, delta usage/output, final
+    output, warnings, errors, and unknown events are REQUIRED and never drop.
+    Only derived COALESCIBLE or BEST_EFFORT events may be compacted/dropped.
+15. Public event cursors provide idempotent `aclose()` so early consumer exit
+    releases the single-consumer lease. Wire events use the official codec and
+    preserve unknown event types.
 
 ## Compatibility
 

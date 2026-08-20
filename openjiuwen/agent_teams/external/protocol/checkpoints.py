@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.models import JsonObject
+from openjiuwen.agent_teams.external.protocol.models import JsonObject, freeze_json_object, json_value_to_builtin
+
+MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 
 
 class CheckpointReason(str, Enum):
@@ -53,6 +56,13 @@ class HarnessCheckpoint:
                 raise ValueError(f"checkpoint {field_name} must not be empty")
         if self.sequence < 0:
             raise ValueError("checkpoint sequence must be non-negative")
+        if self.session_id == "" or self.revision == "":
+            raise ValueError("optional checkpoint ids must not be empty strings")
+        data = freeze_json_object(self.data)
+        encoded_size = len(json.dumps(json_value_to_builtin(data), separators=(",", ":")).encode("utf-8"))
+        if encoded_size > MAX_CHECKPOINT_BYTES:
+            raise ValueError(f"checkpoint data exceeds {MAX_CHECKPOINT_BYTES} bytes")
+        object.__setattr__(self, "data", data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,4 +102,10 @@ class HarnessCheckpointSink(Protocol):
         ...
 
 
-__all__ = ["CheckpointReason", "CheckpointSaveReceipt", "HarnessCheckpoint", "HarnessCheckpointSink"]
+__all__ = [
+    "MAX_CHECKPOINT_BYTES",
+    "CheckpointReason",
+    "CheckpointSaveReceipt",
+    "HarnessCheckpoint",
+    "HarnessCheckpointSink",
+]

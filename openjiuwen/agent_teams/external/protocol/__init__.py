@@ -4,6 +4,7 @@
 """Public protocol for integrating third-party agent harnesses with teams."""
 
 from openjiuwen.agent_teams.external.protocol.checkpoints import (
+    MAX_CHECKPOINT_BYTES,
     CheckpointReason,
     CheckpointSaveReceipt,
     HarnessCheckpoint,
@@ -20,6 +21,9 @@ from openjiuwen.agent_teams.external.protocol.events import (
     TERMINAL_TURN_EVENT_KINDS,
     DiagnosticEvent,
     DiagnosticLevel,
+    EventBufferConfig,
+    EventOverflowPolicy,
+    EventRetention,
     HarnessEvent,
     HarnessEventPayload,
     HookEventPhase,
@@ -34,8 +38,10 @@ from openjiuwen.agent_teams.external.protocol.events import (
     StateChangedEvent,
     TurnEventKind,
     TurnLifecycleEvent,
+    UnknownEvent,
     UsageUpdatedEvent,
     UsageUpdateMode,
+    event_retention,
 )
 from openjiuwen.agent_teams.external.protocol.hooks import (
     AfterToolContext,
@@ -75,11 +81,15 @@ from openjiuwen.agent_teams.external.protocol.models import (
     ExternalHarnessContext,
     ExternalHarnessInput,
     HarnessCapability,
+    HarnessTelemetry,
     HostCapability,
     JsonObject,
     JsonValue,
     ResumePolicy,
     SendReceipt,
+    freeze_json_object,
+    freeze_json_value,
+    json_value_to_builtin,
 )
 from openjiuwen.agent_teams.external.protocol.protocol import (
     ExternalHarnessProtocol,
@@ -97,6 +107,12 @@ from openjiuwen.agent_teams.external.protocol.results import (
     TurnTerminationKind,
     TurnUsage,
 )
+from openjiuwen.agent_teams.external.protocol.serialization import (
+    EVENT_WIRE_SCHEMA_VERSION,
+    harness_event_from_dict,
+    harness_event_to_dict,
+)
+from openjiuwen.agent_teams.external.protocol.stream import HarnessEventCursor
 from openjiuwen.agent_teams.external.protocol.tools import (
     ExternalToolGateway,
     McpServerConfig,
@@ -134,13 +150,19 @@ __all__ = [
     "ExternalHarnessProvider",
     "ExternalHarnessStateError",
     "ExternalToolGateway",
+    "EVENT_WIRE_SCHEMA_VERSION",
+    "EventBufferConfig",
+    "EventOverflowPolicy",
+    "EventRetention",
     "HarnessCapability",
     "HarnessEvent",
+    "HarnessEventCursor",
     "HarnessEventPayload",
     "HarnessHookDispatcher",
     "HarnessInteractionHandler",
     "HarnessInteractionRequest",
     "HarnessInteractionResponse",
+    "HarnessTelemetry",
     "HostCapability",
     "HookEventPhase",
     "HookObservedEvent",
@@ -154,6 +176,7 @@ __all__ = [
     "McpElicitationRequest",
     "McpElicitationResponse",
     "McpTransport",
+    "MAX_CHECKPOINT_BYTES",
     "MessageRole",
     "MonetaryAmount",
     "OutputChannel",
@@ -185,10 +208,17 @@ __all__ = [
     "TurnTermination",
     "TurnTerminationKind",
     "TurnUsage",
+    "UnknownEvent",
     "UnsupportedHarnessCapabilityError",
     "UsageUpdatedEvent",
     "UsageUpdateMode",
     "UserInputRequest",
     "UserInputResponse",
+    "event_retention",
+    "freeze_json_object",
+    "freeze_json_value",
+    "harness_event_from_dict",
+    "harness_event_to_dict",
+    "json_value_to_builtin",
     "validate_interaction_response",
 ]

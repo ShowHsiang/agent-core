@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.models import JsonObject
+from openjiuwen.agent_teams.external.protocol.models import (
+    JsonObject,
+    JsonValue,
+    freeze_json_object,
+    freeze_json_value,
+)
 
 
 class ToolDecisionKind(str, Enum):
@@ -53,6 +58,9 @@ class BeforeToolContext:
     tool_name: str
     arguments: JsonObject
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", freeze_json_object(self.arguments))
+
 
 @dataclass(frozen=True, slots=True)
 class ToolDecision:
@@ -64,6 +72,8 @@ class ToolDecision:
     additional_context: str | None = None
 
     def __post_init__(self) -> None:
+        if self.updated_arguments is not None:
+            object.__setattr__(self, "updated_arguments", freeze_json_object(self.updated_arguments))
         if self.decision is ToolDecisionKind.REWRITE and self.updated_arguments is None:
             raise ValueError("rewrite tool decision requires updated_arguments")
         if self.decision is not ToolDecisionKind.REWRITE and self.updated_arguments is not None:
@@ -80,8 +90,12 @@ class AfterToolContext:
     call_id: str
     tool_name: str
     arguments: JsonObject
-    result: Any = None
+    result: JsonValue = None
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", freeze_json_object(self.arguments))
+        object.__setattr__(self, "result", freeze_json_value(self.result))
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +103,11 @@ class AfterToolResult:
     """Optional tool-result rewrite and context returned by a hook."""
 
     replace_result: bool = False
-    updated_result: Any = None
+    updated_result: JsonValue = None
     additional_context: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "updated_result", freeze_json_value(self.updated_result))
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +118,10 @@ class StopHookContext:
     session_id: str | None
     turn_id: str | None
     reason: str | None = None
-    metadata: Mapping[str, Any] | None = None
+    metadata: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", freeze_json_object(self.metadata))
 
 
 @runtime_checkable

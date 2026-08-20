@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Mapping, Protocol, TypeAlias, runtime_checkable
 
 from openjiuwen.agent_teams.external.protocol.errors import ExternalHarnessProtocolError
 
@@ -19,8 +21,59 @@ if TYPE_CHECKING:
 
 PROTOCOL_VERSION = "4.0"
 
-JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+JsonValue: TypeAlias = (
+    str | int | float | bool | None | list["JsonValue"] | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
+)
 JsonObject: TypeAlias = Mapping[str, JsonValue]
+
+
+def freeze_json_value(value: object) -> JsonValue:
+    """Validate and recursively freeze a JSON-compatible value."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json_value(item) for item in value)
+    if isinstance(value, Mapping):
+        frozen: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            frozen[key] = freeze_json_value(item)
+        return MappingProxyType(frozen)
+    raise TypeError(f"value of type {type(value).__name__} is not JSON-compatible")
+
+
+def freeze_json_object(value: Mapping[str, object]) -> JsonObject:
+    """Validate, copy, and recursively freeze a JSON object."""
+
+    frozen = freeze_json_value(value)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("JSON object must be a mapping")
+    return frozen
+
+
+def json_value_to_builtin(value: JsonValue) -> str | int | float | bool | None | list[object] | dict[str, object]:
+    """Convert an immutable protocol JSON value to standard JSON containers."""
+
+    if isinstance(value, (list, tuple)):
+        return [json_value_to_builtin(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: json_value_to_builtin(item) for key, item in value.items()}
+    return value
+
+
+@runtime_checkable
+class HarnessTelemetry(Protocol):
+    """Minimal provider-neutral telemetry service supplied by the host."""
+
+    def record(self, name: str, attributes: JsonObject) -> None:
+        """Record one already-redacted telemetry observation."""
+        ...
 
 
 class HarnessCapability(str, Enum):
@@ -88,6 +141,10 @@ class ExternalHarnessCard:
     optional_host_capabilities: frozenset[HostCapability] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "compatible_protocol_versions", frozenset(self.compatible_protocol_versions))
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+        object.__setattr__(self, "required_host_capabilities", frozenset(self.required_host_capabilities))
+        object.__setattr__(self, "optional_host_capabilities", frozenset(self.optional_host_capabilities))
         if not self.name or not self.implementation_version or not self.protocol_version:
             raise ValueError("harness card identity and versions must not be empty")
         if self.protocol_version not in self.compatible_protocol_versions:
@@ -121,8 +178,12 @@ class ExternalHarnessCard:
 class ExternalHarnessInput:
     """One input accepted by an external harness."""
 
-    content: Any
+    content: JsonValue
     metadata: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", freeze_json_value(self.content))
+        object.__setattr__(self, "metadata", freeze_json_object(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,8 +227,26 @@ class ExternalHarnessContext:
     mcp_servers: tuple["McpServerConfig", ...] = ()
     hooks: "HarnessHookDispatcher | None" = None
     interactions: "HarnessInteractionHandler | None" = None
-    telemetry: Any = None
+    telemetry: HarnessTelemetry | None = None
     metadata: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        required = {
+            "team_name": self.team_name,
+            "member_name": self.member_name,
+            "member_agent_id": self.member_agent_id,
+            "team_session_id": self.team_session_id,
+            "protocol_version": self.protocol_version,
+        }
+        for field_name, value in required.items():
+            if not value:
+                raise ValueError(f"external harness context {field_name} must not be empty")
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
+            raise TypeError("external harness context env must map strings to strings")
+        object.__setattr__(self, "host_capabilities", frozenset(self.host_capabilities))
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
+        object.__setattr__(self, "metadata", freeze_json_object(self.metadata))
 
 
 __all__ = [
@@ -178,9 +257,13 @@ __all__ = [
     "ExternalHarnessContext",
     "ExternalHarnessInput",
     "HarnessCapability",
+    "HarnessTelemetry",
     "HostCapability",
     "JsonObject",
     "JsonValue",
     "ResumePolicy",
     "SendReceipt",
+    "freeze_json_object",
+    "freeze_json_value",
+    "json_value_to_builtin",
 ]

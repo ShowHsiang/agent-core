@@ -50,6 +50,8 @@ Round 误用提供公共别名。
 9. checkpoint 由 provider 解释，必须有版本、可 JSON 序列化、绑定 `member_agent_id`、携带幂等 ID 和
    单调 sequence，且不得包含凭据。
 10. protocol 包不依赖任何可选厂商 SDK。
+11. 跨协议 JSON 值构造时递归校验、复制和冻结；禁止 NaN/Infinity、任意 Python object 和可变别名。
+12. event buffer 有界，retention 由 payload 推导；REQUIRED event 永不丢弃。
 
 ## 接口契约
 
@@ -67,8 +69,9 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `session_id` | provider-native conversation/thread/session id |
 | `start(context)` | 绑定成员身份、宿主服务和恢复检查点并启动 cycle |
 | `stop()` | 终止运行、释放资源、关闭 event stream；幂等 |
-| `events()` | cycle-long ordered observation stream；单消费者 |
-| `turn_events(turn_id=None)` | 指定已接受 Turn 或下一个 Turn 的有限流；包含 STARTED 和 terminal event |
+| `event_buffer_config` | 有界 capacity 与 overflow policy |
+| `events()` | cycle-long ordered `HarnessEventCursor`；单消费者、可 `aclose()` |
+| `turn_events(turn_id=None)` | 指定下一 Turn 的有限 cursor；包含 STARTED 和 terminal event |
 | `send(input, mode)` | 接受 AUTO/STEER/FOLLOW_UP 命令并返回 receipt |
 | `abort(mode)` | graceful/force abort；能力 gated |
 | `pause()` / `resume()` | warm/cold paused-turn continuation；能力 gated |
@@ -84,8 +87,10 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 
 ### Observation：HarnessEvent
 
-`events()` 返回统一信封 `HarnessEvent`。`sequence`、`timestamp`、`session_id`、`turn_id`、
-`item_id` 和 `correlation_id` 位于信封；载荷不重复这些公共字段。载荷包括：
+`events()` 返回统一信封 `HarnessEvent`。`team_session_id`、`member_agent_id`、`sequence`、`timestamp`、
+provider `session_id`、`turn_id`、`item_id`、`correlation_id` 和 `causation_ids` 位于信封；载荷不重复
+这些公共字段。`correlation_id` 聚合同一逻辑 trace；`causation_ids` 列出实际触发事件的消息/request，
+支持同一 Turn 被多次 STEER。载荷包括：
 
 - `OutputEvent`：稳定 `output_id` + content index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM
   channel，以及 DELTA/SNAPSHOT/FINAL operation；
@@ -103,12 +108,21 @@ FINISHED/ABORTED/FAILED（含）立即结束。PAUSED/RESUMED 保持相同 `turn
 SDK 的 `receive_messages()`/`receive_response()` 相同，不要求实现建立第二份多播队列。
 实现检测到第二个 active iterator 时必须抛 `ExternalHarnessStateError`，不能让两个 consumer 竞争
 同一 queue。
+cursor 正常 EOF 或显式 `aclose()` 都必须幂等释放 consumer lease。
 
 如果 cycle 在找到下一个 Turn 前正常关闭，`turn_events()` 可以空结束；如果已经产出 STARTED 却未
 产出对应 terminal event 就关闭，属于 `ExternalHarnessProtocolError`。
 
 公共事件不依赖 `OutputSchema`，避免三方 SDK 消息在协议入口被过早压缩。未来
 MemberRuntime adapter 负责把 `HarnessEvent` 转成内部 stream schema。
+
+Observation queue 必须使用正 capacity。`event_retention(payload)` 是 retention 的唯一来源：Turn/State/
+Item lifecycle、delta、final、warning/error、provider/unknown event 是 REQUIRED；snapshot output 和
+cumulative usage 是 COALESCIBLE；debug/info diagnostic 与 hook observation 是 BEST_EFFORT。队列满时
+只能按 policy 合并/丢弃允许的类别；没有安全候选时阻塞 producer，不得丢 required event。
+
+跨进程/第三方 wire 使用 `harness_event_to_dict` / `harness_event_from_dict`。信封包含稳定
+`event_type + schema_version` discriminator；未知 type/version 解码为 `UnknownEvent` 并可无损重编码。
 
 `TurnLifecycleEvent.result` 不允许 `Any`。terminal event 使用 `TurnResult` 表达 status、有序
 message/content block、final/structured projection、termination/error、usage、精确货币微单位 cost、
@@ -166,6 +180,17 @@ Provider adapter 负责把通用结构转换成自己的 SDK options；不得把
 - `checkpoint_id` 幂等标识与 scope 内单调 `sequence`；
 - 可选 `session_id`、`revision`；
 - JSON-safe `data`。
+
+Checkpoint `data` 最大 4 MiB；超限、非有限数字或非 JSON 对象在进入 sink 前失败。
+
+## ID 与时间作用域
+
+- `message_id`：member + team session 内唯一；`turn_id`：member + team session 内唯一；
+- `item_id` / `call_id`：Turn 内唯一；`request_id`：Harness start/stop cycle 内唯一；
+- `checkpoint_id`：provider/member/team session 内唯一，sequence 在同 scope 单调递增；
+- event `sequence`：一个 start/stop cycle 内严格递增；
+- event、deadline、started/completed timestamp 使用 UTC Unix seconds 且必须有限；
+- `duration_ms` 是 monotonic clock 计算的非负 elapsed time，不由 wall clock 相减替代。
 
 Host 在 `start` 时通过 `context.checkpoint` 提供检查点；`REQUIRE_RESUME` 缺失、provider 不匹配、
 成员不匹配或版本不可读取时必须失败。

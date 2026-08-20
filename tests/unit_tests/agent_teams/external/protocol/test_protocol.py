@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import FrozenInstanceError
 from typing import AsyncIterator
 
 import pytest
 
 from openjiuwen.agent_teams.external.protocol import (
+    MAX_CHECKPOINT_BYTES,
     PROTOCOL_VERSION,
     AbortMode,
     BeforeToolContext,
@@ -19,6 +21,11 @@ from openjiuwen.agent_teams.external.protocol import (
     CheckpointSaveReceipt,
     ContentBlock,
     DeliveryMode,
+    DiagnosticEvent,
+    DiagnosticLevel,
+    EventBufferConfig,
+    EventOverflowPolicy,
+    EventRetention,
     ExternalHarnessCard,
     ExternalHarnessContext,
     ExternalHarnessInput,
@@ -29,6 +36,7 @@ from openjiuwen.agent_teams.external.protocol import (
     HarnessCheckpoint,
     HarnessCheckpointSink,
     HarnessEvent,
+    HarnessEventCursor,
     HarnessInteractionHandler,
     HarnessInteractionRequest,
     HarnessInteractionResponse,
@@ -61,16 +69,21 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnTermination,
     TurnTerminationKind,
     TurnUsage,
+    UnknownEvent,
     UsageUpdatedEvent,
     UsageUpdateMode,
     UserInputRequest,
     UserInputResponse,
+    event_retention,
+    harness_event_from_dict,
+    harness_event_to_dict,
     validate_interaction_response,
 )
 from openjiuwen.agent_teams.harness import HarnessState
 
 
 class _Harness:
+    event_buffer_config = EventBufferConfig(capacity=16)
     card = ExternalHarnessCard(
         name="test-harness",
         implementation_version="1.0.0",
@@ -90,29 +103,39 @@ class _Harness:
             HarnessEvent(
                 sequence=1,
                 timestamp=0.0,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=StateChangedEvent(old=HarnessState.IDLE, new=HarnessState.RUNNING),
             ),
             HarnessEvent(
                 sequence=2,
                 timestamp=0.1,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.STARTED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=3,
                 timestamp=0.2,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.PAUSED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=4,
                 timestamp=0.3,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.RESUMED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=5,
                 timestamp=0.4,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=OutputEvent(
                     output_id="answer-1",
                     kind=OutputKind.TEXT,
@@ -124,6 +147,8 @@ class _Harness:
             HarnessEvent(
                 sequence=6,
                 timestamp=0.5,
+                team_session_id="team-session-1",
+                member_agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(
                     kind=TurnEventKind.FINISHED,
                     result=TurnResult(status=TurnStatus.COMPLETED, final_output="done"),
@@ -276,6 +301,20 @@ def test_structural_protocols_accept_complete_implementations() -> None:
     assert isinstance(_InteractionHandler(), HarnessInteractionHandler)
 
 
+@pytest.mark.asyncio
+async def test_event_cursor_supports_explicit_close() -> None:
+    harness = _Harness()
+    cursor = harness.events()
+
+    assert isinstance(cursor, HarnessEventCursor)
+    assert (await anext(cursor)).sequence == 1
+    await cursor.aclose()
+    await cursor.aclose()
+
+    remaining = [event async for event in harness.events()]
+    assert [event.sequence for event in remaining] == [2, 3, 4, 5, 6]
+
+
 def test_card_is_immutable_and_reports_capabilities() -> None:
     card = _Harness.card
 
@@ -413,6 +452,19 @@ def test_checkpoint_requires_provider_version_and_member_scope() -> None:
         )
 
 
+def test_checkpoint_rejects_oversized_provider_data() -> None:
+    with pytest.raises(ValueError, match="exceeds"):
+        HarnessCheckpoint(
+            provider="acme",
+            schema_version="1",
+            member_agent_id="member-a",
+            team_session_id="session-a",
+            checkpoint_id="checkpoint-1",
+            sequence=1,
+            data={"payload": "x" * MAX_CHECKPOINT_BYTES},
+        )
+
+
 @pytest.mark.asyncio
 async def test_interaction_handler_returns_correlated_response_and_cancels() -> None:
     handler = _InteractionHandler()
@@ -525,14 +577,18 @@ def test_event_envelope_carries_neutral_output_and_correlation() -> None:
         sequence=1,
         timestamp=1.5,
         event=payload,
+        team_session_id="team-session-1",
+        member_agent_id="team-a_member-a",
         session_id="session-1",
         turn_id="turn-1",
         correlation_id="message-1",
+        causation_ids=("message-1", "steer-1"),
     )
 
     assert event.event is payload
     assert event.turn_id == "turn-1"
     assert event.correlation_id == "message-1"
+    assert event.causation_ids == ("message-1", "steer-1")
     assert payload.operation is OutputOperation.DELTA
     assert payload.content_index == 1
 
@@ -580,7 +636,14 @@ def test_turn_terminal_event_requires_matching_structured_result() -> None:
     result = TurnResult(status=TurnStatus.COMPLETED, final_output="done")
     payload = TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=result)
 
-    event = HarnessEvent(sequence=2, timestamp=2.0, event=payload, turn_id="turn-1")
+    event = HarnessEvent(
+        sequence=2,
+        timestamp=2.0,
+        event=payload,
+        team_session_id="team-session-1",
+        member_agent_id="team-a_member-a",
+        turn_id="turn-1",
+    )
 
     assert payload.result is result
     assert event.event is payload
@@ -592,7 +655,13 @@ def test_turn_terminal_event_requires_matching_structured_result() -> None:
     with pytest.raises(ValueError, match="requires a result"):
         TurnLifecycleEvent(kind=TurnEventKind.FAILED)
     with pytest.raises(ValueError, match="requires turn_id"):
-        HarnessEvent(sequence=3, timestamp=3.0, event=payload)
+        HarnessEvent(
+            sequence=3,
+            timestamp=3.0,
+            event=payload,
+            team_session_id="team-session-1",
+            member_agent_id="team-a_member-a",
+        )
 
 
 def test_failed_result_requires_structured_error() -> None:
@@ -613,6 +682,102 @@ def test_provider_event_preserves_namespaced_extension_payload() -> None:
         payload={"thread_id": "thread-1"},
     )
 
-    event = HarnessEvent(sequence=4, timestamp=4.0, event=payload, session_id="thread-1")
+    event = HarnessEvent(
+        sequence=4,
+        timestamp=4.0,
+        event=payload,
+        team_session_id="team-session-1",
+        member_agent_id="team-a_member-a",
+        session_id="thread-1",
+    )
 
     assert event.event is payload
+
+
+def test_protocol_json_values_are_validated_and_frozen() -> None:
+    content = {"parts": ["one", {"value": 2}]}
+    harness_input = ExternalHarnessInput(content=content, metadata={"source": "test"})
+    content["parts"].append("mutated")
+
+    assert harness_input.content == {"parts": ("one", {"value": 2})}
+    with pytest.raises(TypeError):
+        harness_input.metadata["source"] = "changed"  # type: ignore[index]
+    with pytest.raises(ValueError, match="finite"):
+        ExternalHarnessInput(content=float("nan"))
+    with pytest.raises(TypeError, match="not JSON-compatible"):
+        ExternalHarnessInput(content=object())  # type: ignore[arg-type]
+
+
+def test_event_backpressure_retention_is_not_provider_selected() -> None:
+    snapshot = OutputEvent(
+        output_id="answer-1",
+        kind=OutputKind.TEXT,
+        content="current",
+        operation=OutputOperation.SNAPSHOT,
+    )
+    delta = OutputEvent(
+        output_id="answer-1",
+        kind=OutputKind.TEXT,
+        content="next",
+        operation=OutputOperation.DELTA,
+    )
+
+    assert event_retention(snapshot) is EventRetention.COALESCIBLE
+    assert event_retention(delta) is EventRetention.REQUIRED
+    assert event_retention(DiagnosticEvent(level=DiagnosticLevel.DEBUG, message="trace")) is EventRetention.BEST_EFFORT
+    assert EventBufferConfig(capacity=4).overflow is EventOverflowPolicy.COALESCE_OR_BLOCK
+    with pytest.raises(ValueError, match="positive"):
+        EventBufferConfig(capacity=0)
+
+
+def test_event_json_codec_round_trips_and_preserves_unknown_events() -> None:
+    event = HarnessEvent(
+        sequence=7,
+        timestamp=7.5,
+        event=OutputEvent(
+            output_id="answer-1",
+            kind=OutputKind.STRUCTURED,
+            content={"answer": [1, 2]},
+            operation=OutputOperation.FINAL,
+        ),
+        team_session_id="team-session-1",
+        member_agent_id="team-a_member-a",
+        session_id="provider-session-1",
+        turn_id="turn-1",
+        correlation_id="trace-1",
+        causation_ids=("message-1",),
+    )
+
+    wire = harness_event_to_dict(event)
+    json.dumps(wire)
+    assert harness_event_from_dict(wire) == event
+
+    wire["event_type"] = "future_event"
+    wire["payload"] = {"new_field": [1, 2, 3]}
+    decoded = harness_event_from_dict(wire)
+
+    assert isinstance(decoded.event, UnknownEvent)
+    assert decoded.event.payload == {"new_field": (1, 2, 3)}
+    assert harness_event_to_dict(decoded)["event_type"] == "future_event"
+
+
+def test_event_scope_time_and_causation_are_validated() -> None:
+    payload = DiagnosticEvent(level=DiagnosticLevel.INFO, message="ready")
+
+    with pytest.raises(ValueError, match="finite Unix"):
+        HarnessEvent(
+            sequence=1,
+            timestamp=float("inf"),
+            event=payload,
+            team_session_id="team-session-1",
+            member_agent_id="member-a",
+        )
+    with pytest.raises(ValueError, match="duplicates"):
+        HarnessEvent(
+            sequence=1,
+            timestamp=1.0,
+            event=payload,
+            team_session_id="team-session-1",
+            member_agent_id="member-a",
+            causation_ids=("message-1", "message-1"),
+        )

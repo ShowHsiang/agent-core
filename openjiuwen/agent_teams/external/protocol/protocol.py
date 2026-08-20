@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.external.protocol.checkpoints import HarnessCheckpoint
-from openjiuwen.agent_teams.external.protocol.events import HarnessEvent
+from openjiuwen.agent_teams.external.protocol.events import EventBufferConfig
 from openjiuwen.agent_teams.external.protocol.models import (
     AbortMode,
     DeliveryMode,
@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.external.protocol.models import (
     JsonObject,
     SendReceipt,
 )
+from openjiuwen.agent_teams.external.protocol.stream import HarnessEventCursor
 from openjiuwen.agent_teams.harness.state import HarnessState
 
 
@@ -45,6 +46,11 @@ class ExternalHarnessProtocol(Protocol):
         """Return the provider-native session id once one is available."""
         ...
 
+    @property
+    def event_buffer_config(self) -> EventBufferConfig:
+        """Return the bounded backpressure policy used for observations."""
+        ...
+
     async def start(self, context: ExternalHarnessContext) -> None:
         """Validate host compatibility, start a cycle, and settle in IDLE."""
         ...
@@ -56,7 +62,7 @@ class ExternalHarnessProtocol(Protocol):
         """
         ...
 
-    def events(self) -> AsyncIterator[HarnessEvent]:
+    def events(self) -> HarnessEventCursor:
         """Return the cycle-long ordered observation stream.
 
         The iterator remains open across turn boundaries and ends only when
@@ -66,7 +72,7 @@ class ExternalHarnessProtocol(Protocol):
         """
         ...
 
-    def turn_events(self, turn_id: str | None = None) -> AsyncIterator[HarnessEvent]:
+    def turn_events(self, turn_id: str | None = None) -> HarnessEventCursor:
         """Return one finite turn from the observation stream.
 
         ``turn_id`` identifies and validates the next unconsumed accepted turn;

@@ -54,6 +54,12 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
+- `HarnessEventCursor`: a closable async cursor that releases the observation
+  consumer lease on normal completion or early `aclose()`.
+- `EventBufferConfig` and `event_retention`: bounded backpressure with derived
+  required/coalescible/best-effort retention classes.
+- `harness_event_to_dict` / `harness_event_from_dict`: the stable JSON codec;
+  unknown shared event types survive decode/re-encode.
 - `TurnResult`: a typed terminal result containing normalized messages,
   convenience output projections, termination/failure, usage, exact monetary
   cost, timing, and provider extension data.
@@ -156,7 +162,13 @@ class MyHarness:
     `final_output` is a convenience projection.
 11. Provider startup validates the host protocol version and every required
     fine-grained host capability before doing work.
-12. Environment values, credentials, and provider client objects must never be
+12. Events carry team-session/member scope. `correlation_id` groups a logical
+    trace; `causation_ids` lists every exact input/request that caused an event.
+13. JSON data is recursively validated and frozen. Event buffers are bounded;
+    required events never drop, and cursors expose idempotent `aclose()`.
+14. Wire transport uses the official discriminator-bearing codec and preserves
+    unknown event types and schema versions.
+15. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
 
 ## Documents

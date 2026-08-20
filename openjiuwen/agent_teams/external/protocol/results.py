@@ -5,10 +5,16 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from openjiuwen.agent_teams.external.protocol.models import JsonObject, JsonValue
+from openjiuwen.agent_teams.external.protocol.models import (
+    JsonObject,
+    JsonValue,
+    freeze_json_object,
+    freeze_json_value,
+)
 
 
 class TurnStatus(str, Enum):
@@ -50,6 +56,8 @@ class ContentBlock:
     def __post_init__(self) -> None:
         if not self.block_id or not self.kind:
             raise ValueError("content block id and kind must not be empty")
+        object.__setattr__(self, "content", freeze_json_value(self.content))
+        object.__setattr__(self, "data", freeze_json_object(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +72,8 @@ class TurnMessage:
     def __post_init__(self) -> None:
         if not self.message_id:
             raise ValueError("turn message_id must not be empty")
+        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(self, "data", freeze_json_object(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +84,9 @@ class TurnTermination:
     message: str | None = None
     code: str | None = None
     provider_data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_data", freeze_json_object(self.provider_data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +99,10 @@ class MonetaryAmount:
     def __post_init__(self) -> None:
         if self.micros < 0:
             raise ValueError("monetary micros must be non-negative")
-        if not self.currency:
-            raise ValueError("monetary currency must not be empty")
+        currency = self.currency.upper()
+        if len(currency) != 3 or not currency.isalpha():
+            raise ValueError("monetary currency must be a three-letter code")
+        object.__setattr__(self, "currency", currency)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +116,18 @@ class TurnUsage:
     total_tokens: int | None = None
     provider_data: JsonObject = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        counters = (
+            self.input_tokens,
+            self.output_tokens,
+            self.cached_input_tokens,
+            self.reasoning_output_tokens,
+            self.total_tokens,
+        )
+        if any(counter is not None and counter < 0 for counter in counters):
+            raise ValueError("turn usage counters must be non-negative")
+        object.__setattr__(self, "provider_data", freeze_json_object(self.provider_data))
+
 
 @dataclass(frozen=True, slots=True)
 class TurnError:
@@ -111,6 +138,11 @@ class TurnError:
     category: str | None = None
     retryable: bool | None = None
     provider_data: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.message:
+            raise ValueError("turn error message must not be empty")
+        object.__setattr__(self, "provider_data", freeze_json_object(self.provider_data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +168,10 @@ class TurnResult:
     provider_data: JsonObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "messages", tuple(self.messages))
+        object.__setattr__(self, "final_output", freeze_json_value(self.final_output))
+        object.__setattr__(self, "structured_output", freeze_json_value(self.structured_output))
+        object.__setattr__(self, "provider_data", freeze_json_object(self.provider_data))
         if self.status is TurnStatus.FAILED and self.error is None:
             raise ValueError("failed turn result requires error")
         if self.status is not TurnStatus.FAILED and self.error is not None:
@@ -144,6 +180,13 @@ class TurnResult:
             raise ValueError("interrupted turn result requires termination")
         if self.status is not TurnStatus.INTERRUPTED and self.termination is not None:
             raise ValueError("only interrupted turn result may contain termination")
+        for field_name, timestamp in (("started_at", self.started_at), ("completed_at", self.completed_at)):
+            if timestamp is not None and (not math.isfinite(timestamp) or timestamp < 0):
+                raise ValueError(f"turn {field_name} must be a finite Unix timestamp")
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("turn completed_at must not precede started_at")
+        if self.duration_ms is not None and self.duration_ms < 0:
+            raise ValueError("turn duration_ms must be non-negative monotonic elapsed time")
 
 
 __all__ = [
