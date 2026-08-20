@@ -1,0 +1,153 @@
+# Third-party agent harness protocol
+
+`openjiuwen.agent_teams.external.protocol` defines the public Python SPI for a
+third-party agent harness that runs as an OpenJiuwen team member. The package is
+independent of the current Claude Code, Codex, and subprocess runtimes; those
+backends will migrate separately.
+
+The current contract version is `3.0`.
+
+## Boundary
+
+```text
+Team coordination / MemberRuntime
+              |
+   future member-runtime adapter
+              |
+     ExternalHarnessProtocol
+              |
+  Claude Code / Codex / Jiuwen SDK / other harness
+```
+
+`ExternalHarnessProtocol` is a high-level, multi-turn behavioral contract. A
+conforming implementation owns the provider session, accepts concurrent
+commands, emits a cycle-long ordered event stream, answers provider-initiated
+interactions through host services, and publishes recoverable checkpoints.
+
+## Terminology
+
+This protocol uses the following hierarchy consistently:
+
+```text
+Session
+└── Turn          external input -> stable external output
+    └── Iteration one Agent Loop cycle
+        └── Step  one observable atomic execution action
+```
+
+`Round` is reserved for a multi-agent collaboration or protocol phase that may
+contain turns from multiple agents. The single-agent harness API therefore uses
+`turn_id`, `TurnLifecycleEvent`, and `turn_events()`.
+
+## Public concepts
+
+- `ExternalHarnessProtocol`: lifecycle, input delivery, abort/pause/resume,
+  cycle-long `events()`, finite per-turn `turn_events()`, and checkpoint
+  snapshot export.
+- `ExternalHarnessProvider`: provider-owned configuration validation and
+  construction of an unstarted harness.
+- `ExternalHarnessCard`: static identity, protocol version, and optional
+  capabilities.
+- `ExternalHarnessContext`: member identity plus host services injected at
+  `start`, including tools, MCP, hooks, interactions, and checkpoint storage.
+- `HarnessEvent`: an event envelope with global ordering and correlation IDs.
+  Its payload is provider-neutral; `ProviderEvent` preserves namespaced
+  extensions without changing the shared protocol.
+- `TurnResult`: a typed terminal result containing normalized status, output,
+  usage, failure, timing, cost, and provider extension data.
+- `HarnessInteractionHandler`: awaited request/response control plane for tool
+  approvals, user input, MCP elicitation, dynamic tool calls, and provider
+  extensions.
+- `HarnessHookDispatcher`: lifecycle policy callbacks. Hooks are not the SDK's
+  general request/response channel.
+- `HarnessCheckpoint` and `HarnessCheckpointSink`: versioned provider state and
+  a durable push path. `export_checkpoint()` remains available for snapshots.
+
+## The three planes
+
+```text
+observation: Harness -> events() -> host consumer
+interaction: Harness -> interaction handler -> response -> Harness
+hooks:       Harness -> lifecycle hook -> policy result -> Harness
+```
+
+An event consumer never returns approval or user input. A hook event is only an
+observation of a hook invocation. Provider SDK requests that block execution
+must use `HarnessInteractionHandler`.
+
+## Continuous and per-turn streams
+
+The observation channel has two alternative consumption views, following the
+Claude SDK distinction between continuous messages and one response:
+
+```python
+# Simple request/response workflow: includes STARTED and terminal, then ends.
+async for event in harness.turn_events():
+    consume(event)
+
+# Long-running team workflow: crosses turn boundaries, ends at stop.
+async for event in harness.events():
+    consume(event)
+```
+
+Both methods consume the same logical single-consumer stream. They are not
+independent subscriptions and must not run concurrently. Repeated
+`turn_events()` calls consume consecutive turns. The terminal event is
+included so the caller receives the complete `TurnResult` before the iterator
+ends. A second active iterator must fail with `ExternalHarnessStateError`.
+
+## Minimal shape
+
+```python
+from openjiuwen.agent_teams.external.protocol import (
+    ExternalHarnessCard,
+    ExternalHarnessProtocol,
+    HarnessCapability,
+)
+
+
+class MyHarness:
+    card = ExternalHarnessCard(
+        name="my-agent",
+        implementation_version="1.0.0",
+        capabilities=frozenset({HarnessCapability.HOST_INTERACTIONS}),
+    )
+
+    # Implement every member of ExternalHarnessProtocol.
+
+
+# Structural presence only; behavioral contract tests are still required.
+# assert isinstance(MyHarness(), ExternalHarnessProtocol)
+```
+
+## Required invariants
+
+1. Public commands are concurrency-safe and state transitions have one logical
+   writer inside the harness.
+2. `start` creates one cycle and settles in `HarnessState.IDLE`; idempotent
+   `stop` closes events and settles in `TERMINATED`.
+3. `events()` is the full-cycle stream; `turn_events()` is the finite next-turn
+   view. They share one consumer, and envelope sequence numbers remain
+   strictly increasing across every payload type.
+4. Every turn emits one `STARTED` and exactly one matching terminal event.
+   Every terminal event carries a `TurnResult` with the corresponding status.
+5. `send` acknowledges acceptance without waiting for the turn to finish.
+6. Unsupported optional behavior raises
+   `UnsupportedHarnessCapabilityError`; it must not silently succeed.
+7. Awaited provider requests use `context.interactions`; events are observation
+   and hooks are lifecycle policy callbacks.
+8. Checkpoints are provider-owned, versioned, JSON-serializable, and scoped to
+   one `member_agent_id`. Save them after material provider-state changes, not
+   only during shutdown.
+9. Environment values, credentials, and provider client objects must never be
+   copied into events, checkpoints, exceptions, or logs.
+
+## Documents
+
+- Third-party development guide:
+  `docs/dev/agent_teams/external_harness_integration.md`
+- Long-lived team subsystem specification:
+  `openjiuwen/agent_teams/docs/specs/S_24_external-harness-protocol.md`
+
+The current Claude Code and Codex implementations remain under
+`external/cli_agent/` and do not yet implement this package.

@@ -13,6 +13,8 @@ Public surface:
         hands to an external agent (db + transport + identity).
     ExternalTeamClient — opens db + messager from a descriptor and exposes
         the collaboration operations (send / view / claim / ... + inbox).
+    external.protocol — provider-neutral Python SPI for third-party agent
+        harnesses. Existing CLI/SDK backends are not migrated to it yet.
 """
 
 from openjiuwen.agent_teams.external.client import ExternalTeamClient

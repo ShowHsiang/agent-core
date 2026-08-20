@@ -1,0 +1,136 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Synchronous control-plane hooks for third-party agent harnesses."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Mapping, Protocol, runtime_checkable
+
+from openjiuwen.agent_teams.external.protocol.models import JsonObject
+
+
+class ToolDecisionKind(str, Enum):
+    """Decision returned before a tool invocation."""
+
+    ALLOW = "allow"
+    DENY = "deny"
+    ASK = "ask"
+    DEFER = "defer"
+
+
+@dataclass(frozen=True, slots=True)
+class BeforePromptContext:
+    """Context supplied before an input reaches the external agent."""
+
+    member_name: str
+    session_id: str | None
+    turn_id: str | None
+    prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class BeforePromptResult:
+    """Potential prompt rewrite or stop decision returned by a hook."""
+
+    prompt: str
+    continue_execution: bool = True
+    reason: str | None = None
+    additional_context: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeToolContext:
+    """Context supplied before an external agent invokes a tool."""
+
+    member_name: str
+    session_id: str | None
+    turn_id: str | None
+    call_id: str
+    tool_name: str
+    arguments: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDecision:
+    """Permission and optional input rewrite returned before tool execution."""
+
+    decision: ToolDecisionKind
+    reason: str | None = None
+    updated_arguments: JsonObject | None = None
+    additional_context: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AfterToolContext:
+    """Context supplied after a successful or failed tool invocation."""
+
+    member_name: str
+    session_id: str | None
+    turn_id: str | None
+    call_id: str
+    tool_name: str
+    arguments: JsonObject
+    result: Any = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AfterToolResult:
+    """Optional tool-result rewrite and context returned by a hook."""
+
+    replace_result: bool = False
+    updated_result: Any = None
+    additional_context: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StopHookContext:
+    """Context supplied when a turn is about to stop."""
+
+    member_name: str
+    session_id: str | None
+    turn_id: str | None
+    reason: str | None = None
+    metadata: Mapping[str, Any] | None = None
+
+
+@runtime_checkable
+class HarnessHookDispatcher(Protocol):
+    """Control-plane callbacks awaited by a harness at execution boundaries.
+
+    Hook return values may change or stop execution. Hook lifecycle events in
+    :mod:`events` are only observational mirrors and must not be used to make
+    permission decisions.
+    """
+
+    async def before_prompt(self, context: BeforePromptContext) -> BeforePromptResult:
+        """Inspect or rewrite an input before model execution."""
+        ...
+
+    async def before_tool(self, context: BeforeToolContext) -> ToolDecision:
+        """Authorize, reject, defer, or rewrite a tool invocation."""
+        ...
+
+    async def after_tool(self, context: AfterToolContext) -> AfterToolResult:
+        """Inspect or rewrite a tool result after execution."""
+        ...
+
+    async def on_stop(self, context: StopHookContext) -> None:
+        """Observe a pending turn stop before it is finalized."""
+        ...
+
+
+__all__ = [
+    "AfterToolContext",
+    "AfterToolResult",
+    "BeforePromptContext",
+    "BeforePromptResult",
+    "BeforeToolContext",
+    "HarnessHookDispatcher",
+    "StopHookContext",
+    "ToolDecision",
+    "ToolDecisionKind",
+]

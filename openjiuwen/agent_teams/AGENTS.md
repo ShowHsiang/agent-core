@@ -10,6 +10,23 @@
 - `agent/AGENTS.md` — TeamAgent 四象限分解 + spawn / coordination / stream 等 manager
 - `cli/AGENTS.md` — 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
 
+## 统一术语
+
+新 API、事件、trace 和文档统一采用以下层级：
+
+```text
+Session
+└── Turn          一次外部输入 -> 一次稳定外部输出
+    └── Iteration 一次 Agent Loop 控制循环
+        └── Step  一次可观测原子执行动作
+```
+
+`Round` 只用于 multi-agent 协作/协议阶段，一个 Round 可以包含多个 Agent Turn。不要把单 Agent
+Turn、Agent Loop Iteration 或原子 Step 命名为 Round。历史 NativeHarness/TaskLoop 中已有的
+`round_id`、`on_round` 等属于待独立迁移的 legacy 名称；新增接口不得继续复制这些命名，也不要在
+无兼容方案的普通变更中顺手批量重命名历史表面。三方 Harness 协议以
+`external/protocol/AGENTS.md` 的 Turn 术语为准。
+
 ## 公开入口（public API）
 
 公开符号仅限 `__init__.py` 导出。**没有 factory wrapper**——`create_agent_team` / `resume_persistent_team` / `recover_agent_team` 这套已删除，所有 lifecycle 都走 `TeamAgentSpec.build()` + `Runner` facade。
@@ -56,7 +73,7 @@ agent_teams/
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
-├── external/            # 外部 agent 接入核心（ExternalTeamClient：scope 分化 member 真实工具 / operator 控制面）
+├── external/            # 外部 agent 接入核心（ExternalTeamClient；protocol/ 定义三方 Harness Python SPI）
 ├── skill/               # 外部 agent 的非交互 CLI + SKILL_member.md / SKILL_operator.md（按 scope 分化）
 ├── mcp/                 # 外部 agent 的 stdio MCP server（低层 mcp.server.lowlevel.Server，按 scope 分化）
 ├── workflow/            # Swarmflow 多 agent 工作流编排（dw 引擎移植 + worker backend + 4 层表示）
