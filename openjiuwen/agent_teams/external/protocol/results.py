@@ -16,7 +16,6 @@ class TurnStatus(str, Enum):
 
     COMPLETED = "completed"
     INTERRUPTED = "interrupted"
-    PAUSED = "paused"
     FAILED = "failed"
 
 

@@ -5,16 +5,19 @@
 
 from openjiuwen.agent_teams.external.protocol.checkpoints import (
     CheckpointReason,
+    CheckpointSaveReceipt,
     HarnessCheckpoint,
     HarnessCheckpointSink,
 )
 from openjiuwen.agent_teams.external.protocol.errors import (
+    CheckpointConflictError,
     ExternalHarnessError,
     ExternalHarnessProtocolError,
     ExternalHarnessStateError,
     UnsupportedHarnessCapabilityError,
 )
 from openjiuwen.agent_teams.external.protocol.events import (
+    TERMINAL_TURN_EVENT_KINDS,
     DiagnosticEvent,
     DiagnosticLevel,
     HarnessEvent,
@@ -48,6 +51,7 @@ from openjiuwen.agent_teams.external.protocol.interactions import (
     HarnessInteractionHandler,
     HarnessInteractionRequest,
     HarnessInteractionResponse,
+    InteractionCancelReason,
     InteractionResponseStatus,
     McpElicitationRequest,
     McpElicitationResponse,
@@ -58,6 +62,7 @@ from openjiuwen.agent_teams.external.protocol.interactions import (
     ToolApprovalResponse,
     UserInputRequest,
     UserInputResponse,
+    validate_interaction_response,
 )
 from openjiuwen.agent_teams.external.protocol.models import (
     PROTOCOL_VERSION,
@@ -94,7 +99,9 @@ __all__ = [
     "BeforePromptContext",
     "BeforePromptResult",
     "BeforeToolContext",
+    "CheckpointConflictError",
     "CheckpointReason",
+    "CheckpointSaveReceipt",
     "DeliveryMode",
     "DiagnosticEvent",
     "DiagnosticLevel",
@@ -121,6 +128,7 @@ __all__ = [
     "HookEventPhase",
     "HookObservedEvent",
     "InteractionResponseStatus",
+    "InteractionCancelReason",
     "ItemEventKind",
     "ItemLifecycleEvent",
     "JsonObject",
@@ -147,6 +155,7 @@ __all__ = [
     "ToolExecutionResult",
     "ToolInvocation",
     "TurnError",
+    "TERMINAL_TURN_EVENT_KINDS",
     "TurnEventKind",
     "TurnLifecycleEvent",
     "TurnResult",
@@ -156,4 +165,5 @@ __all__ = [
     "UsageUpdatedEvent",
     "UserInputRequest",
     "UserInputResponse",
+    "validate_interaction_response",
 ]

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.external.protocol.interactions import HarnessInteractionHandler
     from openjiuwen.agent_teams.external.protocol.tools import ExternalToolGateway, McpServerConfig
 
-PROTOCOL_VERSION = "3.0"
+PROTOCOL_VERSION = "4.0"
 
 JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = Mapping[str, JsonValue]
@@ -86,7 +86,14 @@ class SendReceipt:
     """Acknowledgement that a harness accepted an input command."""
 
     message_id: str
+    turn_id: str
     accepted_mode: DeliveryMode
+
+    def __post_init__(self) -> None:
+        if not self.message_id:
+            raise ValueError("send receipt message_id must not be empty")
+        if not self.turn_id:
+            raise ValueError("send receipt turn_id must not be empty")
 
 
 @dataclass(frozen=True, slots=True)

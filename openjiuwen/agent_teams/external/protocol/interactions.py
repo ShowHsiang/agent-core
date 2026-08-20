@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, TypeAlias, overload, runtime_checkable
 
+from openjiuwen.agent_teams.external.protocol.errors import ExternalHarnessProtocolError
 from openjiuwen.agent_teams.external.protocol.models import JsonObject, JsonValue
 
 
@@ -30,6 +31,15 @@ class ToolApprovalDecision(str, Enum):
     ABORT = "abort"
 
 
+class InteractionCancelReason(str, Enum):
+    """Reason a pending provider-to-host interaction was cancelled."""
+
+    PROVIDER_WITHDREW = "provider_withdrew"
+    TURN_ABORTED = "turn_aborted"
+    HARNESS_STOPPED = "harness_stopped"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolApprovalRequest:
     """Request authorization before a provider executes a tool call."""
@@ -43,6 +53,7 @@ class ToolApprovalRequest:
     title: str | None = None
     description: str | None = None
     reason: str | None = None
+    deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
 
 
@@ -55,6 +66,7 @@ class UserInputRequest:
     session_id: str | None = None
     turn_id: str | None = None
     choices: tuple[str, ...] = ()
+    deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
 
 
@@ -68,6 +80,7 @@ class McpElicitationRequest:
     schema: JsonObject | None = None
     session_id: str | None = None
     turn_id: str | None = None
+    deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
 
 
@@ -82,6 +95,7 @@ class DynamicToolCallRequest:
     namespace: str | None = None
     session_id: str | None = None
     turn_id: str | None = None
+    deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
 
 
@@ -96,6 +110,7 @@ class ProviderInteractionRequest:
     payload: JsonObject = field(default_factory=dict)
     session_id: str | None = None
     turn_id: str | None = None
+    deadline_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,20 +178,69 @@ HarnessInteractionResponse: TypeAlias = (
 )
 
 
+_EXPECTED_RESPONSE_TYPE = {
+    ToolApprovalRequest: ToolApprovalResponse,
+    UserInputRequest: UserInputResponse,
+    McpElicitationRequest: McpElicitationResponse,
+    DynamicToolCallRequest: DynamicToolCallResponse,
+    ProviderInteractionRequest: ProviderInteractionResponse,
+}
+
+
+def validate_interaction_response(
+    request: HarnessInteractionRequest,
+    response: HarnessInteractionResponse,
+) -> HarnessInteractionResponse:
+    """Validate request identity and the response shape required by its type."""
+
+    if response.request_id != request.request_id:
+        raise ExternalHarnessProtocolError(
+            f"interaction response id {response.request_id!r} does not match request {request.request_id!r}"
+        )
+    expected_type = _EXPECTED_RESPONSE_TYPE[type(request)]
+    if not isinstance(response, expected_type):
+        raise ExternalHarnessProtocolError(
+            f"{type(request).__name__} requires {expected_type.__name__}, got {type(response).__name__}"
+        )
+    return response
+
+
 @runtime_checkable
 class HarnessInteractionHandler(Protocol):
     """Host service for request/response interactions during a live turn.
 
-    Implementations must return a response with the same ``request_id`` as the
-    request. ``cancel`` is idempotent and releases any pending host UI or policy
-    operation for the request.
+    Implementations must return the response type paired with the request and
+    the same ``request_id`` before ``deadline_at`` when one is supplied.
+    ``cancel`` is idempotent and releases any pending host UI or policy
+    operation for the request. Harnesses must cancel every pending request
+    before aborting its turn or completing ``stop``.
     """
+
+    @overload
+    async def handle(self, request: ToolApprovalRequest) -> ToolApprovalResponse: ...
+
+    @overload
+    async def handle(self, request: UserInputRequest) -> UserInputResponse: ...
+
+    @overload
+    async def handle(self, request: McpElicitationRequest) -> McpElicitationResponse: ...
+
+    @overload
+    async def handle(self, request: DynamicToolCallRequest) -> DynamicToolCallResponse: ...
+
+    @overload
+    async def handle(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse: ...
 
     async def handle(self, request: HarnessInteractionRequest) -> HarnessInteractionResponse:
         """Wait for and return the host response to ``request``."""
         ...
 
-    async def cancel(self, request_id: str) -> None:
+    async def cancel(
+        self,
+        request_id: str,
+        *,
+        reason: InteractionCancelReason = InteractionCancelReason.PROVIDER_WITHDREW,
+    ) -> None:
         """Cancel a pending interaction when the provider withdraws it."""
         ...
 
@@ -187,6 +251,7 @@ __all__ = [
     "HarnessInteractionHandler",
     "HarnessInteractionRequest",
     "HarnessInteractionResponse",
+    "InteractionCancelReason",
     "InteractionResponseStatus",
     "McpElicitationRequest",
     "McpElicitationResponse",
@@ -197,4 +262,5 @@ __all__ = [
     "ToolApprovalResponse",
     "UserInputRequest",
     "UserInputResponse",
+    "validate_interaction_response",
 ]

@@ -4,9 +4,9 @@
 
 | 项 | 值 |
 |---|---|
-| 日期 | 2026-08-19 |
+| 日期 | 2026-08-20 |
 | 范围 | `openjiuwen/agent_teams/external/protocol`、`docs/dev/agent_teams/external_harness_integration.md` |
-| 协议版本 | `3.0` |
+| 协议版本 | `4.0` |
 | Refs | 未关联 issue |
 
 ## 背景
@@ -17,7 +17,7 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
 
 第一版协议确认了正确的边界：公共接口应位于 `ProviderMemberRuntime` 等价的完整 Harness 行为层，
 而不是降为一次 `receive_response()` 或单 turn handle。随后对仓库锁定版本 Claude Agent SDK
-`0.2.115` 和 Codex Python SDK `0.144.4` 的源码进行检视，发现三项阻断真实迁移的 P0 缺口。
+`0.2.115` 和 Codex Python SDK `0.144.4` 的源码进行检视，发现多项阻断真实迁移的 P0 缺口。
 
 ## SDK 源码结论
 
@@ -57,6 +57,14 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
 11. **统一执行层术语并升级到 3.0**：固定 `Session > Turn > Iteration > Step`，Round 只属于
     multi-agent 协作阶段。删除单 Agent 边界上的 Round 命名，统一为 `turn_id`、
     `TurnLifecycleEvent`、`TurnEventKind` 和 `turn_events()`。
+12. **闭合 Turn 暂停语义并升级到 4.0**：PAUSED/RESUMED 是同一 Turn 内的非终态转换；只有
+    FINISHED/ABORTED/FAILED 终结 Turn，有限流跨暂停继续消费。
+13. **输入在接受时关联 Turn**：`SendReceipt` 返回 `turn_id`；queued input 预分配后继 Turn ID，
+    STEER 关联当前 Turn，`turn_events(turn_id)` 可精确消费已接受输入。
+14. **Interaction 增加可靠性约束**：request 可声明 deadline，request/response 类型必须配对；abort
+    和 stop 返回前按明确 reason 取消全部 pending interaction。
+15. **Checkpoint 防止乱序覆盖**：增加 checkpoint 幂等 ID、scope 内单调 sequence、可选 CAS 和持久化
+    receipt；stale write 明确失败。
 
 ## 拒绝的方案
 

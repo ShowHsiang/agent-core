@@ -51,13 +51,16 @@ these concepts.
 5. The event stream is single-consumer, cycle-long, and strictly ordered. The
    envelope owns sequence, timestamp, and correlation metadata; payloads do
    not duplicate those fields. `events()` is the continuous view;
-   `turn_events()` is a finite view that includes one turn's STARTED and
-   terminal events. They consume the same logical stream and cannot be active
-   concurrently.
+   `turn_events(turn_id)` is a serialized finite view that validates the next
+   unconsumed turn and includes its STARTED and terminal events; it must not
+   discard intervening turns as an out-of-order selector. PAUSED/RESUMED are
+   non-terminal and retain the same turn ID. The stream views consume the same
+   logical stream and cannot be active concurrently.
 6. Checkpoints are opaque, versioned by the provider, JSON-serializable, and
-   scoped to one member. Harnesses proactively save material changes through
-   the host sink; snapshot export is not the sole persistence path. Protocol
-   code must not inspect provider checkpoint data.
+   scoped to one member. Checkpoint IDs make retries idempotent and sequence
+   numbers prevent stale overwrite. Harnesses proactively save material
+   changes through the host sink; snapshot export is not the sole persistence
+   path. Protocol code must not inspect provider checkpoint data.
 7. Static implementation metadata belongs in `ExternalHarnessCard`; runtime
    values belong in `ExternalHarnessContext` or the live harness.
 8. Context environment and credentials are sensitive. Never render them in
@@ -65,9 +68,10 @@ these concepts.
 9. Terminal turn events carry a structured `TurnResult` whose status matches
    the event kind. Shared event and result fields stay provider-neutral;
    namespaced JSON extensions preserve vendor-specific data.
-10. Interaction responses must match request IDs, and cancellation is
-    idempotent. Missing host interaction support must fail or decline safely;
-    it must never default to approval.
+10. Interaction responses must match request IDs and response types. Requests
+    may declare a deadline; cancellation is idempotent and abort/stop cancel
+    every pending request. Missing host interaction support must fail or
+    decline safely; it must never default to approval.
 
 ## Compatibility
 

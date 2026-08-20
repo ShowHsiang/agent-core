@@ -5,7 +5,7 @@ third-party agent harness that runs as an OpenJiuwen team member. The package is
 independent of the current Claude Code, Codex, and subprocess runtimes; those
 backends will migrate separately.
 
-The current contract version is `3.0`.
+The current contract version is `4.0`.
 
 ## Boundary
 
@@ -60,8 +60,9 @@ contain turns from multiple agents. The single-agent harness API therefore uses
   extensions.
 - `HarnessHookDispatcher`: lifecycle policy callbacks. Hooks are not the SDK's
   general request/response channel.
-- `HarnessCheckpoint` and `HarnessCheckpointSink`: versioned provider state and
-  a durable push path. `export_checkpoint()` remains available for snapshots.
+- `HarnessCheckpoint` and `HarnessCheckpointSink`: versioned, monotonically
+  ordered provider state and an idempotent durable push path.
+  `export_checkpoint()` remains available for snapshots.
 
 ## The three planes
 
@@ -81,8 +82,9 @@ The observation channel has two alternative consumption views, following the
 Claude SDK distinction between continuous messages and one response:
 
 ```python
-# Simple request/response workflow: includes STARTED and terminal, then ends.
-async for event in harness.turn_events():
+# Simple request/response workflow: correlate acceptance to its finite turn.
+receipt = await harness.send(input)
+async for event in harness.turn_events(receipt.turn_id):
     consume(event)
 
 # Long-running team workflow: crosses turn boundaries, ends at stop.
@@ -92,7 +94,11 @@ async for event in harness.events():
 
 Both methods consume the same logical single-consumer stream. They are not
 independent subscriptions and must not run concurrently. Repeated
-`turn_events()` calls consume consecutive turns. The terminal event is
+Without a turn ID, `turn_events()` calls consume consecutive turns. A supplied
+turn ID validates the next unconsumed turn; it is not an out-of-order selector.
+Concurrent runtimes consume `events()` and group by receipt turn ID instead of
+skipping intervening turns. `PAUSED` and `RESUMED` are
+non-terminal transitions and do not close the iterator. The terminal event is
 included so the caller receives the complete `TurnResult` before the iterator
 ends. A second active iterator must fail with `ExternalHarnessStateError`.
 
@@ -130,16 +136,20 @@ class MyHarness:
    view. They share one consumer, and envelope sequence numbers remain
    strictly increasing across every payload type.
 4. Every turn emits one `STARTED` and exactly one matching terminal event.
-   Every terminal event carries a `TurnResult` with the corresponding status.
-5. `send` acknowledges acceptance without waiting for the turn to finish.
+   Pause/resume keeps the same turn ID and is not terminal. Every terminal
+   event carries a `TurnResult` with the corresponding status.
+5. `send` acknowledges acceptance without waiting for the turn to finish and
+   returns the accepted input's turn ID. Steering returns the active turn ID.
 6. Unsupported optional behavior raises
    `UnsupportedHarnessCapabilityError`; it must not silently succeed.
 7. Awaited provider requests use `context.interactions`; events are observation
    and hooks are lifecycle policy callbacks.
-8. Checkpoints are provider-owned, versioned, JSON-serializable, and scoped to
-   one `member_agent_id`. Save them after material provider-state changes, not
-   only during shutdown.
-9. Environment values, credentials, and provider client objects must never be
+8. Checkpoints are provider-owned, versioned, JSON-serializable, scoped to one
+   `member_agent_id`, and carry an idempotency ID plus monotonic sequence. The
+   sink rejects stale or failed compare-and-set writes.
+9. Interaction responses match both the request ID and request type. Requests
+   may declare a deadline; abort and stop cancel all pending interactions.
+10. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
 
 ## Documents

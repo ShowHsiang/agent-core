@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from typing import AsyncIterator, Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.harness.state import HarnessState
-
 from openjiuwen.agent_teams.external.protocol.checkpoints import HarnessCheckpoint
 from openjiuwen.agent_teams.external.protocol.events import HarnessEvent
 from openjiuwen.agent_teams.external.protocol.models import (
@@ -20,6 +18,7 @@ from openjiuwen.agent_teams.external.protocol.models import (
     JsonObject,
     SendReceipt,
 )
+from openjiuwen.agent_teams.harness.state import HarnessState
 
 
 @runtime_checkable
@@ -67,15 +66,19 @@ class ExternalHarnessProtocol(Protocol):
         """
         ...
 
-    def turn_events(self) -> AsyncIterator[HarnessEvent]:
+    def turn_events(self, turn_id: str | None = None) -> AsyncIterator[HarnessEvent]:
         """Return one finite turn from the observation stream.
 
-        The iterator waits for the next ``TurnEventKind.STARTED``, yields that
-        event and the following ordered events, and ends immediately after
-        yielding the matching terminal turn event. It is a convenience view
-        over the same logical channel as ``events``; the two methods must not
-        be consumed concurrently. Implementations must reject a second active
-        iterator with ``ExternalHarnessStateError`` rather than racing it.
+        ``turn_id`` identifies and validates the next unconsumed accepted turn;
+        it is not an out-of-order selector and implementations must not discard
+        intervening turns while searching for it. Otherwise the iterator uses
+        the next turn. It yields the start and following ordered events through
+        the matching ``FINISHED``, ``ABORTED``, or ``FAILED`` event. ``PAUSED``
+        and ``RESUMED`` do not end the iterator. This is a serialized
+        convenience view over the same logical channel as ``events``; the two
+        methods must not be consumed concurrently. Implementations must reject
+        a second active iterator with ``ExternalHarnessStateError`` rather than
+        racing it.
         """
         ...
 
@@ -85,7 +88,12 @@ class ExternalHarnessProtocol(Protocol):
         *,
         mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
-        """Accept input without waiting for all resulting turns to finish."""
+        """Accept input and return its message-to-turn association.
+
+        A queued input receives its future turn ID at acceptance. A steering
+        input receives the active turn ID. The call does not wait for the turn
+        to finish.
+        """
         ...
 
     async def abort(self, *, mode: AbortMode = AbortMode.GRACEFUL) -> None:

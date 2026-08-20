@@ -2,7 +2,7 @@
 
 本文面向希望让自有 Python Agent、CLI Agent SDK 或 Jiuwen 后续 SDK 作为
 OpenJiuwen Team 成员运行的开发者，说明如何实现
-`openjiuwen.agent_teams.external.protocol` 2.1。
+`openjiuwen.agent_teams.external.protocol` 4.0。
 
 > 当前阶段只发布协议定义。现有 Claude Code 与 Codex backend 尚未迁移，team spawn
 > 路径也尚未通过 provider registry 自动加载三方实现。三方项目可以先实现和测试协议；
@@ -66,6 +66,7 @@ from openjiuwen.agent_teams.external.protocol import (
     HarnessCapability,
     HarnessCheckpoint,
     HarnessEvent,
+    InteractionCancelReason,
     OutputEvent,
     OutputKind,
     SendReceipt,
@@ -77,6 +78,7 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnStatus,
     TurnUsage,
     UnsupportedHarnessCapabilityError,
+    validate_interaction_response,
 )
 ```
 
@@ -105,10 +107,12 @@ TERMINATED + events EOF
 
 - `start()` 返回时必须可接收输入，状态为 `IDLE`；
 - `send()` 只确认消息已接受，不等待模型完成；
+- receipt 在接受时返回该输入关联的 `turn_id`；STEER 返回 active Turn ID；
 - public command 允许从不同协程并发调用；
 - Harness 内只有一个逻辑 state writer，例如 supervisor task；
 - `stop()` 幂等，并使 `events()`/未完成的 `turn_events()` 最终结束；
-- 每个 Turn 只有一个 `STARTED` 和一个 terminal Turn event；
+- 每个 Turn 只有一个 `STARTED` 和一个 terminal Turn event；PAUSED/RESUMED 保持同一 `turn_id`，
+  不终结 Turn；
 - 未声明能力抛 `UnsupportedHarnessCapabilityError`。
 
 ### DeliveryMode
@@ -147,21 +151,24 @@ Observation channel 提供两个消费视图：
 | 方法 | 边界 | 适用场景 |
 |---|---|---|
 | `events()` | 从调用开始持续到 `stop`；跨越所有 Turn | MemberRuntime adapter、后台持续消费 |
-| `turn_events()` | 下一个 Turn STARTED 到该 Turn terminal event（均包含） | 串行 query/response、单 Turn 测试 |
+| `turn_events(turn_id=None)` | 指定已接受 Turn 或下一个 Turn，从 STARTED 到 terminal（均包含） | 串行 query/response、单 Turn 测试 |
 
 这与 Claude SDK 的 `receive_messages()` 和 `receive_response()` 分工一致。两者不是两份消息，也不是
 两个订阅：它们消费同一个逻辑单消费者流，禁止并发迭代。简单调用方可以逐轮使用：
 
 ```python
-await harness.send(ExternalHarnessInput("first task"))
-first_turn = [event async for event in harness.turn_events()]
+first = await harness.send(ExternalHarnessInput("first task"))
+first_turn = [event async for event in harness.turn_events(first.turn_id)]
 
-await harness.send(ExternalHarnessInput("follow-up"))
-second_turn = [event async for event in harness.turn_events()]
+second = await harness.send(ExternalHarnessInput("follow-up"))
+second_turn = [event async for event in harness.turn_events(second.turn_id)]
 ```
 
-`turn_events()` 忽略下一个 Turn STARTED 之前的 observation；找到 STARTED 后按全局顺序产出所有
-事件，并在相同 `turn_id` 的 terminal event 产出后立即结束。Terminal event 不能被吞掉，因为
+`turn_events(turn_id)` 用 ID 校验下一个尚未消费的 Turn，不是乱序选择器，不得为寻找未来 Turn
+丢弃中间完整 Turn；不传 ID 时选择下一个 Turn。并发 team runtime 应持续消费 `events()`，按
+receipt 的 `turn_id` 聚合。找到 STARTED 后按全局顺序产出所有事件，并在相同 `turn_id` 的
+FINISHED/ABORTED/FAILED 产出后
+立即结束。PAUSED/RESUMED 是非终态，有限流必须跨越它们继续消费。Terminal event 不能被吞掉，因为
 调用方需要从中读取完整 `TurnResult`。Cycle 在 STARTED 前关闭时可空结束；STARTED 后没有 terminal
 就关闭必须抛 `ExternalHarnessProtocolError`。
 
@@ -197,7 +204,7 @@ await event_queue.put(event)
 | `ItemLifecycleEvent` | tool call、command、file change 等 provider item |
 | `UsageUpdatedEvent` | 标准化 token usage |
 | `StateChangedEvent` | Harness state 转换 |
-| `TurnLifecycleEvent` | Turn start 和唯一 terminal |
+| `TurnLifecycleEvent` | Turn start、pause/resume 和唯一 terminal |
 | `HookObservedEvent` | hook 执行观测，不参与授权 |
 | `DiagnosticEvent` | 已脱敏诊断 |
 | `ProviderEvent` | 带命名空间和版本的 provider JSON 扩展 |
@@ -219,8 +226,9 @@ result = TurnResult(
 payload = TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=result)
 ```
 
-对应关系是 FINISHED/COMPLETED、ABORTED/INTERRUPTED、PAUSED/PAUSED、FAILED/FAILED。失败结果必须
-携带 `TurnError`；不要把原始 exception、client object 或可能包含 credential 的响应塞进事件。
+终态对应关系是 FINISHED/COMPLETED、ABORTED/INTERRUPTED、FAILED/FAILED。PAUSED 和 RESUMED 不带
+`TurnResult`，并保持原 `turn_id`。失败结果必须携带 `TurnError`；不要把原始 exception、client
+object 或可能包含 credential 的响应塞进事件。
 
 ## 6. Provider-initiated interactions
 
@@ -234,11 +242,13 @@ request = ToolApprovalRequest(
     arguments=sdk_request.arguments,
     session_id=self.session_id,
     turn_id=self._active_turn_id,
+    deadline_at=time.time() + 60,
     provider_data={"provider_method": sdk_request.method},
 )
-response = await self._context.interactions.handle(request)
-if response.request_id != request.request_id:
-    raise ExternalHarnessProtocolError("interaction response id mismatch")
+response = validate_interaction_response(
+    request,
+    await self._context.interactions.handle(request),
+)
 ```
 
 共享交互类型：
@@ -249,8 +259,11 @@ if response.request_id != request.request_id:
 - `DynamicToolCallRequest`：provider 请求 host 执行运行期工具；
 - `ProviderInteractionRequest`：带 provider、request type 和 schema version 的 namespaced JSON 请求。
 
-每个响应必须复制 request 的 `request_id`。当 SDK 发出 cancel、Turn abort 或连接关闭时，adapter
-对仍待处理的请求调用 `await context.interactions.cancel(request_id)`；cancel 必须可重复。
+每个响应必须复制 request 的 `request_id`，且类型必须与 request 配对。`deadline_at` 使用 Unix
+seconds；adapter 到期后应安全地 decline/fail，并以 `DEADLINE_EXCEEDED` 取消宿主等待。当 SDK 发出
+cancel、Turn abort 或连接关闭时，adapter 对仍待处理的请求调用
+`await context.interactions.cancel(request_id, reason=...)`；cancel 必须可重复。`abort()` 和
+`stop()` 返回前必须取消其范围内的所有 pending request，避免 provider 等待泄漏。
 
 如果 adapter 声明 `HOST_INTERACTIONS`，但运行场景没有 handler，它必须采取安全且明确的行为：
 在 `start` 拒绝必需交互的配置，或把偶发请求明确映射为 deny/decline。禁止默认 allow，也禁止把
@@ -304,10 +317,14 @@ Checkpoint 是完整、版本化的 provider envelope：
 
 ```python
 def _current_checkpoint(self) -> HarnessCheckpoint:
+    self._checkpoint_sequence += 1
     return HarnessCheckpoint(
         provider="acme-code-agent",
         schema_version="2",
         member_agent_id=self._context.member_agent_id,
+        team_session_id=self._context.team_session_id,
+        checkpoint_id=str(uuid.uuid4()),
+        sequence=self._checkpoint_sequence,
         session_id=self._session_id,
         revision=self._provider_revision,
         data={"conversation_id": self._conversation_id},
@@ -321,12 +338,18 @@ async def _publish_checkpoint(self, reason: CheckpointReason) -> None:
     checkpoint = self._current_checkpoint()
     self._latest_checkpoint = checkpoint
     if self._context.checkpoint_sink is not None:
-        await self._context.checkpoint_sink.save(checkpoint, reason=reason)
+        receipt = await self._context.checkpoint_sink.save(
+            checkpoint,
+            reason=reason,
+            expected_storage_revision=self._checkpoint_storage_revision,
+        )
+        self._checkpoint_storage_revision = receipt.storage_revision
 ```
 
 最少在以下时机考虑 save：获得 session/thread id、turn 完成、provider revision 变化、周期刷新和
-provider 发出 checkpoint 通知。`save` 返回表示宿主持久化完成；实现需决定失败时重试还是让 Turn
-失败，不能静默声称已持久化。
+provider 发出 checkpoint 通知。相同 `checkpoint_id` 用于 retry；每次新快照使用递增 sequence。
+`save` 返回 `CheckpointSaveReceipt` 表示宿主持久化完成；stale/CAS 冲突会抛
+`CheckpointConflictError`。实现需决定失败时重试还是让 Turn 失败，不能静默声称已持久化。
 
 `export_checkpoint()` 返回 `_latest_checkpoint`，用于按需快照和停机兜底，但不能作为唯一保存
 机制。恢复时先验证 `provider`、`member_agent_id` 和 `schema_version`：`REQUIRE_RESUME` 下缺失、
@@ -362,12 +385,14 @@ from openjiuwen.agent_teams.external.protocol import (
     OutputKind,
     SendReceipt,
     StateChangedEvent,
+    TERMINAL_TURN_EVENT_KINDS,
     TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
     TurnResult,
     TurnStatus,
     UnsupportedHarnessCapabilityError,
+    validate_interaction_response,
 )
 from openjiuwen.agent_teams.harness import HarnessState
 
@@ -400,6 +425,10 @@ class AcmeHarness:
         self._sequence = 0
         self._turn_task = None
         self._abort_requested = False
+        self._active_turn_id = None
+        self._checkpoint_sequence = 0
+        self._checkpoint_storage_revision = None
+        self._pending_interaction_ids = set()
         self._lock = asyncio.Lock()
         self._consumer_lock = asyncio.Lock()
 
@@ -429,17 +458,18 @@ class AcmeHarness:
                 if mode is not DeliveryMode.STEER:
                     raise NotImplementedError("enqueue as follow-up in production")
                 await self._client.steer(content.content)
-                return SendReceipt(message_id, DeliveryMode.STEER)
+                return SendReceipt(message_id, self._active_turn_id, DeliveryMode.STEER)
             if self._state is not HarnessState.IDLE:
                 raise ExternalHarnessStateError(f"cannot send while {self._state}")
             if mode is DeliveryMode.STEER:
                 raise ExternalHarnessStateError("there is no active turn")
+            turn_id = str(uuid.uuid4())
+            self._active_turn_id = turn_id
             await self._transition(HarnessState.RUNNING)
-            self._turn_task = asyncio.create_task(self._run_turn(content, message_id))
-        return SendReceipt(message_id, mode)
+            self._turn_task = asyncio.create_task(self._run_turn(content, message_id, turn_id))
+        return SendReceipt(message_id, turn_id, mode)
 
-    async def _run_turn(self, content: ExternalHarnessInput, message_id: str):
-        turn_id = str(uuid.uuid4())
+    async def _run_turn(self, content: ExternalHarnessInput, message_id: str, turn_id: str):
         await self._emit(
             TurnLifecycleEvent(kind=TurnEventKind.STARTED),
             turn_id=turn_id,
@@ -476,6 +506,7 @@ class AcmeHarness:
             correlation_id=message_id,
         )
         await self._publish_checkpoint(CheckpointReason.TURN_COMPLETED)
+        self._active_turn_id = None
         await self._transition(HarnessState.IDLE)
 
     async def _handle_interaction(self, sdk_request, turn_id):
@@ -483,15 +514,21 @@ class AcmeHarness:
             await self._client.decline(sdk_request.id, "host interaction unavailable")
             return
         request = self._normalize_interaction(sdk_request, turn_id)
-        response = await self._context.interactions.handle(request)
-        if response.request_id != request.request_id:
-            raise RuntimeError("interaction response id mismatch")
-        await self._client.respond(sdk_request.id, response)
+        self._pending_interaction_ids.add(request.request_id)
+        try:
+            response = validate_interaction_response(
+                request,
+                await self._context.interactions.handle(request),
+            )
+            await self._client.respond(sdk_request.id, response)
+        finally:
+            self._pending_interaction_ids.discard(request.request_id)
 
     async def abort(self, *, mode=AbortMode.GRACEFUL):
         if mode is AbortMode.FORCE:
             raise UnsupportedHarnessCapabilityError("force abort is not supported")
         self._abort_requested = True
+        await self._cancel_pending_interactions(InteractionCancelReason.TURN_ABORTED)
         await self._client.interrupt()
 
     async def events(self):
@@ -501,29 +538,30 @@ class AcmeHarness:
             while (event := await self._events.get()) is not _END:
                 yield event
 
-    async def turn_events(self):
-        turn_id = None
+    async def turn_events(self, turn_id=None):
+        selected_turn_id = None
         async for event in self.events():
             payload = event.event
-            if turn_id is None:
+            if selected_turn_id is None:
                 if not (
                     isinstance(payload, TurnLifecycleEvent)
                     and payload.kind is TurnEventKind.STARTED
+                    and (turn_id is None or event.turn_id == turn_id)
                 ):
                     continue
-                turn_id = event.turn_id
+                selected_turn_id = event.turn_id
 
             yield event
             if (
-                event.turn_id == turn_id
+                event.turn_id == selected_turn_id
                 and isinstance(payload, TurnLifecycleEvent)
-                and payload.kind is not TurnEventKind.STARTED
+                and payload.kind in TERMINAL_TURN_EVENT_KINDS
             ):
                 return
 
-        if turn_id is not None:
+        if selected_turn_id is not None:
             raise ExternalHarnessProtocolError(
-                f"event stream closed before turn {turn_id} terminated"
+                f"event stream closed before turn {selected_turn_id} terminated"
             )
 
     async def stop(self):
@@ -532,6 +570,7 @@ class AcmeHarness:
         if self._turn_task is not None:
             await self.abort()
             await self._turn_task
+        await self._cancel_pending_interactions(InteractionCancelReason.HARNESS_STOPPED)
         await self._client.close()
         await self._transition(HarnessState.TERMINATED)
         await self._events.put(_END)
@@ -562,17 +601,27 @@ class AcmeHarness:
         await self._emit(StateChangedEvent(old=old_state, new=new_state))
 
     async def _publish_checkpoint(self, reason):
+        self._checkpoint_sequence += 1
         self._latest_checkpoint = HarnessCheckpoint(
             provider=self.card.name,
             schema_version="1",
             member_agent_id=self._context.member_agent_id,
+            team_session_id=self._context.team_session_id,
+            checkpoint_id=str(uuid.uuid4()),
+            sequence=self._checkpoint_sequence,
             session_id=self._session_id,
         )
         if self._context.checkpoint_sink is not None:
-            await self._context.checkpoint_sink.save(self._latest_checkpoint, reason=reason)
+            receipt = await self._context.checkpoint_sink.save(
+                self._latest_checkpoint,
+                reason=reason,
+                expected_storage_revision=self._checkpoint_storage_revision,
+            )
+            self._checkpoint_storage_revision = receipt.storage_revision
 
     # _validate_checkpoint/_normalize_interaction/_text_delta/
-    # _is_server_request/_safe_error_message are provider-specific.
+    # _cancel_pending_interactions/_is_server_request/_safe_error_message are
+    # provider-specific.
 ```
 
 生产实现建议用 supervisor/control queue 统一处理 `send/abort/stop`，避免锁内调用 provider SDK
@@ -622,18 +671,18 @@ class AcmeProvider:
 1. 实例满足 `isinstance(harness, ExternalHarnessProtocol)`；
 2. `start` 后为 IDLE，`stop` 后为 TERMINATED，重复 stop 不报错；
 3. `events()` 在多个 Turn 之间不结束，stop 后正常 EOF；
-4. `turn_events()` 包含 STARTED 和 terminal，terminal 后立即 EOF；
+4. `turn_events(receipt.turn_id)` 包含 STARTED 和 terminal，跨 PAUSED/RESUMED，terminal 后 EOF；
 5. 两种流视图不能并发消费，交替调用不会重复或重排 event；
 6. event sequence 跨所有 payload 严格递增；
 7. 每轮恰好一个 STARTED 和一个状态匹配的 terminal `TurnResult`；
 8. AUTO/FOLLOW_UP/STEER 在 IDLE/RUNNING 下符合定义；
 9. abort、stop 和正常完成竞争时不产生两个 terminal event；
 10. capability 与真实行为一致，未支持命令显式报错；
-11. interaction request/response 的 id 一致，cancel 幂等；
+11. interaction request/response 的 id 和类型一致，deadline 生效，abort/stop cancel 全部 pending；
 12. 缺 interaction handler 时不会默认授权或永久等待；
 13. hook deny 确实阻止执行，hook event consumer 不参与授权；
-14. checkpoint envelope JSON round-trip、member/provider/version 校验和 REQUIRE_RESUME 失败路径；
-15. session 激活和 turn 完成会主动调用 sink，save 失败不会被误报为成功；
+14. checkpoint envelope JSON round-trip、member/provider/version/id/sequence 校验和恢复失败路径；
+15. session 激活和 turn 完成主动调用 sink，retry 幂等，stale/CAS 冲突不覆盖新状态；
 16. event consumer 慢时背压有界，不会无限占用内存；
 17. SDK 鉴权、限流、崩溃和超时落为 FAILED + `TurnError`，并且诊断不泄露凭据；
 18. 未安装 Claude/Codex 等可选 SDK 时，protocol 包仍可导入。

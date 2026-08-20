@@ -22,9 +22,14 @@ class ExternalHarnessProtocolError(ExternalHarnessError):
     """Raised when an implementation violates a protocol invariant."""
 
 
+class CheckpointConflictError(ExternalHarnessProtocolError):
+    """Raised when a checkpoint write is stale or violates compare-and-set."""
+
+
 __all__ = [
     "ExternalHarnessError",
     "ExternalHarnessProtocolError",
     "ExternalHarnessStateError",
+    "CheckpointConflictError",
     "UnsupportedHarnessCapabilityError",
 ]

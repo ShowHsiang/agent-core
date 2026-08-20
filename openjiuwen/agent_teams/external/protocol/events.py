@@ -9,20 +9,29 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TypeAlias
 
-from openjiuwen.agent_teams.harness.state import HarnessState
-
 from openjiuwen.agent_teams.external.protocol.models import JsonObject, JsonValue
 from openjiuwen.agent_teams.external.protocol.results import TurnResult, TurnStatus, TurnUsage
+from openjiuwen.agent_teams.harness.state import HarnessState
 
 
 class TurnEventKind(str, Enum):
     """Lifecycle transition for one external-input-driven turn."""
 
     STARTED = "started"
+    PAUSED = "paused"
+    RESUMED = "resumed"
     FINISHED = "finished"
     ABORTED = "aborted"
-    PAUSED = "paused"
     FAILED = "failed"
+
+
+TERMINAL_TURN_EVENT_KINDS = frozenset(
+    {
+        TurnEventKind.FINISHED,
+        TurnEventKind.ABORTED,
+        TurnEventKind.FAILED,
+    }
+)
 
 
 class OutputKind(str, Enum):
@@ -95,15 +104,15 @@ class StateChangedEvent:
 
 @dataclass(frozen=True, slots=True)
 class TurnLifecycleEvent:
-    """The start or terminal transition of one turn."""
+    """A lifecycle transition of one turn."""
 
     kind: TurnEventKind
     result: TurnResult | None = None
 
     def __post_init__(self) -> None:
-        if self.kind is TurnEventKind.STARTED:
+        if self.kind not in TERMINAL_TURN_EVENT_KINDS:
             if self.result is not None:
-                raise ValueError("started turn event must not contain a result")
+                raise ValueError(f"non-terminal {self.kind.value} turn event must not contain a result")
             return
 
         if self.result is None:
@@ -112,7 +121,6 @@ class TurnLifecycleEvent:
         expected_status = {
             TurnEventKind.FINISHED: TurnStatus.COMPLETED,
             TurnEventKind.ABORTED: TurnStatus.INTERRUPTED,
-            TurnEventKind.PAUSED: TurnStatus.PAUSED,
             TurnEventKind.FAILED: TurnStatus.FAILED,
         }[self.kind]
         if self.result.status is not expected_status:
@@ -196,6 +204,7 @@ __all__ = [
     "OutputKind",
     "ProviderEvent",
     "StateChangedEvent",
+    "TERMINAL_TURN_EVENT_KINDS",
     "TurnEventKind",
     "TurnLifecycleEvent",
     "UsageUpdatedEvent",

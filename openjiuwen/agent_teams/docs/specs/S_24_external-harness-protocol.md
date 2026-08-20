@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/protocol` |
-| 协议版本 | `3.0` |
-| 最近一次修订日期 | 2026-08-19 |
+| 协议版本 | `4.0` |
+| 最近一次修订日期 | 2026-08-20 |
 | 关联 feature | `F_94_external-harness-protocol.md` |
 
 ## 范围与边界
@@ -41,12 +41,13 @@ Round 误用提供公共别名。
 3. `start` 开启一个 cycle 并结算到 IDLE；`stop` 幂等、关闭 events、结算到 TERMINATED。
 4. `events()` 与 `turn_events()` 是同一逻辑单消费者流的持续/单 Turn 视图，不能并发消费；
    信封 `sequence` 严格递增。
-5. 每个 Turn 有且只有一个 STARTED 和一个 terminal event；terminal event 必须携带状态匹配的
-   `TurnResult`。
-6. `send` 只确认接受，不等待执行完成。
+5. 每个 Turn 有且只有一个 STARTED 和一个 terminal event；PAUSED/RESUMED 是同一 Turn 内的非终态
+   转换，terminal event 必须携带状态匹配的 `TurnResult`。
+6. `send` 只确认接受，不等待执行完成，并在 receipt 中返回该输入关联的 `turn_id`。
 7. 可选行为以 `ExternalHarnessCard.capabilities` 声明；未声明能力不得静默 no-op。
 8. events 是观测面；interactions 是 SDK 请求/响应控制面；hooks 是生命周期策略控制面。
-9. checkpoint 由 provider 解释，必须有版本、可 JSON 序列化、绑定 `member_agent_id` 且不得包含凭据。
+9. checkpoint 由 provider 解释，必须有版本、可 JSON 序列化、绑定 `member_agent_id`、携带幂等 ID 和
+   单调 sequence，且不得包含凭据。
 10. protocol 包不依赖任何可选厂商 SDK。
 
 ## 接口契约
@@ -66,7 +67,7 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `start(context)` | 绑定成员身份、宿主服务和恢复检查点并启动 cycle |
 | `stop()` | 终止运行、释放资源、关闭 event stream；幂等 |
 | `events()` | cycle-long ordered observation stream；单消费者 |
-| `turn_events()` | 下一个 Turn 的有限流；包含 STARTED 和 terminal event，随后结束 |
+| `turn_events(turn_id=None)` | 指定已接受 Turn 或下一个 Turn 的有限流；包含 STARTED 和 terminal event |
 | `send(input, mode)` | 接受 AUTO/STEER/FOLLOW_UP 命令并返回 receipt |
 | `abort(mode)` | graceful/force abort；能力 gated |
 | `pause()` / `resume()` | warm/cold paused-turn continuation；能力 gated |
@@ -75,8 +76,8 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 ### Delivery
 
 - AUTO：IDLE 时开启新 Turn；RUNNING 时排到 follow-up。
-- STEER：注入 active Turn，要求 STEER capability。
-- FOLLOW_UP：在 active Turn terminal 后开启后继 Turn。
+- STEER：注入 active Turn，要求 STEER capability；receipt 返回 active `turn_id`。
+- FOLLOW_UP：接受时分配新 `turn_id`，在 active Turn terminal 后开启该后继 Turn。
 
 ## 三个独立通道
 
@@ -92,9 +93,11 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 - `HookObservedEvent` 和 `DiagnosticEvent`；
 - `ProviderEvent`：带 provider、event type、schema version 的 JSON 扩展。
 
-`turn_events()` 是对同一 observation channel 的有限封装：忽略下一个 Turn STARTED 之前的事件，
-从 STARTED（含）开始按全局顺序产出，到同一 Turn 的 FINISHED/ABORTED/PAUSED/FAILED（含）立即结束。
-重复调用消费连续 Turn；`events()` 与 `turn_events()` 不能同时处于消费状态。底层行为与 Claude
+`turn_events(turn_id)` 是对同一 observation channel 的串行有限封装：指定 ID 用于校验下一个尚未
+消费的 Turn，不得把它实现为丢弃中间 Turn 的乱序选择器；无 ID 时选择下一个 STARTED。从 STARTED
+（含）开始按全局顺序产出，到同一 Turn 的
+FINISHED/ABORTED/FAILED（含）立即结束。PAUSED/RESUMED 保持相同 `turn_id`，不得结束有限流。
+重复调用可消费连续 Turn；`events()` 与 `turn_events()` 不能同时处于消费状态。底层行为与 Claude
 SDK 的 `receive_messages()`/`receive_response()` 相同，不要求实现建立第二份多播队列。
 实现检测到第二个 active iterator 时必须抛 `ExternalHarnessStateError`，不能让两个 consumer 竞争
 同一 queue。
@@ -120,7 +123,10 @@ Provider SDK 在 active Turn 内发起且必须等待回答的请求，通过
 - 带 provider、request type 和 schema version 的 namespaced
   `ProviderInteractionRequest` / `ProviderInteractionResponse`。
 
-请求与响应必须保持相同 `request_id`。Provider 撤销请求时调用幂等 `cancel(request_id)`。
+请求可携带 Unix seconds 的 `deadline_at`。响应必须保持相同 `request_id`，且 response 类型必须与
+request 类型配对；adapter 使用 `validate_interaction_response` 做统一校验。Provider 撤销请求时调用
+幂等 `cancel(request_id, reason=...)`；Turn abort 和 Harness stop 返回前必须取消该范围内全部 pending
+request。
 这些请求不能发到 events 后等待 event consumer 回写，否则会造成死锁、审批丢失和多消费者竞态。
 
 ### Hooks：HarnessHookDispatcher
@@ -146,7 +152,8 @@ Provider adapter 负责把通用结构转换成自己的 SDK options；不得把
 `HarnessCheckpoint` 是宿主可持久化、provider 才可解释的完整信封：
 
 - `provider` 与 provider-owned `schema_version`；
-- `member_agent_id`，防止跨成员恢复；
+- `member_agent_id` 和 `team_session_id`，防止跨成员或跨 team session 恢复；
+- `checkpoint_id` 幂等标识与 scope 内单调 `sequence`；
 - 可选 `session_id`、`revision`；
 - JSON-safe `data`。
 
@@ -155,7 +162,10 @@ Host 在 `start` 时通过 `context.checkpoint` 提供检查点；`REQUIRE_RESUM
 
 Harness 在获得或改变可恢复 provider 状态后，通过 `context.checkpoint_sink.save(...)` 主动保存，
 典型时机包括 session 激活、turn 完成、重要状态变化、定期刷新和 provider 主动通知。
-`save` 返回表示宿主持久化完成。`export_checkpoint()` 保留为按需快照和停机兜底，但不是唯一保存路径。
+相同 `checkpoint_id` 的 retry 必须返回原 receipt；不同 ID 的旧 sequence 或失败的
+`expected_storage_revision` compare-and-set 必须抛 `CheckpointConflictError`，不得覆盖新状态。
+`save` 返回 `CheckpointSaveReceipt` 表示宿主持久化完成。`export_checkpoint()` 保留为按需快照和停机
+兜底，但不是唯一保存路径。
 
 ## 与其它 spec 的关系
 
