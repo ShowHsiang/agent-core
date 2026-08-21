@@ -73,7 +73,7 @@ agent_teams/
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
-├── external/            # 外部 agent 接入核心（ExternalTeamClient；protocol/ 定义三方 Harness Python SPI）
+├── external/            # 外部 agent 接入核心（ExternalTeamClient；protocol/ 三方 Harness SPI；member_runtime.py 通用投影；dsh/ 首个 SDK adapter）
 ├── skill/               # 外部 agent 的非交互 CLI + SKILL_member.md / SKILL_operator.md（按 scope 分化）
 ├── mcp/                 # 外部 agent 的 stdio MCP server（低层 mcp.server.lowlevel.Server，按 scope 分化）
 ├── workflow/            # Swarmflow 多 agent 工作流编排（dw 引擎移植 + worker backend + 4 层表示）
@@ -237,6 +237,26 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent + relay 纯文本给
 无工具远程执行者）是**正交互补**的两条接入路径：bridge 管"被动文本执行者"，本路径管
 "自主一等成员"。
+
+`external/` 同时包含两组正交表面：descriptor/client/skill/MCP 让已经在团队进程之外运行的 agent
+直连协同基础设施；`protocol/` + `member_runtime.py` 让由宿主拥有生命周期的三方 Python Harness
+适配成内部成员行为。不要把 `ExternalTeamClient` 的协同工具协议与 `ExternalHarnessProtocol` 的
+provider session/Turn 协议合并。
+
+- `external/protocol/`：公共三方 Harness Python SPI 4.0，使用
+  `Session > Turn > Iteration > Step`、单消费者持续/单 Turn 事件视图以及独立 observation /
+  interaction / hook 三平面。协议包保持无厂商 SDK 依赖。
+- `external/member_runtime.py`：`ExternalHarnessMemberRuntime`，持续消费一次 `harness.events()`，把
+  output/tool/state/Turn lifecycle 投影到现有 `MemberRuntime`/`StreamController` 表面，并复用
+  `TeamContextTracker` 的 pending/commit 投递。内部 `harness.round` callback 是 legacy 兼容名，
+  不得反向写入公共协议。
+- `external/dsh/`：DeepSeek Harness Python SDK adapter。一个外部 Turn 对应一次从 adapter 派发到
+  whole-agent idle 的串行 `Session.run()` activity interval；DSH 以 prompt durable receipt 作为通知
+  收集边界，native turn 作为 provider event，native step 映射为 Iteration item。SDK 仅在 start 时
+  lazy import。首版 capabilities 为空，不支持 steer、
+  abort、pause/resume、checkpoint 或动态 MCP；system prompt 需要 custom Cordis composition 消费
+  配置的环境变量。当前只支持 provider -> harness -> `ExternalHarnessMemberRuntime` 的程序化构造，
+  尚未进入 `ExternalCliAgentSpec`/spawn registry。详见 [[F_95_dsh-external-harness-adapter]]。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
   dispatch_mode + teammate_mode + db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。

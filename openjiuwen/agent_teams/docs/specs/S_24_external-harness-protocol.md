@@ -13,7 +13,7 @@
 ## 范围与边界
 
 本 spec 定义三方 Python Agent Harness 加入 OpenJiuwen team 所需实现的
-provider-neutral 行为协议。它位于厂商 Harness 与未来 `MemberRuntime` adapter 之间，
+provider-neutral 行为协议。它位于厂商 Harness 与通用 `ExternalHarnessMemberRuntime` 之间，
 不定义当前 Claude Code、Codex 或 subprocess backend 的迁移方式，也不改变现有
 spawn/config schema。
 
@@ -113,8 +113,9 @@ cursor 正常 EOF 或显式 `aclose()` 都必须幂等释放 consumer lease。
 如果 cycle 在找到下一个 Turn 前正常关闭，`turn_events()` 可以空结束；如果已经产出 STARTED 却未
 产出对应 terminal event 就关闭，属于 `ExternalHarnessProtocolError`。
 
-公共事件不依赖 `OutputSchema`，避免三方 SDK 消息在协议入口被过早压缩。未来
-MemberRuntime adapter 负责把 `HarnessEvent` 转成内部 stream schema。
+公共事件不依赖 `OutputSchema`，避免三方 SDK 消息在协议入口被过早压缩。现有
+`ExternalHarnessMemberRuntime` 负责把 `HarnessEvent` 投影成内部 stream schema；该兼容投影不改变
+协议事件仍为信息完整、可供其它 host 消费的权威表示。
 
 Observation queue 必须使用正 capacity。`event_retention(payload)` 是 retention 的唯一来源：Turn/State/
 Item lifecycle、delta、final、warning/error、provider/unknown event 是 REQUIRED；snapshot output 和
@@ -205,7 +206,7 @@ Harness 在获得或改变可恢复 provider 状态后，通过 `context.checkpo
 ## 与其它 spec 的关系
 
 - `S_18_harness-interaction-contract.md`：现有 HarnessProtocol/MemberRuntime 及 team 状态映射。
-  本协议未来通过 adapter 接到 MemberRuntime，不替代当前内部 seam。
+  本协议通过 `external/member_runtime.py` 的通用 adapter 接到 MemberRuntime，不替代当前内部 seam。
 - `S_05_member-spawn-and-stream.md`：成员 spawn 和 stream；本次不修改该链路。
 - `S_14_monitor-and-observability.md`：events 的 telemetry 消费者可接入该观测体系。
 - `S_08_team-tools-contract.md`：ExternalToolGateway/MCP 暴露的 team tools 仍受其角色和权限约束。

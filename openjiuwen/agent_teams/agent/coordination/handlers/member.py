@@ -30,7 +30,7 @@ from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import DispatcherHost, PollController
-    from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+    from openjiuwen.agent_teams.external.member_runtime import TeamContextAwareRuntime
 
 
 class MemberHandler(BaseCoordinationHandler):
@@ -161,12 +161,12 @@ class MemberHandler(BaseCoordinationHandler):
                 exc,
             )
 
-    def _external_runtime(self) -> "CliRuntimeBase | None":
-        """Return the external CLI runtime when this member uses one."""
+    def _external_runtime(self) -> "TeamContextAwareRuntime | None":
+        """Return a runtime that can publish pending external team context."""
         runtime = getattr(self._round, "harness", None)
-        from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+        from openjiuwen.agent_teams.external.member_runtime import TeamContextAwareRuntime
 
-        if isinstance(runtime, CliRuntimeBase):
+        if isinstance(runtime, TeamContextAwareRuntime):
             return runtime
         return None
 

@@ -4,9 +4,9 @@
 OpenJiuwen Team 成员运行的开发者，说明如何实现
 `openjiuwen.agent_teams.external.protocol` 4.0。
 
-> 当前阶段只发布协议定义。现有 Claude Code 与 Codex backend 尚未迁移，team spawn
-> 路径也尚未通过 provider registry 自动加载三方实现。三方项目可以先实现和测试协议；
-> registry、`MemberRuntime` adapter 与声明式配置接线将在后续版本提供。
+> 当前已提供通用 `ExternalHarnessMemberRuntime`，并以 DSH Python SDK 作为首个协议实现。
+> DSH 目前只支持程序化装配；team spawn 尚未通过 provider registry 自动加载三方实现，现有
+> Claude Code 与 Codex backend 也尚未迁移。
 
 ## 1. 接入层级
 
@@ -15,7 +15,7 @@ OpenJiuwen Team 成员运行的开发者，说明如何实现
 ```text
 OpenJiuwen Team
       |
-MemberRuntime adapter（后续提供）
+ExternalHarnessMemberRuntime
       |
 ExternalHarnessProtocol
       |
@@ -242,8 +242,8 @@ message/turn ID 在 member + team session 内唯一，item/call ID 在 Turn 内�
 | `DiagnosticEvent` | 已脱敏诊断 |
 | `ProviderEvent` | 带命名空间和版本的 provider JSON 扩展 |
 
-不要先转成 OpenJiuwen 内部 `OutputSchema`。未来 `MemberRuntime` adapter 才负责该转换，协议入口
-应保留 SDK item、reasoning、usage 和扩展信息。
+不要先转成 OpenJiuwen 内部 `OutputSchema`。现有 `ExternalHarnessMemberRuntime` 在团队运行时边界
+负责兼容投影；协议入口仍应保留 SDK item、reasoning、usage 和扩展信息，公共事件才是权威表示。
 
 Observation buffer 必须有正 capacity。retention 只能由 `event_retention(payload)` 推导：lifecycle、
 delta、final、warning/error、provider/unknown event 是 REQUIRED；snapshot/cumulative usage 可合并；
@@ -725,7 +725,132 @@ class AcmeProvider:
 
 构造阶段不得连接网络、启动 subprocess 或绑定 event loop；这些操作放到 `start()`。
 
-## 12. Claude Code 和 Codex 的参考映射
+## 12. DSH 的程序化接入
+
+仓库内 `external.dsh` 是 DeepSeek Harness Python SDK 的首个协议实现。SDK 保持 optional：本地
+开发可先安装 DSH checkout 中的 Python package，公共 OpenJiuwen import 不依赖它：
+
+```bash
+uv pip install -e /path/to/deepseek-harness/python/sdk
+```
+
+当前尚无声明式 registry/spawn 接线，必须显式按 provider -> harness -> member runtime 组装：
+
+```python
+import asyncio
+
+from openjiuwen.agent_teams.external import ExternalHarnessMemberRuntime
+from openjiuwen.agent_teams.external.dsh import DshHarnessProvider
+from openjiuwen.agent_teams.external.protocol import ExternalHarnessContext
+
+
+async def consume_outputs(runtime: ExternalHarnessMemberRuntime) -> None:
+    async for chunk in runtime.outputs():
+        print(chunk)
+
+
+async def main() -> None:
+    provider = DshHarnessProvider()
+    harness = provider.create(
+        {
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-flash",
+            "cwd": "/path/to/member-worktree",
+            "cordis": "/path/to/custom-cordis.yml",
+            "system_prompt_env_var": "DSH_SYSTEM_PROMPT",
+        }
+    )
+    context = ExternalHarnessContext(
+        team_name="research-team",
+        member_name="dsh-worker",
+        member_agent_id="agent-dsh-worker",
+        team_session_id="team-session-1",
+        system_prompt="You are the research teammate.",
+    )
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=context,
+        stop_on_unsupported_force_abort=True,
+    )
+
+    terminal = asyncio.Event()
+
+    async def on_turn(kind: str, **_: object) -> None:
+        if kind in {"finished", "aborted", "failed"}:
+            terminal.set()
+
+    await runtime.subscribe(on_round=on_turn)
+    await runtime.start(team_session=None)
+    output_task = asyncio.create_task(consume_outputs(runtime))
+    receipt = await runtime.send("Inspect the repository and summarize the result.")
+    print("accepted external turn:", receipt.turn_id)
+
+    await terminal.wait()
+    await runtime.stop()
+    await output_task
+
+
+asyncio.run(main())
+```
+
+真实 Team 装配时由宿主提供实际 `team_session` 和 `ExternalHarnessContext`；也可给 runtime 传入
+context factory，在 start 时根据 team session 构造上下文。示例使用现有 legacy `on_round` callback
+等待 terminal，只是内部 `StreamController` 兼容面；三方协议本身仍使用 Turn。
+
+`stop_on_unsupported_force_abort=True` 是 MemberRuntime hard-cancel 的兼容策略：当上层请求
+`abort(immediate=True)`、而 DSH 没有 FORCE_ABORT capability 时，runtime 会停止整个 Harness cycle。
+它不是 DSH 的 turn force-abort，也不会让 `DshHarness.card` 声明 FORCE_ABORT。默认值为 `False`，
+严格模式下这类请求抛 `UnsupportedHarnessCapabilityError`；graceful abort 仍不受该开关支持。
+
+### 12.1 DSH Turn 边界
+
+Adapter 串行调用 `Session.run()`。一个 OpenJiuwen Turn 从 adapter 派发已接受输入并发布 STARTED，
+经过 DSH prompt durable receipt（SDK 从这里开始收集通知），直到 whole-agent idle；前一 interval 未
+idle 时，后续 AUTO 输入以 FOLLOW_UP 接受并排队，队列耗尽前 Harness 状态保持 RUNNING。DSH native
+turn/step 只描述内部 Agent Loop：
+
+| DSH 数据 | 协议映射 |
+|---|---|
+| native `turn/start` / `turn/end` | namespaced `ProviderEvent` |
+| native `step/start` / `step/end` | `item_type="iteration"` 的 `ItemLifecycleEvent` |
+| assistant text/reasoning chunk | 稳定 output ID 的 `OutputEvent` DELTA |
+| assistant message | FINAL output 与终态 `TurnMessage` |
+| tool call/result | tool `ItemLifecycleEvent` |
+| usage | `UsageUpdatedEvent` 与 terminal usage |
+| subagent started/finished | subagent `ItemLifecycleEvent` |
+| 未识别 notification | JSON-safe `ProviderEvent` |
+
+external STARTED/terminal 由 adapter 每个已接受输入各发布一次，不使用 DSH native turn 作为外部
+Turn 边界。whole-agent idle 时若没有任何 native `turn/end`，该外部 Turn 以
+`DSH_MISSING_TURN_END` 失败；native `turn/end` error 的 message 在 terminal 和 ProviderEvent 两条
+路径都会脱敏。
+
+### 12.2 DSH 首版限制
+
+`DshHarness.card.capabilities` 为空。当前不支持：
+
+- STEER、graceful/force abort、pause/resume；
+- checkpoint export/restore 或跨 runtime 的持久恢复；
+- 将 `ExternalHarnessContext.mcp_servers` 动态安装进 DSH；
+- 在 bundled Cordis 配置中自动注入 system prompt。
+
+`system_prompt_env_var="DSH_SYSTEM_PROMPT"` 只把 system prompt 放入 runtime env。custom Cordis
+composition 必须显式消费该变量（例如从 `process.env.DSH_SYSTEM_PROMPT` 取得 persona）；没有这个
+消费配置时 prompt 不会生效。DSH 可在 custom Cordis 中静态装配 MCP，但这不等于协议的动态 MCP
+capability。
+
+公开的 protocol event buffer 使用正容量和 BLOCK 策略，能把 adapter 侧 backpressure 传回
+notification callback。不过 DSH SDK 内部的 subscription queue 当前仍是无界队列；adapter 无法把
+它改造成有界队列。因此首版只保证 OpenJiuwen 公开 protocol event buffer 有界，上游 SDK 在消费者
+长期跟不上时仍可能积压，这是 DSH SDK 本身的限制。
+
+BLOCK 也覆盖 stop 期间的 REQUIRED terminal/state event。宿主应先启动唯一的 `events()` consumer，
+调用 `stop()` 时继续读取，直到 stream EOF；若先等待 stop、再读取一个已经填满的 buffer，stop 会按
+背压语义等待容量。`ExternalHarnessMemberRuntime` 已内置持续 event pump。若产品要求无 consumer 时
+stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢 terminal、提前 close 或改用无界
+内存队列。
+
+## 13. Claude Code 和 Codex 的参考映射
 
 | 协议语义 | Claude Agent SDK | Codex Python SDK |
 |---|---|---|
@@ -744,7 +869,7 @@ class AcmeProvider:
 表中是 adapter 内部映射，不是公共协议的一部分。Provider 原始对象只允许先转成 JSON-safe
 `provider_data`/`ProviderEvent`；不能把 SDK class 暴露给公共消费者。
 
-## 13. 契约测试清单
+## 14. 契约测试清单
 
 三方项目至少覆盖：
 
@@ -765,7 +890,7 @@ class AcmeProvider:
 15. session 激活和 turn 完成主动调用 sink，retry 幂等，stale/CAS 冲突不覆盖新状态；
 16. event consumer 慢时背压有界，不会无限占用内存；
 17. SDK 鉴权、限流、崩溃和超时落为 FAILED + `TurnError`，并且诊断不泄露凭据；
-18. 未安装 Claude/Codex 等可选 SDK 时，protocol 包仍可导入。
+18. 未安装 Claude/Codex/DSH 等可选 SDK 时，protocol 包仍可导入。
 19. MCP command/url/instance 缺失、错配或多填时都在启动 provider 前失败。
 20. cursor 提前 `aclose()` 后释放 lease，后续 consumer 可继续；
 21. JSON 字段无可变别名，NaN/Infinity/object/超大 checkpoint 被拒绝；
@@ -773,15 +898,15 @@ class AcmeProvider:
 23. required event 在背压下不丢，只有 derived coalescible/best-effort 类别按 policy 处理；
 24. ID scope、correlation/causation 与 Unix/monotonic 时间语义符合 spec。
 
-## 14. 当前限制与后续接线
+## 15. 当前限制与后续接线
 
-本次协议包没有：
+当前已有通用 `ExternalHarnessMemberRuntime` 和程序化 DSH adapter，但仍没有：
 
 - 修改 `ExternalCliAgentSpec`；
 - 注册 Python entry point group；
-- 提供 `ExternalHarnessProtocol -> MemberRuntime` adapter；
 - 改造 `build_cli_runtime`；
 - 迁移 Claude Code/Codex runtime。
 
-这些接线完成前，协议实现不能仅靠声明自动成为 team member。请把 provider 与 harness 实现放在
-独立、可测试的模块中，避免依赖当前 CLI spawn 内部结构，以便后续直接接入 registry 和 adapter。
+这些接线完成前，协议实现不能仅靠 TeamAgentSpec/YAML 声明自动成为 team member，需要像 DSH
+示例一样程序化构造 provider、harness、context 和 runtime。请把其它 provider 与 harness 实现放在
+独立、可测试的模块中，避免依赖当前 CLI spawn 内部结构，以便后续直接接入 registry。

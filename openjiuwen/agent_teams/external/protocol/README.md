@@ -12,7 +12,7 @@ The current contract version is `4.0`.
 ```text
 Team coordination / MemberRuntime
               |
-   future member-runtime adapter
+ ExternalHarnessMemberRuntime
               |
      ExternalHarnessProtocol
               |
@@ -22,7 +22,8 @@ Team coordination / MemberRuntime
 `ExternalHarnessProtocol` is a high-level, multi-turn behavioral contract. A
 conforming implementation owns the provider session, accepts concurrent
 commands, emits a cycle-long ordered event stream, answers provider-initiated
-interactions through host services, and publishes recoverable checkpoints.
+interactions through host services when required, and publishes recoverable
+checkpoints only when it declares that capability.
 
 ## Terminology
 
@@ -178,5 +179,8 @@ class MyHarness:
 - Long-lived team subsystem specification:
   `openjiuwen/agent_teams/docs/specs/S_24_external-harness-protocol.md`
 
-The current Claude Code and Codex implementations remain under
-`external/cli_agent/` and do not yet implement this package.
+`external/member_runtime.py` now provides the provider-neutral projection onto
+the internal MemberRuntime behavior. `external/dsh/` is the first protocol
+implementation and is currently wired programmatically. The Claude Code and
+Codex implementations remain under `external/cli_agent/` and do not yet
+implement this package.
