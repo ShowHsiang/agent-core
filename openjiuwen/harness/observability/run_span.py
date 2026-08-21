@@ -34,9 +34,7 @@ from openjiuwen.harness.observability.span_context import (
 # Tracer name the single-agent root spans are emitted under.
 _RUN_TRACER_NAME = "openjiuwen.harness.observability"
 
-# Span attribute carrying the host's request mode, so traces stay filterable
-# without parsing the span name.
-_RUN_MODE_ATTRIBUTE = "openjiuwen.agent.mode"
+_OUTPUT_UNSET = object()
 
 
 def build_run_span_name(*, mode: str, session_id: str) -> str:
@@ -67,12 +65,24 @@ def build_run_span_name(*, mode: str, session_id: str) -> str:
     return f"agent.{normalized_mode}.{normalized_session}"
 
 
-def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
+def open_agent_run_span(
+    *,
+    session_id: str = "",
+    mode: str = "",
+    request_id: str = "",
+    run_id: str = "",
+    turn_id: str = "",
+    turn_number: int | None = None,
+) -> Any:
     """Open the root span of a single-agent run.
 
     Args:
         session_id: Session the run belongs to; also keys the fallback registry.
         mode: Request mode of the run, stamped on the span and used in its name.
+        request_id: Optional host Web/RPC request identity.
+        run_id: Optional stable identity for this root run.
+        turn_id: Optional identity for the user turn.
+        turn_number: Optional known 1-based turn number.
 
     Returns:
         An opaque handle to pass to :func:`close_agent_run_span`, or ``None``
@@ -81,7 +91,21 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.extensions.observability.semconv import LANGFUSE_SESSION_ID
+        from openjiuwen.extensions.observability.semconv import (
+            GEN_AI_CONVERSATION_ID,
+            GEN_AI_OPERATION_NAME,
+            LANGFUSE_OBSERVATION_TYPE,
+            LANGFUSE_SESSION_ID,
+            OJ_AGENT_MODE,
+            OJ_REQUEST_ID,
+            OJ_RUN_ID,
+            OJ_SESSION_ID,
+            OJ_TRACE_ROOT,
+            OJ_TRACE_SCHEMA_VERSION,
+            OJ_TRAJECTORY_RECORD_KIND,
+            OJ_TURN_ID,
+            OJ_TURN_NUMBER,
+        )
         from openjiuwen.extensions.observability.setup import get_tracer, is_initialized
         from openjiuwen.extensions.observability.span_context import (
             set_current_session_id,
@@ -96,9 +120,31 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
 
         tracer = get_tracer(_RUN_TRACER_NAME)
         name = build_run_span_name(mode=mode, session_id=session_id)
-        span = tracer.start_span(name=name, kind=SpanKind.SERVER)
-        span.set_attribute(LANGFUSE_SESSION_ID, session_id or "")
-        span.set_attribute(_RUN_MODE_ATTRIBUTE, mode or "")
+        base_attributes: dict[str, Any] = {
+            LANGFUSE_SESSION_ID: session_id or "",
+            OJ_AGENT_MODE: mode or "",
+            OJ_TRACE_ROOT: True,
+            OJ_TRACE_SCHEMA_VERSION: "1",
+            GEN_AI_OPERATION_NAME: "invoke_agent",
+            OJ_TRAJECTORY_RECORD_KIND: "turn",
+            LANGFUSE_OBSERVATION_TYPE: "agent",
+        }
+        if session_id:
+            base_attributes[GEN_AI_CONVERSATION_ID] = session_id
+            base_attributes[OJ_SESSION_ID] = session_id
+        if request_id:
+            base_attributes[OJ_REQUEST_ID] = request_id
+        if run_id:
+            base_attributes[OJ_RUN_ID] = run_id
+        if turn_id:
+            base_attributes[OJ_TURN_ID] = turn_id
+        if turn_number is not None:
+            base_attributes[OJ_TURN_NUMBER] = int(turn_number)
+        span = tracer.start_span(
+            name=name,
+            kind=SpanKind.SERVER,
+            attributes=base_attributes,
+        )
         # Register as the run root so parent lookup finds it for LLM/tool span
         # creation. The session id goes into the shared registry as well as the
         # local fallback table — supervisor tasks may not inherit ContextVars.
@@ -113,7 +159,7 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         return None
 
 
-def stamp_run_output(handle: Any, output: str) -> None:
+def stamp_run_output(handle: Any, output: Any, *, allow_empty: bool = False) -> None:
     """Write the run's final answer onto the root span as the trace output.
 
     Team mode fills the equivalent attribute on its ``team.<name>`` span from
@@ -129,25 +175,46 @@ def stamp_run_output(handle: Any, output: str) -> None:
         handle: The still-recording root span.
         output: Final answer text; empty means nothing to stamp.
     """
-    if not output:
+    if not output and not allow_empty:
         return
     from openjiuwen.extensions.observability.redaction import redact_completion
     from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
     from openjiuwen.extensions.observability.setup import get_config
 
     config = get_config()
-    text = redact_completion(output, config) if config else output
+    output_text = str(output)
+    text = redact_completion(output_text, config) if config else output_text
     handle.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, text)
+    from openjiuwen.extensions.observability.demand import publish_span_snapshot
+
+    publish_span_snapshot(handle, "output")
 
 
-def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "") -> None:
+def close_agent_run_span(
+    handle: Any,
+    *,
+    session_id: str = "",
+    output: Any = _OUTPUT_UNSET,
+    exception: BaseException | None = None,
+    error_type: str = "",
+    error_message: str = "",
+) -> None:
     """End the root span opened by :func:`open_agent_run_span` and clear it.
 
     Args:
         handle: Opaque handle from :func:`open_agent_run_span`; None is a no-op.
         session_id: Session the run belonged to; its registry entry is dropped.
         output: The run's final answer, stamped as the trace-level output.
-            Empty (aborted / errored run) leaves the attribute unset.
+            Omit this argument to leave the attribute unset; an explicit empty
+            string remains a real, observable result.
+        exception: Optional run failure/cancellation recorded on the root.
+        error_type: Optional structured terminal failure type supplied by a
+            host whose protocol reports failure in-band instead of raising.
+            This is recorded verbatim and never replaced with a synthetic
+            exception class.
+        error_message: Optional structured terminal failure description. A
+            message without a type still marks the root ERROR but does not
+            invent ``error.type``.
     """
     # Drop this run's fallback entry — and only this run's. Sessions overlap,
     # so clearing whatever happens to be registered would blind a run that is
@@ -156,16 +223,18 @@ def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "")
     if handle is None:
         return
     try:
+        from opentelemetry.trace import Status, StatusCode
+
+        from openjiuwen.extensions.observability.semconv import (
+            ERROR_TYPE,
+            OJ_TRACE_COMPLETE,
+            OJ_TRACE_FORCED_CLOSE,
+        )
         from openjiuwen.extensions.observability.span_context import (
             cascade_close_children,
             clear_root_span,
             flush_child_spans,
         )
-
-        try:
-            stamp_run_output(handle, output)
-        except Exception as exc:
-            logger.debug("[AgentObservability] stamp run output failed: %s", exc)
 
         # End any still-open child LLM/tool spans (e.g. run aborted mid-call).
         # Two nets are needed for the single-agent path:
@@ -180,30 +249,58 @@ def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "")
         # scoped to our trace only (flush_spans_for_trace), so concurrent runs
         # are not affected.
         #
-        # Ordering note — the root span is ended BETWEEN the two nets, not after
-        # them: ``flush_spans_for_trace`` spares only spans whose name starts
-        # with ``team.`` (Team mode's root), so our ``agent.<mode>.<sid>`` root
-        # would otherwise be swept up as a leaked child — reported as an ORPHAN
-        # warning, force-ended by the tracker, and then re-ended here ("Calling
-        # end() on an ended span"). Ending it first makes it non-recording, which
-        # the tracker skips, so the root keeps its own end time and status while
-        # the net still catches genuinely leaked children. That is also why the
-        # trace id is read up front and passed in explicitly: an ended root is no
-        # longer resolvable from the ContextVar, so letting flush_child_spans
-        # discover it would skip the flush entirely.
+        # The root is explicitly excluded by span id, so it stays recording
+        # until every child has ended. Its final record is therefore a reliable
+        # completion marker for incremental trajectory consumers.
         trace_id = getattr(getattr(handle, "context", None), "trace_id", None)
+        forced_close_count = 0
         try:
-            cascade_close_children()
+            forced_close_count += cascade_close_children() or 0
         except Exception as exc:
             logger.debug("[AgentObservability] cascade_close_children failed: %s", exc)
+        try:
+            forced_close_count += flush_child_spans(trace_id=trace_id) or 0
+        except Exception as exc:
+            logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
+        if forced_close_count:
+            handle.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
+
+        if output is not _OUTPUT_UNSET:
+            try:
+                stamp_run_output(handle, output, allow_empty=True)
+            except Exception as exc:
+                logger.debug("[AgentObservability] stamp run output failed: %s", exc)
+
+        if exception is not None:
+            try:
+                handle.record_exception(exception)
+            except Exception as exc:
+                logger.debug("[AgentObservability] record root exception failed: %s", exc)
+        if exception is not None:
+            # A raised exception is the authoritative failure fact. Structured
+            # fields exist for protocols that report terminal failures in-band;
+            # they must never relabel or rewrite a real exception.
+            resolved_error_type = type(exception).__name__
+            resolved_error_message = str(exception)
+        else:
+            resolved_error_type = (error_type or "").strip()
+            resolved_error_message = (error_message or "").strip()
+        if resolved_error_type or resolved_error_message or exception is not None:
+            if resolved_error_type:
+                handle.set_attribute(ERROR_TYPE, resolved_error_type)
+            handle.set_status(
+                Status(
+                    StatusCode.ERROR,
+                    resolved_error_message or resolved_error_type,
+                )
+            )
+        else:
+            handle.set_status(Status(StatusCode.OK))
+        handle.set_attribute(OJ_TRACE_COMPLETE, True)
         try:
             handle.end()
         except Exception as exc:
             logger.debug("[AgentObservability] end root span failed: %s", exc)
-        try:
-            flush_child_spans(trace_id=trace_id)
-        except Exception as exc:
-            logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
         try:
             clear_root_span(session_id=session_id or "", expected_span=handle)
         except Exception as exc:

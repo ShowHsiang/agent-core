@@ -2053,6 +2053,7 @@ class OpenAIModelClient(BaseModelClient):
 
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
+                    metadata=parsed_chunk.metadata,
                     reasoning_content=parsed_chunk.reasoning_content,
                     tool_calls=parsed_chunk.tool_calls,
                     usage_metadata=parsed_chunk.usage_metadata,
@@ -2061,6 +2062,9 @@ class OpenAIModelClient(BaseModelClient):
                     prompt_token_ids=parsed_chunk.prompt_token_ids,
                     completion_token_ids=parsed_chunk.completion_token_ids,
                     logprobs=parsed_chunk.logprobs,
+                    response_id=parsed_chunk.response_id,
+                    response_model=parsed_chunk.response_model,
+                    provider_metadata=parsed_chunk.provider_metadata,
                 )
 
                 yield chunk_with_parser
@@ -2139,6 +2143,7 @@ class OpenAIModelClient(BaseModelClient):
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
                 **self._cache_usage_metadata(response.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(response.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2204,6 +2209,9 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(response),
         )
 
     @staticmethod
@@ -2219,6 +2227,16 @@ class OpenAIModelClient(BaseModelClient):
         if hasattr(logprobs_obj, '__dict__'):
             return vars(logprobs_obj)
         return logprobs_obj
+
+    @staticmethod
+    def _response_provider_metadata(response: Any) -> dict[str, Any]:
+        """Return a small non-sensitive whitelist from an OpenAI response."""
+        metadata: dict[str, Any] = {}
+        for key in ("system_fingerprint", "service_tier"):
+            value = getattr(response, key, None)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                metadata[key] = value
+        return metadata
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
@@ -2242,6 +2260,7 @@ class OpenAIModelClient(BaseModelClient):
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
                 **self._cache_usage_metadata(chunk.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(chunk.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2261,6 +2280,9 @@ class OpenAIModelClient(BaseModelClient):
                     usage_metadata=usage_metadata,
                     finish_reason="null",
                     prompt_token_ids=prompt_token_ids,
+                    response_id=str(getattr(chunk, "id", "") or "") or None,
+                    response_model=str(getattr(chunk, "model", "") or "") or None,
+                    provider_metadata=self._response_provider_metadata(chunk),
                 )
             return None
 
@@ -2316,4 +2338,7 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(chunk, "id", "") or "") or None,
+            response_model=str(getattr(chunk, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(chunk),
         )

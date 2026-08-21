@@ -258,7 +258,9 @@ class ObservabilityRuntime:
         return [
             (LLMCallEvents.LLM_INVOKE_INPUT, handler.on_llm_invoke_input),
             (LLMCallEvents.LLM_STREAM_INPUT, handler.on_llm_stream_input),
+            (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
+            (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
             (LLMCallEvents.LLM_INVOKE_OUTPUT, handler.on_llm_invoke_output),
             (LLMCallEvents.LLM_OUTPUT, handler.on_llm_output),
             (LLMCallEvents.LLM_CALL_ERROR, handler.on_llm_call_error),

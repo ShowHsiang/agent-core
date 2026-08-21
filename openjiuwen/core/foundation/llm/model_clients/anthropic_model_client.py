@@ -969,6 +969,7 @@ class AnthropicModelClient(BaseModelClient):
             tool_use_acc: dict[int, dict] = {}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
+            accumulated_for_parser = ""
 
             async with async_client.messages.stream(**params) as response_stream:
                 async for event in response_stream:
@@ -981,6 +982,26 @@ class AnthropicModelClient(BaseModelClient):
                         final_stop_reason = chunk.finish_reason
                     if chunk.content:
                         current_text += chunk.content
+                        if output_parser:
+                            accumulated_for_parser += str(chunk.content)
+                            try:
+                                parsed = await output_parser.parse(
+                                    accumulated_for_parser
+                                )
+                                if parsed is not None:
+                                    chunk = chunk.model_copy(
+                                        update={"parser_content": parsed}
+                                    )
+                                    accumulated_for_parser = ""
+                            except Exception as exc:
+                                llm_logger.debug(
+                                    "Anthropic stream parser attempt error.",
+                                    event_type=LogEventType.LLM_CALL_ERROR,
+                                    model_name=params.get("model"),
+                                    model_provider=self.model_client_config.client_provider,
+                                    is_stream=True,
+                                    exception=str(exc),
+                                )
                     await trigger(
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
@@ -1110,6 +1131,16 @@ class AnthropicModelClient(BaseModelClient):
                 {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: replay_blocks}
                 if replay_blocks else {}
             ),
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata={
+                key: value
+                for key, value in (
+                    ("stop_reason", getattr(response, "stop_reason", None)),
+                    ("stop_sequence", getattr(response, "stop_sequence", None)),
+                )
+                if isinstance(value, (str, int, float, bool)) and value != ""
+            },
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
@@ -1124,7 +1155,8 @@ class AnthropicModelClient(BaseModelClient):
         u = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage.__dict__)
         uncached = int(u.get("input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_write = int(u.get("cache_creation_input_tokens") or 0)
+        cache_write_raw = u.get("cache_creation_input_tokens")
+        cache_write = int(cache_write_raw or 0)
         output = int(u.get("output_tokens") or 0)
         total_input = uncached + cache_read + cache_write
 
@@ -1150,6 +1182,9 @@ class AnthropicModelClient(BaseModelClient):
             cache_status="observed",
             cache_source="provider_usage",
             cache_authoritative=True,
+            cache_creation_input_tokens=(
+                cache_write if cache_write_raw is not None else None
+            ),
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
@@ -1183,6 +1218,8 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason="null",
+                response_id=str(getattr(msg, "id", "") or "") or None,
+                response_model=str(getattr(msg, "model", "") or "") or None,
             )
 
         if etype == "content_block_start":
@@ -1328,6 +1365,9 @@ class AnthropicModelClient(BaseModelClient):
                 metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
+                provider_metadata=(
+                    {"stop_reason": str(stop_reason)} if stop_reason else {}
+                ),
             )
 
         if etype == "message_stop":

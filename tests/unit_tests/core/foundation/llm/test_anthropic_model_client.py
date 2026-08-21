@@ -8,7 +8,7 @@ normalization, and usage extraction. Network/SDK paths (invoke/stream)
 are covered separately and require the optional ``anthropic`` SDK.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,6 +16,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
+    AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -509,6 +510,59 @@ def _make_client() -> AnthropicModelClient:
     return AnthropicModelClient(request_config, client_config)
 
 
+@pytest.mark.asyncio
+async def test_stream_output_parser_keeps_raw_deltas_and_emits_parser_fact() -> None:
+    class _ResponseStream:
+        def __init__(self):
+            self._events = iter((object(), object()))
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._events)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _ResponseStream()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    fake_client = MagicMock()
+    fake_client.messages.stream.return_value = _StreamContext()
+    fake_client.close = AsyncMock()
+    client = _make_client()
+    client._create_async_anthropic_client = MagicMock(return_value=fake_client)
+    client._use_shared_client = MagicMock(return_value=False)
+    client._event_to_chunk = MagicMock(side_effect=[
+        AssistantMessageChunk(content='{"value":'),
+        AssistantMessageChunk(content="1}", finish_reason="stop"),
+    ])
+
+    class _Parser:
+        async def parse(self, content):
+            if content == '{"value":1}':
+                return {"value": 1}
+            raise ValueError("incomplete")
+
+    chunks = [
+        chunk
+        async for chunk in client.stream(
+            [{"role": "user", "content": "parse"}],
+            output_parser=_Parser(),
+        )
+    ]
+
+    assert [chunk.content for chunk in chunks] == ['{"value":', "1}"]
+    assert chunks[0].parser_content is None
+    assert chunks[1].parser_content == {"value": 1}
+    fake_client.close.assert_awaited_once()
+
+
 class TestUsageFromAnthropic:
     def test_input_tokens_sums_uncached_read_and_write(self):
         usage = MagicMock()
@@ -526,6 +580,7 @@ class TestUsageFromAnthropic:
         assert meta.total_tokens == 200
         assert meta.cache_tokens == 30  # cache_read only
         assert meta.cache_miss_tokens == 120  # uncached + cache_write overlap
+        assert meta.cache_creation_input_tokens == 20
         assert meta.model_name == "claude-opus-4"
 
     def test_zero_cache_fields_handled(self):
@@ -537,6 +592,7 @@ class TestUsageFromAnthropic:
         meta = _make_client()._usage_from_anthropic(usage)
         assert meta.input_tokens == 10
         assert meta.cache_tokens == 0
+        assert meta.cache_creation_input_tokens is None
 
     def test_none_usage_returns_none(self):
         assert _make_client()._usage_from_anthropic(None) is None
@@ -587,11 +643,17 @@ class TestResponseReasoning:
         ]
         response.usage = None
         response.stop_reason = "tool_use"
+        response.stop_sequence = None
+        response.id = "msg-1"
+        response.model = "claude-returned"
 
         message = await _make_client()._parse_response(response)
 
         assert message.reasoning_content == "plan"
         assert message.tool_calls and message.tool_calls[0].id == "t1"
+        assert message.response_id == "msg-1"
+        assert message.response_model == "claude-returned"
+        assert message.provider_metadata == {"stop_reason": "tool_use"}
         assert message.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [
             {"type": "thinking", "thinking": "plan", "signature": "sig"},
             {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"x": 1}},

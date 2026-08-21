@@ -24,6 +24,14 @@ from __future__ import annotations
 GEN_AI_SYSTEM = "gen_ai.system"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
+GEN_AI_AGENT_ID = "gen_ai.agent.id"
+GEN_AI_AGENT_NAME = "gen_ai.agent.name"
+GEN_AI_AGENT_VERSION = "gen_ai.agent.version"
+GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
+GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
+GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
+GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
 
 # Id of the LLM request this span belongs to, stamped so a trace can be read
 # back against the framework's own correlation key when a span looks wrong.
@@ -34,6 +42,7 @@ GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
 GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
 GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
 GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
+GEN_AI_REQUEST_STREAM = "gen_ai.request.stream"
 
 # Per-member prev-message-count stored on the team span to make prompt
 # delta tracking survive across iterations (each iteration opens/closes its
@@ -48,9 +57,17 @@ GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
 GEN_AI_USAGE_CACHE_TOKENS = "gen_ai.usage.cache_tokens"
 GEN_AI_USAGE_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens"
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = "gen_ai.usage.cache_creation.input_tokens"
+GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
+GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
+GEN_AI_RESPONSE_ID = "gen_ai.response.id"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
+GEN_AI_RESPONSE_TTFC = "gen_ai.response.time_to_first_chunk"
 GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
 # Why a reasoning span carries no duration. Reasoning time is measured from the
 # stream, so a non-streaming call has none to report — the attribute says so
@@ -68,6 +85,61 @@ GEN_AI_TOOL_INPUT = "gen_ai.tool.input"
 GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
 GEN_AI_TOOL_ID = "gen_ai.tool.id"
 GEN_AI_TOOL_CALLS = "gen_ai.tool_calls"
+GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
+GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
+GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
+GEN_AI_TOOL_TYPE = "gen_ai.tool.type"
+GEN_AI_TOOL_DESCRIPTION = "gen_ai.tool.description"
+
+
+# ---------------------------------------------------------------------------
+# openjiuwen.* — additive trajectory and correlation attributes
+# ---------------------------------------------------------------------------
+
+OJ_TRACE_ROOT = "openjiuwen.trace.root"
+OJ_TRACE_SCHEMA_VERSION = "openjiuwen.trace.schema_version"
+OJ_TRACE_COMPLETE = "openjiuwen.trace.complete"
+OJ_TRACE_FORCED_CLOSE = "openjiuwen.trace.forced_close"
+OJ_SPAN_FORCED_CLOSE = "openjiuwen.span.forced_close"
+OJ_SPAN_FORCED_CLOSE_REASON = "openjiuwen.span.forced_close.reason"
+OJ_SESSION_ID = "openjiuwen.session.id"
+OJ_REQUEST_ID = "openjiuwen.request.id"
+OJ_RUN_ID = "openjiuwen.run.id"
+OJ_TURN_ID = "openjiuwen.turn.id"
+OJ_TURN_NUMBER = "openjiuwen.turn.number"
+OJ_STEP_ID = "openjiuwen.step.id"
+OJ_STEP_NUMBER = "openjiuwen.step.number"
+OJ_INFERENCE_ID = "openjiuwen.inference.id"
+OJ_REQUEST_NUMBER = "openjiuwen.request.number"
+OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
+OJ_TRAJECTORY_RECORD_KIND = "openjiuwen.trajectory.record.kind"
+OJ_AGENT_MODE = "openjiuwen.agent.mode"
+
+OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
+OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
+OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
+OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
+OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS = "openjiuwen.gen_ai.response.completion_token_ids"
+OJ_GEN_AI_RESPONSE_LOGPROBS = "openjiuwen.gen_ai.response.logprobs"
+OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
+OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
+OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
+OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
+
+OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
+OJ_STREAM_KIND = "openjiuwen.stream.kind"
+OJ_STREAM_TEXT = "openjiuwen.stream.text"
+OJ_STREAM_TOOL_CALL_ID = "openjiuwen.stream.tool_call.id"
+OJ_STREAM_TOOL_CALL_NAME = "openjiuwen.stream.tool_call.name"
+OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA = "openjiuwen.stream.tool_call.arguments_delta"
+
+OJ_TOOL_RESOURCE_ID = "openjiuwen.tool.resource_id"
+OJ_TOOL_TYPE = "openjiuwen.tool.type"
+OJ_TOOL_AUTHORITATIVE = "openjiuwen.tool.authoritative"
+
+ERROR_TYPE = "error.type"
 
 # ---------------------------------------------------------------------------
 # agentteam.* — Team-level collaboration attributes (Monitor handler)

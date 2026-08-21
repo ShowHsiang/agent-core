@@ -11,6 +11,7 @@ from openjiuwen.extensions.observability import demand as demand_module
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.demand import (
     acquire_observability_demand,
+    publish_span_snapshot,
     release_observability_demand,
     reset_observability_demands,
 )
@@ -50,6 +51,9 @@ def provider(monkeypatch) -> _FakeProvider:
     )
     monkeypatch.setattr(
         demand_module, "get_trajectory_span_processor", lambda: object()
+    )
+    monkeypatch.setattr(
+        demand_module, "get_span_record_processor", lambda: object()
     )
     reset_observability_demands()
     yield fake
@@ -139,3 +143,31 @@ def test_the_shared_trajectory_processor_is_created_once() -> None:
     second = demand_module.get_trajectory_span_processor()
 
     assert first is second
+
+
+def test_the_shared_span_record_processor_is_created_once() -> None:
+    first = demand_module.get_span_record_processor()
+    second = demand_module.get_span_record_processor()
+
+    assert first is second
+
+
+def test_snapshot_publish_is_a_noop_until_the_shared_processor_exists(monkeypatch) -> None:
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", None)
+
+    publish_span_snapshot(object(), "attributes")
+
+
+def test_snapshot_publish_delegates_to_the_existing_shared_processor(monkeypatch) -> None:
+    calls: list[tuple[object, str]] = []
+    processor = type(
+        "SnapshotProcessor",
+        (),
+        {"publish_snapshot": lambda self, span, kind: calls.append((span, kind))},
+    )()
+    span = object()
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+
+    publish_span_snapshot(span, "stream_chunk")
+
+    assert calls == [(span, "stream_chunk")]

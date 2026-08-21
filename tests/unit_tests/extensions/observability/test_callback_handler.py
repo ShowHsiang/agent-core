@@ -3,20 +3,96 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+from pydantic import BaseModel
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    AssistantMessage,
+    AssistantMessageChunk,
+    Model,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ProviderType,
+    UserMessage,
+    UsageMetadata,
+)
+from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability import demand as demand_module
+from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
+from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_COMPLETION,
+    GEN_AI_PROMPT,
+    GEN_AI_RESPONSE_FINISH_REASON,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_ID,
+    GEN_AI_RESPONSE_TTFC,
+    GEN_AI_RESPONSE_TTFT_MS,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_DEFINITIONS,
+    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
+    GEN_AI_USAGE_PROMPT_TOKENS,
+    GEN_AI_USAGE_COMPLETION_TOKENS,
+    LANGFUSE_GEN_AI_COMPLETION,
+    LANGFUSE_GEN_AI_PROMPT,
+    LANGFUSE_OBSERVATION_INPUT,
+    OJ_EVENT_SEQUENCE,
+    OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
+    OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
+    OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
+    OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
+    OJ_REQUEST_ID,
+    OJ_RUN_ID,
+    OJ_SPAN_FORCED_CLOSE,
+    OJ_STREAM_KIND,
+    OJ_TRACE_COMPLETE,
+    OJ_TRACE_FORCED_CLOSE,
+    OJ_TRACE_ROOT,
+)
 from openjiuwen.extensions.observability.span_context import (
+    ActiveSpanTracker,
     clear_root_span,
     reset_state,
+    set_active_span_tracker,
     set_root_span,
 )
+from openjiuwen.extensions.observability.span_record_processor import (
+    OtlpSpanRecord,
+    OtlpSpanSnapshotRecord,
+    SpanRecordProcessor,
+)
+from openjiuwen.harness.observability.run_span import close_agent_run_span
+
+
+class _LiveRecordConsumer:
+    def __init__(self) -> None:
+        self.records: list[OtlpSpanRecord] = []
+        self.snapshots: list[OtlpSpanSnapshotRecord] = []
+
+    def consume(self, record: OtlpSpanRecord) -> None:
+        self.records.append(record)
+
+    def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
+        self.snapshots.append(record)
 
 
 async def _emit_callback_flow(framework, session) -> None:
@@ -91,3 +167,913 @@ async def test_runtime_initialize_wires_global_callback_framework() -> None:
     assert names.count("llm.call") == 2
     assert names.count("tool.search") == 2
     assert names.count("agent.root") == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    config = ObservabilityConfig(
+        enabled=True,
+        service_name="stream-contract-test",
+        sample_rate=1.0,
+        backend="langfuse",
+    )
+    framework = Runner.callback_framework
+    runtime.initialize(config, span_exporter_override=exporter)
+    root = runtime.get_tracer("stream-contract-test").start_span("agent.root")
+    root.set_attribute("gen_ai.conversation.id", "session-1")
+    root.set_attribute("openjiuwen.session.id", "session-1")
+    root.set_attribute(OJ_REQUEST_ID, "request-1")
+    root.set_attribute(OJ_RUN_ID, "run-1")
+    set_root_span(root, session_id="session-1")
+
+    usage = UsageMetadata(
+        model_name="provider-model",
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        cache_tokens=3,
+        cache_creation_input_tokens=2,
+        reasoning_tokens=2,
+        input_cost=0.1,
+        output_cost=0.2,
+        total_cost=0.3,
+    )
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[
+                {"role": "system", "content": "Be precise"},
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": '{"value":1}',
+                    "tool_call_id": "call-0",
+                    "name": "lookup",
+                },
+            ],
+            model="requested-model",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INPUT,
+            messages=[
+                {"role": "system", "content": "Be precise"},
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": '{"value":1}',
+                    "tool_call_id": "call-0",
+                    "name": "lookup",
+                },
+            ],
+            is_stream=True,
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            result=AssistantMessageChunk(content="hel", response_id="resp-1"),
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            result=AssistantMessageChunk(
+                content="lo",
+                reasoning_content="think",
+                usage_metadata=usage,
+                finish_reason="stop",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                response_id="resp-1",
+                response_model="provider-model",
+                provider_metadata={"system_fingerprint": "fp", "secret": "drop"},
+                provider_content="raw provider answer",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        type="function",
+                        name="search",
+                        arguments='{"q":"next"}',
+                    )
+                ],
+            ),
+        )
+        with LlmCallScope(unified_completion=True):
+            await framework.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                is_stream=True,
+                response="hello",
+                usage=usage,
+            )
+        assert not [
+            span for span in exporter.get_finished_spans() if span.name == "llm.call"
+        ], "provider enrichment must not close a streaming span"
+
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_COMPLETED,
+            result=AssistantMessage(
+                content="hello",
+                reasoning_content="think",
+                usage_metadata=usage,
+                finish_reason="stop",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                response_id="resp-1",
+                response_model="provider-model",
+                provider_metadata={"system_fingerprint": "fp", "secret": "drop"},
+                provider_content="raw provider answer",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        type="function",
+                        name="search",
+                        arguments='{"q":"next"}',
+                    )
+                ],
+            ),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="session-1", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    attrs = llm_span.attributes
+    assert json.loads(attrs[GEN_AI_SYSTEM_INSTRUCTIONS]) == [
+        {"type": "text", "content": "Be precise"}
+    ]
+    input_messages = json.loads(attrs[GEN_AI_INPUT_MESSAGES])
+    assert input_messages[0]["parts"][0]["content"] == "hello"
+    assert input_messages[1]["parts"][0] == {
+        "type": "tool_call",
+        "id": "call-0",
+        "name": "lookup",
+        "arguments": {"q": "x"},
+    }
+    assert input_messages[2]["parts"][0] == {
+        "type": "tool_call_response",
+        "id": "call-0",
+        "name": "lookup",
+        "response": {"value": 1},
+    }
+    output = json.loads(attrs[GEN_AI_OUTPUT_MESSAGES])[0]
+    assert output["parts"][0] == {"type": "reasoning", "content": "think"}
+    assert output["parts"][1] == {"type": "text", "content": "hello"}
+    assert output["parts"][2] == {
+        "type": "tool_call",
+        "id": "call-1",
+        "name": "search",
+        "arguments": {"q": "next"},
+    }
+    assert attrs[f"{LANGFUSE_GEN_AI_PROMPT}.0.content"] == "Be precise"
+    assert attrs[f"{LANGFUSE_GEN_AI_COMPLETION}.0.content"] == "hello"
+
+    # Existing Langfuse carve-out remains unchanged; additive totals stay raw.
+    assert attrs[GEN_AI_USAGE_PROMPT_TOKENS] == 8
+    assert attrs[GEN_AI_USAGE_COMPLETION_TOKENS] == 5
+    assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 11
+    assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 7
+    assert attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 3
+    assert attrs[GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] == 2
+    assert attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 2
+    assert attrs[GEN_AI_RESPONSE_FINISH_REASON] == "stop"
+    assert list(attrs[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
+    assert attrs[GEN_AI_RESPONSE_ID] == "resp-1"
+    assert attrs[GEN_AI_RESPONSE_TTFC] == pytest.approx(
+        attrs[GEN_AI_RESPONSE_TTFT_MS] / 1000.0
+    )
+    assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS]) == [1, 2]
+    assert json.loads(attrs[OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS]) == [3, 4]
+    assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROVIDER_METADATA]) == {
+        "system_fingerprint": "fp"
+    }
+    assert attrs[OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT] == "raw provider answer"
+    assert attrs[OJ_REQUEST_ID] == "request-1"
+    assert attrs[OJ_RUN_ID] == "run-1"
+
+    stream_events = [
+        event for event in llm_span.events if event.name == "openjiuwen.stream.chunk"
+    ]
+    assert [event.attributes[OJ_EVENT_SEQUENCE] for event in stream_events] == [0, 1]
+    assert [event.attributes[OJ_STREAM_KIND] for event in stream_events] == [
+        "text-delta",
+        "reasoning-delta",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_and_legacy_content_share_redaction_decisions() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="redaction-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+            redact_prompts=True,
+            redact_completions=True,
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("redaction-contract-test").start_span("agent.root")
+    set_root_span(root, session_id="redaction-session")
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=[
+                {"role": "system", "content": "system secret"},
+                {"role": "user", "content": "prompt secret"},
+            ],
+            model="fake",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(content="completion secret", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="redaction-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    input_text = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]["parts"][0]["content"]
+    output_text = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
+    assert input_text == span.attributes[f"{GEN_AI_PROMPT}.1.content"]
+    assert output_text == span.attributes[f"{GEN_AI_COMPLETION}.0.content"]
+    assert input_text.startswith("sha256:")
+    assert output_text.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="input-provenance-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("input-provenance-contract-test").start_span("agent.root")
+    set_root_span(root, session_id="input-provenance-session")
+    repeated_content = "<system-reminder>same reminder</system-reminder>"
+    attachment = UserMessage(
+        content=repeated_content,
+        metadata={
+            OPENJIUWEN_MESSAGE_PROVENANCE_METADATA: {
+                "kind": "prompt_attachment",
+                "scope": "request",
+                "private": "must-not-leak",
+                "items": [
+                    {
+                        "id": "session.input-provenance-session.memory",
+                        "section": "memory",
+                        "kind": "memory",
+                        "source": "rail.memory",
+                        "priority": 20,
+                        "private": "must-not-leak",
+                    }
+                ],
+            }
+        },
+    )
+    messages = [
+        {"role": "system", "content": "system baseline"},
+        UserMessage(content=repeated_content),
+        attachment,
+        UserMessage(content="preserved tail"),
+    ]
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=messages,
+            model="fake",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INPUT,
+            messages=[
+                {
+                    "role": message.get("role") if isinstance(message, dict) else message.role,
+                    "content": message.get("content") if isinstance(message, dict) else message.content,
+                }
+                for message in messages
+            ],
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(content="done", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="input-provenance-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    provenance = json.loads(span.attributes[OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE])
+    assert provenance == [
+        {
+            "request_message_index": 2,
+            "input_message_index": 1,
+            "kind": "prompt_attachment",
+            "scope": "request",
+            "items": [
+                {
+                    "id": "session.input-provenance-session.memory",
+                    "section": "memory",
+                    "kind": "memory",
+                    "source": "rail.memory",
+                    "priority": 20,
+                }
+            ],
+        }
+    ]
+    structured = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])
+    assert [message["parts"][0]["content"] for message in structured] == [
+        repeated_content,
+        repeated_content,
+        "preserved tail",
+    ]
+    assert all("metadata" not in message for message in structured)
+    assert span.attributes[f"{GEN_AI_PROMPT}.1.content"] == repeated_content
+    assert span.attributes[f"{GEN_AI_PROMPT}.2.content"] == repeated_content
+    assert span.attributes[f"{LANGFUSE_GEN_AI_PROMPT}.1.content"] == repeated_content
+    assert span.attributes[f"{LANGFUSE_GEN_AI_PROMPT}.2.content"] == repeated_content
+    langfuse_input = json.loads(span.attributes[LANGFUSE_OBSERVATION_INPUT])
+    assert [message["content"] for message in langfuse_input] == [
+        repeated_content,
+        repeated_content,
+        "preserved tail",
+    ]
+    assert "private" not in json.dumps(provenance)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_event", "terminal_event"),
+    [
+        (LLMCallEvents.LLM_INVOKE_INPUT, LLMCallEvents.LLM_INVOKE_OUTPUT),
+        (LLMCallEvents.LLM_STREAM_INPUT, LLMCallEvents.LLM_STREAM_COMPLETED),
+    ],
+)
+async def test_prompt_attachment_provenance_survives_attribute_pressure_and_redaction(
+    input_event: Any,
+    terminal_event: Any,
+) -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="input-provenance-pressure-test",
+            sample_rate=1.0,
+            backend="otlp",
+            redact_prompts=True,
+            max_attributes=40,
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("input-provenance-pressure-test").start_span("agent.root")
+    set_root_span(root, session_id="input-provenance-pressure-session")
+    messages = [
+        {"role": "system", "content": "system secret"},
+        UserMessage(content="first secret"),
+        UserMessage(content="second secret"),
+        UserMessage(
+            content="attachment secret",
+            metadata={
+                OPENJIUWEN_MESSAGE_PROVENANCE_METADATA: {
+                    "kind": "prompt_attachment",
+                    "scope": "request",
+                    "items": [
+                        {
+                            "id": "session.pressure.runtime",
+                            "section": "runtime",
+                            "kind": "runtime",
+                            "source": "rail.runtime",
+                            "priority": 10,
+                        }
+                    ],
+                }
+            },
+        ),
+    ]
+    try:
+        await framework.trigger(input_event, messages=messages, model="fake")
+        await framework.trigger(
+            terminal_event,
+            result=AssistantMessage(content="done", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(
+            session_id="input-provenance-pressure-session",
+            expected_span=root,
+        )
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    assert GEN_AI_INPUT_MESSAGES not in span.attributes
+    provenance_json = span.attributes[OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE]
+    assert "secret" not in provenance_json
+    assert json.loads(provenance_json) == [
+        {
+            "request_message_index": 3,
+            "input_message_index": 2,
+            "kind": "prompt_attachment",
+            "scope": "request",
+            "items": [
+                {
+                    "id": "session.pressure.runtime",
+                    "section": "runtime",
+                    "kind": "runtime",
+                    "source": "rail.runtime",
+                    "priority": 10,
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="multimodal-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("multimodal-contract-test").start_span("agent.root")
+    set_root_span(root, session_id="multimodal-session")
+    input_content = [
+        "before attachment",
+        {"type": "input_text", "text": "inspect these sources"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,abc"},
+            "detail": "high",
+        },
+        {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "pdf-bytes",
+            },
+            "title": "spec.pdf",
+        },
+    ]
+    output_content = [
+        {"type": "output_text", "text": "the sources agree"},
+        {"type": "citation", "document_id": "doc-1", "page": 2},
+    ]
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=[
+                {
+                    "role": "user",
+                    "name": "named-reviewer",
+                    "content": input_content,
+                }
+            ],
+            model="fake",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(
+                content=output_content,
+                name="named-assistant",
+                finish_reason="stop",
+            ),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="multimodal-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    input_message = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]
+    assert input_message["name"] == "named-reviewer"
+    assert [part["type"] for part in input_message["parts"]] == [
+        "text",
+        "input_text",
+        "image_url",
+        "document",
+    ]
+    assert input_message["parts"][0]["content"] == "before attachment"
+    assert input_message["parts"][1]["content"] == "inspect these sources"
+    assert json.loads(input_message["parts"][2]["content"]) == {
+        "image_url": {"url": "data:image/png;base64,abc"},
+        "detail": "high",
+    }
+    assert json.loads(input_message["parts"][3]["content"]) == {
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "pdf-bytes",
+        },
+        "title": "spec.pdf",
+    }
+
+    output_message = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]
+    assert output_message["name"] == "named-assistant"
+    assert output_message["finish_reason"] == "stop"
+    assert [part["type"] for part in output_message["parts"]] == [
+        "output_text",
+        "citation",
+    ]
+    assert output_message["parts"][0]["content"] == "the sources agree"
+    assert json.loads(output_message["parts"][1]["content"]) == {
+        "document_id": "doc-1",
+        "page": 2,
+    }
+
+    # The existing indexed attributes keep their historical whole-content
+    # string shape and emission conditions; only the additive field is parted.
+    assert json.loads(span.attributes[f"{GEN_AI_PROMPT}.0.content"]) == input_content
+    assert json.loads(span.attributes[f"{GEN_AI_COMPLETION}.0.content"]) == output_content
+
+
+@pytest.mark.asyncio
+async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="llm-terminal-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("llm-terminal-contract-test").start_span("agent.root")
+    set_root_span(root, session_id="terminal-session")
+    try:
+        with LlmCallScope("unified-call", unified_completion=True):
+            await framework.trigger(
+                LLMCallEvents.LLM_STREAM_INPUT,
+                messages=[{"role": "user", "content": "unified"}],
+                model="fake",
+            )
+            await framework.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                is_stream=True,
+                response="unified answer",
+                usage=UsageMetadata(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+            assert not [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+            await framework.trigger(
+                LLMCallEvents.LLM_STREAM_COMPLETED,
+                result=AssistantMessage(content="unified answer", finish_reason="stop"),
+            )
+            # A redundant provider output after the terminal cannot end or
+            # mutate a second span.
+            await framework.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                is_stream=True,
+                response="late provider frame",
+            )
+
+        with LlmCallScope("legacy-call"):
+            await framework.trigger(
+                LLMCallEvents.LLM_STREAM_INPUT,
+                messages=[{"role": "user", "content": "legacy"}],
+                model="fake",
+            )
+            await framework.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                response="legacy answer",
+            )
+            # New terminal events are harmless for a legacy callback span that
+            # the historical LLM_OUTPUT contract already closed.
+            await framework.trigger(
+                LLMCallEvents.LLM_STREAM_COMPLETED,
+                result=AssistantMessage(content="duplicate", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="terminal-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    assert len(llm_spans) == 2
+    assert {
+        span.attributes[f"{GEN_AI_COMPLETION}.0.content"]
+        for span in llm_spans
+    } == {"unified answer", "legacy answer"}
+
+
+@pytest.mark.asyncio
+async def test_tool_definitions_model_dump_before_string_fallback() -> None:
+    class ToolDefinition(BaseModel):
+        type: str
+        function: dict
+        optional_note: str | None = None
+
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="tool-definition-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("tool-definition-contract-test").start_span("agent.root")
+    set_root_span(root, session_id="tool-definition-session")
+    pydantic_tool = ToolDefinition(
+        type="function",
+        function={
+            "name": "search",
+            "description": "Search documents",
+            "parameters": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+        },
+    )
+    dict_tool = {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {"type": "object"},
+        },
+    }
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=[{"role": "user", "content": "find it"}],
+            model="fake",
+            tools=[pydantic_tool, dict_tool],
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(content="done", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="tool-definition-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
+    assert definitions == [
+        {
+            "type": "function",
+            "function": pydantic_tool.function,
+        },
+        dict_tool,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_definitions_failures_fallback_per_item_without_orphaning_span() -> None:
+    class BrokenModelDumpTool:
+        def model_dump(self, **kwargs: object) -> dict[str, object]:
+            raise RuntimeError("custom serializer failed")
+
+        def __str__(self) -> str:
+            return "broken-model-dump"
+
+    class OpaqueTool:
+        def __str__(self) -> str:
+            return "opaque-tool"
+
+    class BrokenStringTool:
+        def __str__(self) -> str:
+            raise RuntimeError("custom string failed")
+
+    cyclic_tool = {}
+    cyclic_tool["self"] = cyclic_tool
+    tools = [BrokenModelDumpTool(), cyclic_tool, OpaqueTool(), BrokenStringTool()]
+
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="tool-definition-fallback-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("tool-definition-fallback-test").start_span("agent.root")
+    set_root_span(root, session_id="tool-definition-fallback-session")
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=[{"role": "user", "content": "find it"}],
+            model="fake",
+            tools=tools,
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            result=AssistantMessage(content="done", finish_reason="stop"),
+        )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(
+            session_id="tool-definition-fallback-session",
+            expected_span=root,
+        )
+        runtime.shutdown()
+        reset_state()
+
+    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    assert len(llm_spans) == 1
+    span = llm_spans[0]
+    definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
+    assert definitions == [
+        "broken-model-dump",
+        {"self": "<recursive:dict>"},
+        "opaque-tool",
+        "<BrokenStringTool>",
+    ]
+    assert span.status.status_code is StatusCode.OK
+    assert OJ_SPAN_FORCED_CLOSE not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_real_model_stream_early_close_is_forced_unset_before_root(
+    monkeypatch,
+) -> None:
+    class _FakeClient:
+        async def invoke(self, **kwargs):
+            return AssistantMessage(content="unused")
+
+        async def stream(self, **kwargs):
+            yield AssistantMessageChunk(content="first")
+            yield AssistantMessageChunk(content="never-consumed", finish_reason="stop")
+
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model.create_model_client",
+        lambda **kwargs: _FakeClient(),
+    )
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="early-close-contract-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    root = runtime.get_tracer("early-close-contract-test").start_span("agent.root")
+    root.set_attribute(OJ_TRACE_ROOT, True)
+    set_root_span(root, session_id="early-close-session")
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_provider=ProviderType.OpenAI,
+            api_key="mock",
+            api_base="https://api.openai.com/v1",
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="fake"),
+    )
+    try:
+        iterator = model.stream(messages=[{"role": "user", "content": "stop early"}])
+        first = await anext(iterator)
+        assert first.content == "first"
+        await iterator.aclose()
+
+        close_agent_run_span(root, session_id="early-close-session")
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="early-close-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    root_span = next(span for span in exporter.get_finished_spans() if span.name == "agent.root")
+    assert llm_span.status.status_code is StatusCode.UNSET
+    assert llm_span.attributes[OJ_SPAN_FORCED_CLOSE] is True
+    assert root_span.attributes[OJ_TRACE_FORCED_CLOSE] is True
+    assert root_span.attributes[OJ_TRACE_COMPLETE] is True
+    assert llm_span.end_time <= root_span.end_time
+
+
+@pytest.mark.asyncio
+async def test_stream_callbacks_publish_recoverable_live_snapshots(
+    monkeypatch,
+) -> None:
+    processor = SpanRecordProcessor()
+    consumer = _LiveRecordConsumer()
+    processor.register_consumer(consumer)
+    provider = TracerProvider()
+    tracker = ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("live-callback-test")
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+    reset_state()
+    set_active_span_tracker(tracker)
+    root = tracer.start_span(
+        "agent.root",
+        attributes={
+            OJ_TRACE_ROOT: True,
+            "gen_ai.conversation.id": "live-session",
+        },
+    )
+    set_root_span(root, session_id="live-session")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="live-callback-test"),
+        tracer=tracer,
+    )
+
+    try:
+        with LlmCallScope(unified_completion=True):
+            await handler.on_llm_stream_input(
+                messages=[{"role": "user", "content": "hello"}],
+                model="test-model",
+            )
+            await handler.on_llm_input(
+                messages=[{"role": "user", "content": "hello"}],
+            )
+            await handler.on_llm_stream_output(
+                result=AssistantMessageChunk(content="hel"),
+            )
+            await handler.on_llm_stream_output(
+                result=AssistantMessageChunk(content="lo", finish_reason="stop"),
+            )
+            await handler.on_llm_stream_completed(
+                result=AssistantMessage(content="hello", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="live-session", expected_span=root)
+        set_active_span_tracker(None)
+        reset_state()
+        provider.shutdown()
+
+    llm_snapshots = [record for record in consumer.snapshots if record.name == "llm.call"]
+    assert [record.update_kind for record in llm_snapshots] == [
+        "started",
+        "attributes",
+        "attributes",
+        "stream_chunk",
+        "stream_chunk",
+    ]
+    assert [record.record_revision for record in llm_snapshots] == [1, 2, 3, 4, 5]
+    final = next(record for record in consumer.records if record.span_id == llm_snapshots[0].span_id)
+    assert final.record_revision == 6
+    assert final.lifecycle == "final"
+    second_chunk_payload = json.loads(llm_snapshots[-1].raw_json)
+    second_chunk_span = second_chunk_payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    assert [event["name"] for event in second_chunk_span["events"]] == [
+        "llm.chunk",
+        "openjiuwen.stream.chunk",
+        "llm.chunk",
+        "openjiuwen.stream.chunk",
+    ]

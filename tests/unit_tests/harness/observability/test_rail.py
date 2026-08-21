@@ -6,23 +6,62 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 
 import pytest
+import openjiuwen.harness.observability.rail as rail_module
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    ModelCallInputs,
     TaskIterationInputs,
+    ToolCallInputs,
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.extensions.observability import span_context as shared_span_context
+from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
+from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import (
     DA_AGENT_NAME,
     DA_TASK_ITERATION,
+    GEN_AI_AGENT_DESCRIPTION,
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_AGENT_VERSION,
+    GEN_AI_CONVERSATION_ID,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_CALL_RESULT,
+    GEN_AI_TOOL_ID,
+    GEN_AI_TOOL_INPUT,
+    GEN_AI_TOOL_NAME,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
+    OJ_REQUEST_ID,
+    OJ_REQUEST_NUMBER,
+    OJ_RUN_ID,
+    OJ_SESSION_ID,
+    OJ_SPAN_FORCED_CLOSE,
+    OJ_SPAN_FORCED_CLOSE_REASON,
+    OJ_INFERENCE_ID,
+    OJ_STEP_ID,
+    OJ_STEP_NUMBER,
+    OJ_TOOL_AUTHORITATIVE,
+    OJ_TOOL_RESOURCE_ID,
+    OJ_TOOL_TYPE,
+    OJ_TRACE_ROOT,
+    OJ_TRACE_FORCED_CLOSE,
+    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_RECORD_KIND,
+    OJ_TURN_ID,
 )
 from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
@@ -40,6 +79,11 @@ def tracing():
 
     shared_span_context.reset_state()
     root = tracer.start_span("run.root")
+    root.set_attribute(GEN_AI_CONVERSATION_ID, "conversation")
+    root.set_attribute(OJ_SESSION_ID, "session")
+    root.set_attribute(OJ_REQUEST_ID, "request")
+    root.set_attribute(OJ_RUN_ID, "run")
+    root.set_attribute(OJ_TRACE_ROOT, True)
     shared_span_context.set_root_span(root)
     yield SimpleNamespace(exporter=exporter, tracer=tracer, root=root)
     if root.is_recording():
@@ -51,6 +95,11 @@ def _agent(name: str = "solo", *, enable_task_loop: bool = True):
     """Build the smallest agent stub the rail reads."""
     return SimpleNamespace(
         member_name=name,
+        card=AgentCard(
+            id=f"agent-{name}",
+            name=f"{name}-display",
+            description=f"{name} description",
+        ),
         deep_config=SimpleNamespace(enable_task_loop=enable_task_loop),
     )
 
@@ -82,9 +131,84 @@ async def test_iteration_span_opens_under_the_run_root_and_carries_generic_attri
     assert span.attributes[LANGFUSE_OBSERVATION_TYPE] == "agent"
     assert span.attributes[DA_AGENT_NAME] == "solo"
     assert span.attributes[DA_TASK_ITERATION] == 1
+    assert span.attributes[GEN_AI_AGENT_NAME] == "solo"
+    assert span.attributes[GEN_AI_AGENT_ID] == "agent-solo"
+    assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "solo description"
+    assert GEN_AI_AGENT_VERSION not in span.attributes
+    assert span.attributes[GEN_AI_CONVERSATION_ID] == "conversation"
+    assert span.attributes[GEN_AI_OPERATION_NAME] == "invoke_agent"
+    assert span.attributes[OJ_SESSION_ID] == "session"
+    assert span.attributes[OJ_REQUEST_ID] == "request"
+    assert span.attributes[OJ_RUN_ID] == "run"
+    assert OJ_STEP_ID not in span.attributes
+    assert OJ_STEP_NUMBER not in span.attributes
+    assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
+    assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "agent"
     assert span.attributes[LANGFUSE_OBSERVATION_INPUT] == "do it"
     assert span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "the answer"
     assert not [key for key in span.attributes if key.startswith("agentteam.")]
+
+
+@pytest.mark.asyncio
+async def test_each_llm_request_keeps_identity_parent_and_owning_step(tracing):
+    tracing.root.set_attribute(OJ_TURN_ID, "turn-7")
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp", max_attributes=40),
+        tracer=tracing.tracer,
+    )
+    ctx = _iteration_ctx(_agent(), iteration=3)
+    await rail.before_task_iteration(ctx)
+    outer_span = ctx.extra["_otel_agent_scope"].span
+    model_ctx = AgentCallbackContext(
+        agent=ctx.agent,
+        inputs=ModelCallInputs(react_iteration=3),
+        extra=ctx.extra,
+    )
+    await rail.before_model_call(model_ctx)
+    step_span = shared_span_context.get_current_agent_span()
+    assert step_span is not None
+    assert outer_span.parent.span_id == tracing.root.context.span_id
+    assert step_span.parent.span_id == tracing.root.context.span_id
+
+    messages = [
+        {"role": "system", "content": "system"},
+        *(
+            {"role": "user", "content": f"message-{index}"}
+            for index in range(12)
+        ),
+    ]
+    for index in range(2):
+        await rail.before_model_call(model_ctx)
+        request = handler._open_llm_span({"messages": messages, "model": "fake"})
+        assert request is not None
+        handler._close_llm_span(
+            request.otel_llm_state,
+            SimpleNamespace(
+                content=f"answer-{index}",
+                reasoning_content="",
+                finish_reason="stop",
+                tool_calls=None,
+                usage_metadata=None,
+            ),
+        )
+
+    await rail.after_task_iteration(ctx)
+
+    requests = _finished(tracing.exporter, "llm.call")
+    assert len(requests) == 2
+    assert [span.attributes[OJ_REQUEST_NUMBER] for span in requests] == [1, 2]
+    assert len({span.attributes[OJ_INFERENCE_ID] for span in requests}) == 2
+    assert all(
+        span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
+        for span in requests
+    )
+    assert all(span.parent.span_id == step_span.context.span_id for span in requests)
+    assert all(span.attributes[OJ_TURN_ID] == "turn-7" for span in requests)
+    assert all(span.attributes[OJ_STEP_ID] == f"{step_span.context.span_id:016x}" for span in requests)
+    assert all(span.attributes[OJ_STEP_NUMBER] == 3 for span in requests)
+    steps = _finished(tracing.exporter, "agent.solo.react_iteration.3")
+    assert len(steps) == 1
 
 
 @pytest.mark.asyncio
@@ -202,9 +326,19 @@ async def test_an_orphan_span_from_the_same_agent_is_drained_not_left_open(traci
     await rail.after_task_iteration(second)
 
     assert not orphan.is_recording()
+    orphan_record = _finished(tracing.exporter, "agent.solo.task_iteration.1")[0]
+    assert orphan_record.status.status_code is StatusCode.UNSET
+    assert orphan_record.attributes[OJ_SPAN_FORCED_CLOSE] is True
+    assert orphan_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
+        "missing_agent_terminal_callback"
+    )
+    assert tracing.root.attributes[OJ_TRACE_FORCED_CLOSE] is True
     assert _finished(tracing.exporter, "agent.solo.task_iteration.2")[0].parent.span_id == (
         tracing.root.context.span_id
     )
+    assert tracing.root.is_recording()
+    tracing.root.end()
+    assert tracing.exporter.get_finished_spans()[-1].name == "run.root"
 
 
 @pytest.mark.asyncio
@@ -317,3 +451,222 @@ async def test_subagent_invoke_nests_under_the_tool_span_that_dispatched_it(trac
 
     subagent_span = _finished(tracing.exporter, "agent.explore_agent.invoke")[0]
     assert subagent_span.parent.span_id == tool_span.context.span_id
+
+
+def _tool_ctx(agent, *, call_id: str, shared_extra=None):
+    return AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=ToolCall(
+                id=call_id,
+                type="function",
+                name="search",
+                arguments='{"q":"hello"}',
+            ),
+            tool_name="search",
+            tool_args='{"q":"hello"}',
+        ),
+        extra=shared_extra if shared_extra is not None else {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_ability_tool_span_is_authoritative_and_carries_old_and_new_fields(tracing):
+    card = ToolCard(id="resource-search", name="search", description="Search documents")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    agent_span = iteration_ctx.extra["_otel_agent_scope"].span
+    model_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(react_iteration=2),
+        extra=iteration_ctx.extra,
+    )
+    await rail.before_model_call(model_ctx)
+    step_span = shared_span_context.get_current_agent_span()
+    assert step_span is not None
+
+    ctx = _tool_ctx(agent, call_id="call-1")
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert agent_span.parent.span_id == tracing.root.context.span_id
+    assert step_span.parent.span_id == tracing.root.context.span_id
+    assert span.parent.span_id == step_span.context.span_id
+    assert span.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
+    assert span.attributes[GEN_AI_TOOL_NAME] == "search"
+    assert span.attributes[GEN_AI_TOOL_ID] == "resource-search"
+    assert span.attributes[GEN_AI_TOOL_CALL_ID] == "call-1"
+    assert span.attributes[GEN_AI_TOOL_INPUT] == '{"q":"hello"}'
+    assert span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS] == '{"q":"hello"}'
+    assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == '{"answer": 42}'
+    assert span.attributes[GEN_AI_AGENT_ID] == "agent-solo"
+    assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "solo description"
+    assert span.attributes[OJ_TOOL_AUTHORITATIVE] is True
+    assert span.attributes[OJ_TOOL_RESOURCE_ID] == "resource-search"
+    assert span.attributes[OJ_TOOL_TYPE] == "tool"
+    assert span.attributes[OJ_STEP_ID] == f"{step_span.context.span_id:016x}"
+    assert span.attributes[OJ_STEP_NUMBER] == 2
+
+
+@pytest.mark.asyncio
+async def test_iteration_and_tool_publish_live_snapshots_before_they_end(
+    tracing,
+    monkeypatch,
+) -> None:
+    published: list[tuple[object, str, bool]] = []
+    monkeypatch.setattr(
+        rail_module,
+        "publish_span_snapshot",
+        lambda span, kind: published.append((span, kind, span.is_recording())),
+    )
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+
+    await rail.before_task_iteration(iteration_ctx)
+    tool_ctx = _tool_ctx(agent, call_id="call-live")
+    await rail.before_tool_call(tool_ctx)
+
+    assert [(span.name, kind, recording) for span, kind, recording in published] == [
+        ("agent.solo.task_iteration.1", "attributes", True),
+        ("tool.search", "attributes", True),
+    ]
+    tool_ctx.inputs.tool_result = "done"
+    await rail.after_tool_call(tool_ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+
+@pytest.mark.asyncio
+async def test_explicit_compatible_card_version_is_emitted_without_guessing(tracing):
+    agent = _agent()
+    agent.card = SimpleNamespace(
+        id="versioned-agent",
+        name="Versioned Agent",
+        description="Versioned description",
+        version="2.1.0",
+    )
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(agent)
+
+    await rail.before_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
+
+    span = _finished(tracing.exporter, "agent.solo.task_iteration.1")[0]
+    assert span.attributes[GEN_AI_AGENT_ID] == "versioned-agent"
+    assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "Versioned description"
+    assert span.attributes[GEN_AI_AGENT_VERSION] == "2.1.0"
+
+
+@pytest.mark.asyncio
+async def test_llm_child_context_propagation_inherits_agent_card_identity(tracing):
+    agent = _agent()
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    child = tracing.tracer.start_span("llm.child")
+    handler._propagate_session_context(child)
+    child.end()
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "llm.child")[0]
+    assert span.attributes[GEN_AI_AGENT_ID] == "agent-solo"
+    assert span.attributes[GEN_AI_AGENT_NAME] == "solo"
+    assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "solo description"
+    assert GEN_AI_AGENT_VERSION not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_parallel_same_name_tools_keep_distinct_scopes(tracing):
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    shared_extra = {}
+
+    async def execute(call_id: str) -> None:
+        ctx = _tool_ctx(agent, call_id=call_id, shared_extra=shared_extra)
+        await rail.before_tool_call(ctx)
+        await asyncio.sleep(0)
+        ctx.inputs.tool_result = call_id
+        await rail.after_tool_call(ctx)
+
+    await asyncio.gather(execute("call-a"), execute("call-b"))
+    await rail.after_task_iteration(iteration_ctx)
+
+    spans = _finished(tracing.exporter, "tool.search")
+    assert len(spans) == 2
+    assert {span.attributes[GEN_AI_TOOL_CALL_ID] for span in spans} == {
+        "call-a",
+        "call-b",
+    }
+    assert {span.attributes[GEN_AI_TOOL_CALL_RESULT] for span in spans} == {
+        "call-a",
+        "call-b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_closes_authoritative_span_with_error(tracing):
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-error")
+
+    await rail.before_tool_call(ctx)
+    ctx.exception = ValueError("bad tool")
+    await rail.on_tool_exception(ctx)
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.attributes["error.type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_concrete_tool_global_callbacks_enrich_without_duplicate_span(tracing):
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-global")
+
+    await rail.before_tool_call(ctx)
+    await handler.on_tool_call_started(
+        tool_name="search",
+        tool_id="resource-search",
+        inputs=(({"q": "hello"},), {}),
+    )
+    await handler.on_tool_call_finished(tool_name="search", result={"answer": 42})
+    ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    spans = _finished(tracing.exporter, "tool.search")
+    assert len(spans) == 1
+    assert spans[0].attributes[GEN_AI_TOOL_CALL_ID] == "call-global"
+    assert spans[0].attributes[GEN_AI_TOOL_ID] == "resource-search"

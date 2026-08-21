@@ -25,6 +25,7 @@ from typing import Any
 
 from opentelemetry.sdk.trace import SpanProcessor
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 
 # Runtimes allowed to hold a demand. A closed set on purpose: a typo in the
@@ -38,6 +39,7 @@ _DEMAND_LOCK = threading.RLock()
 # acquires a demand; those callers retain ownership of its lifecycle.
 _PROVIDER_OWNED = False
 _TRAJECTORY_SPAN_PROCESSOR: Any | None = None
+_SPAN_RECORD_PROCESSOR: Any | None = None
 
 # Initializes one runtime's observability over the shared provider. Receives
 # the runtime's config and the span processors the coordinator wants attached.
@@ -68,6 +70,35 @@ def get_trajectory_span_processor() -> Any:
 
         _TRAJECTORY_SPAN_PROCESSOR = TrajectorySpanProcessor()
         return _TRAJECTORY_SPAN_PROCESSOR
+
+
+def get_span_record_processor() -> Any:
+    """Return the process-wide complete OTLP span-record processor."""
+    global _SPAN_RECORD_PROCESSOR
+    with _DEMAND_LOCK:
+        if _SPAN_RECORD_PROCESSOR is not None:
+            return _SPAN_RECORD_PROCESSOR
+
+        from openjiuwen.extensions.observability.span_record_processor import (
+            SpanRecordProcessor,
+        )
+
+        _SPAN_RECORD_PROCESSOR = SpanRecordProcessor()
+        return _SPAN_RECORD_PROCESSOR
+
+
+def publish_span_snapshot(span: Any, update_kind: str) -> None:
+    """Publish one recording-span snapshot through the shared processor."""
+    with _DEMAND_LOCK:
+        processor = _SPAN_RECORD_PROCESSOR
+    if processor is None:
+        return
+    try:
+        processor.publish_snapshot(span, update_kind)
+    except Exception as exc:
+        # Snapshot delivery is optional observability and must not escape into
+        # the model, tool, or agent execution path.
+        logger.warning("otel: recording span snapshot publish failed - {}", exc)
 
 
 def acquire_observability_demand(
@@ -108,7 +139,10 @@ def acquire_observability_demand(
             return True
 
         provider_existed = is_initialized()
-        initializer(observability_config, (get_trajectory_span_processor(),))
+        initializer(
+            observability_config,
+            (get_trajectory_span_processor(), get_span_record_processor()),
+        )
         if not is_initialized():
             raise RuntimeError(
                 f"{runtime} observability initialization did not create a provider"
@@ -168,7 +202,9 @@ __all__ = [
     "ObservabilityFinalizer",
     "ObservabilityInitializer",
     "acquire_observability_demand",
+    "get_span_record_processor",
     "get_trajectory_span_processor",
+    "publish_span_snapshot",
     "release_observability_demand",
     "reset_observability_demands",
 ]

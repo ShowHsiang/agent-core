@@ -1,14 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
+    AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
+    UsageMetadata,
     UserMessage,
 )
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
@@ -91,6 +93,53 @@ def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
             }
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_parser_preserves_response_facts_through_usage_terminal() -> None:
+    client = _make_client()
+    parsed_chunks = [
+        AssistantMessageChunk(
+            content="answer",
+            metadata={"source": "provider"},
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+        AssistantMessageChunk(
+            content="",
+            usage_metadata=UsageMetadata(input_tokens=2, output_tokens=1, total_tokens=3),
+            finish_reason="stop",
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+    ]
+    client._parse_stream_chunk = MagicMock(side_effect=parsed_chunks)
+
+    class _Parser:
+        async def parse(self, content):
+            return {"parsed": content}
+
+    async def _raw_stream():
+        yield object()
+        yield object()
+
+    actual = [
+        chunk
+        async for chunk in client._astream_with_parser(_raw_stream(), _Parser())
+    ]
+
+    assert actual[0].metadata == {"source": "provider"}
+    assert actual[0].parser_content == {"parsed": "answer"}
+    assert actual[0].response_id == "resp-actual"
+    assert actual[0].response_model == "model-actual"
+    assert actual[0].provider_metadata == {"service_tier": "priority"}
+    assert actual[1].usage_metadata.total_tokens == 3
+    assert actual[1].finish_reason == "stop"
+    assert actual[1].response_id == "resp-actual"
+    assert actual[1].response_model == "model-actual"
+    assert actual[1].provider_metadata == {"service_tier": "priority"}
 
 
 class TestApplyModelSpecificParams:
@@ -620,3 +669,44 @@ class TestExtractReasoningContent:
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_parse_response_preserves_additive_provider_facts():
+    response = _Obj(
+        id="resp-1",
+        model="returned-model",
+        system_fingerprint="fp-1",
+        service_tier="default",
+        prompt_token_ids=[1, 2],
+        usage=_Obj(
+            prompt_tokens=3,
+            completion_tokens=2,
+            total_tokens=5,
+            input_tokens_details=_Obj(
+                cached_tokens=1,
+                cache_creation_tokens=1,
+            ),
+        ),
+        choices=[
+            _Obj(
+                message=_Obj(content="answer"),
+                finish_reason="stop",
+                token_ids=[3, 4],
+                logprobs=None,
+            )
+        ],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.response_id == "resp-1"
+    assert message.response_model == "returned-model"
+    assert message.provider_metadata == {
+        "system_fingerprint": "fp-1",
+        "service_tier": "default",
+    }
+    assert message.prompt_token_ids == [1, 2]
+    assert message.completion_token_ids == [3, 4]
+    assert message.usage_metadata.cache_tokens == 1
+    assert message.usage_metadata.cache_creation_input_tokens == 1

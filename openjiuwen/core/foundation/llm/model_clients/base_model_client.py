@@ -248,6 +248,30 @@ class BaseModelClient(ABC):
         }
 
     @staticmethod
+    def _extract_cache_creation_tokens(obj: Any) -> int | None:
+        """Extract cache-write tokens only when the provider exposes them."""
+        paths = (
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("input_token_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+        )
+        fields = (
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        values = (_get_path(obj, path) for path in paths)
+        for value in (*values, *(_get_value(obj, field) for field in fields)):
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
     def _extract_reasoning_tokens(obj: Any) -> int:
         """Extract reasoning/thinking token count from provider usage metadata.
 
