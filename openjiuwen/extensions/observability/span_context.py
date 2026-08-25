@@ -477,6 +477,8 @@ _current_session_ctx: ContextVar[str] = ContextVar("observability_session_id", d
 
 _root_registry: dict[str, Span] = {}
 _root_registry_lock = threading.RLock()
+_execution_subject_request_sequences: dict[tuple[str, str], int] = {}
+_execution_subject_request_sequence_lock = threading.Lock()
 _ambient_root_span: Span | None = None
 
 
@@ -495,6 +497,19 @@ def get_current_session_id() -> str:
 
 def clear_current_session_id() -> None:
     _current_session_ctx.set("")
+
+
+def next_execution_subject_request_number(
+    *,
+    session_id: str,
+    subject_id: str,
+) -> int:
+    """Allocate the next request number for one subject within one session."""
+    key = (_normalize_session_id(session_id), str(subject_id))
+    with _execution_subject_request_sequence_lock:
+        request_number = _execution_subject_request_sequences.get(key, 0) + 1
+        _execution_subject_request_sequences[key] = request_number
+    return request_number
 
 
 def set_root_span(span: Span, *, session_id: str | None = None) -> None:
@@ -653,9 +668,21 @@ def cascade_close_children() -> int:
         Number of child spans ended by this safety net.
     """
     closed_count = 0
-    for bucket in _tool_span_map.get().values():
+    agent_span = _current_agent_span.get()
+    agent_span_id = (
+        agent_span.context.span_id
+        if agent_span is not None and agent_span.context is not None
+        else None
+    )
+    remaining_tool_spans: dict[str, list[Span]] = {}
+    for tool_name, bucket in _tool_span_map.get().items():
+        remaining_bucket: list[Span] = []
         for ts in bucket:
-            if ts.is_recording():
+            parent_span_id = getattr(getattr(ts, "parent", None), "span_id", None)
+            belongs_to_current_agent = (
+                agent_span_id is None or parent_span_id == agent_span_id
+            )
+            if ts.is_recording() and belongs_to_current_agent:
                 logger.warning(
                     "ORPHAN tool span in cascade-close: name={} span_id={:016x} — "
                     "on_tool_call_finished/on_tool_call_error did not fire",
@@ -665,11 +692,14 @@ def cascade_close_children() -> int:
                 mark_span_forced_close(ts, "missing_tool_terminal_callback")
                 ts.end()
                 closed_count += 1
-    _tool_span_map.set({})
+            elif ts.is_recording():
+                remaining_bucket.append(ts)
+        if remaining_bucket:
+            remaining_tool_spans[tool_name] = remaining_bucket
+    _tool_span_map.set(remaining_tool_spans)
 
     # Close llm.call spans belonging to the current agent span.
     tracker = get_active_span_tracker()
-    agent_span = _current_agent_span.get()
     if tracker is not None and agent_span is not None:
         closed_count += tracker.close_llm_spans_by_parent(agent_span.context.span_id)
     return closed_count
@@ -794,6 +824,8 @@ def reset_state() -> None:
     clear_ambient_root_span()
     with _root_registry_lock:
         _root_registry.clear()
+    with _execution_subject_request_sequence_lock:
+        _execution_subject_request_sequences.clear()
 
 
 def flush_child_spans(*, trace_id: int | None = None) -> int:

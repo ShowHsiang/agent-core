@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import StatusCode
+from opentelemetry.trace import Span, StatusCode
 from pydantic import BaseModel
 
 from openjiuwen.core.runner import Runner
@@ -25,7 +25,10 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     UsageMetadata,
 )
-from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+from openjiuwen.core.foundation.llm.call_scope import (
+    LlmCallScope,
+    LlmObservationSuppression,
+)
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
@@ -34,9 +37,12 @@ from openjiuwen.extensions.observability.callback_handler import OtelCallbackHan
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
     GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_COMPLETION,
     GEN_AI_PROMPT,
+    GEN_AI_REQUEST_ID,
+    GEN_AI_REQUEST_STREAM,
     GEN_AI_RESPONSE_FINISH_REASON,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_ID,
@@ -54,25 +60,34 @@ from openjiuwen.extensions.observability.semconv import (
     LANGFUSE_GEN_AI_COMPLETION,
     LANGFUSE_GEN_AI_PROMPT,
     LANGFUSE_OBSERVATION_INPUT,
+    LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
     OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
+    OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
+    OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
+    OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_STREAM_KIND,
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
+    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
     clear_root_span,
     reset_state,
     set_active_span_tracker,
+    set_current_agent_span,
     set_root_span,
 )
 from openjiuwen.extensions.observability.span_record_processor import (
@@ -167,6 +182,95 @@ async def test_runtime_initialize_wires_global_callback_framework() -> None:
     assert names.count("llm.call") == 2
     assert names.count("tool.search") == 2
     assert names.count("agent.root") == 2
+
+
+def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> None:
+    provider = TracerProvider()
+    tracer = provider.get_tracer("subject-request-number-test")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="subject-request-number-test",
+        ),
+        tracer=tracer,
+    )
+    opened_spans: list[Span] = []
+
+    def open_root(session_id: str) -> Span:
+        root = tracer.start_span(
+            "agent.root",
+            attributes={
+                OJ_SESSION_ID: session_id,
+                OJ_EXECUTION_SUBJECT_ID: "main",
+            },
+        )
+        set_root_span(root, session_id=session_id)
+        opened_spans.append(root)
+        return root
+
+    def open_request() -> Span:
+        span = handler._open_llm_span(
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "model": "test-model",
+            }
+        )
+        assert span is not None
+        opened_spans.append(span)
+        return span
+
+    reset_state()
+    first_root = open_root("session-a")
+    first_main = open_request()
+    first_main.end()
+    first_root.end()
+    clear_root_span(session_id="session-a", expected_span=first_root)
+
+    second_root = open_root("session-a")
+    second_main = open_request()
+    second_main.end()
+
+    subagent_span = tracer.start_span(
+        "agent.explore_agent",
+        attributes={OJ_EXECUTION_SUBJECT_ID: "subagent:one"},
+    )
+    opened_spans.append(subagent_span)
+    set_current_agent_span(subagent_span)
+    first_subagent = open_request()
+    first_subagent.end()
+    second_subagent = open_request()
+    second_subagent.end()
+    set_current_agent_span(None)
+
+    third_main = open_request()
+    third_main.end()
+    second_root.end()
+    clear_root_span(session_id="session-a", expected_span=second_root)
+
+    other_root = open_root("session-b")
+    other_main = open_request()
+
+    try:
+        assert first_main.attributes[OJ_REQUEST_NUMBER] == 1
+        assert second_main.attributes[OJ_REQUEST_NUMBER] == 1
+        assert first_subagent.attributes[OJ_REQUEST_NUMBER] == 2
+        assert second_subagent.attributes[OJ_REQUEST_NUMBER] == 3
+        assert third_main.attributes[OJ_REQUEST_NUMBER] == 4
+        assert other_main.attributes[OJ_REQUEST_NUMBER] == 1
+        assert first_main.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 1
+        assert second_main.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 2
+        assert first_subagent.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 1
+        assert second_subagent.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 2
+        assert third_main.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 3
+        assert other_main.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] == 1
+    finally:
+        set_current_agent_span(None)
+        for span in reversed(opened_spans):
+            if span.is_recording():
+                span.end()
+        clear_root_span(session_id="session-b", expected_span=other_root)
+        reset_state()
+        provider.shutdown()
 
 
 @pytest.mark.asyncio
@@ -622,6 +726,82 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
 
 
 @pytest.mark.asyncio
+async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="semantic-identity-pressure-test",
+            sample_rate=1.0,
+            backend="langfuse",
+            max_attributes=80,
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("semantic-identity-pressure-test").start_span(
+        "agent.root"
+    )
+    set_root_span(root, session_id="semantic-identity-pressure-session")
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "system baseline"}
+    ]
+    for index in range(12):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call-{index}",
+                            "name": "lookup",
+                            "arguments": json.dumps({"index": index}),
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": json.dumps({"result": index}),
+                    "tool_call_id": f"call-{index}",
+                    "name": "lookup",
+                },
+            ]
+        )
+    try:
+        with LlmCallScope("semantic-pressure-call"):
+            await framework.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=messages,
+                model="fake",
+            )
+            await framework.trigger(
+                LLMCallEvents.LLM_INVOKE_OUTPUT,
+                result=AssistantMessage(content="done", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(
+            session_id="semantic-identity-pressure-session",
+            expected_span=root,
+        )
+        runtime.shutdown()
+        reset_state()
+
+    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    assert span.attributes[GEN_AI_REQUEST_ID] == "semantic-pressure-call"
+    assert span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
+    assert span.attributes[GEN_AI_OPERATION_NAME] == "chat"
+    assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
+    assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "inference"
+    assert span.attributes[LANGFUSE_OBSERVATION_TYPE] == "generation"
+    assert span.attributes[GEN_AI_REQUEST_STREAM] is False
+    assert GEN_AI_OUTPUT_MESSAGES in span.attributes
+
+
+@pytest.mark.asyncio
 async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() -> None:
     exporter = InMemorySpanExporter()
     runtime = ObservabilityRuntime()
@@ -800,6 +980,50 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
         span.attributes[f"{GEN_AI_COMPLETION}.0.content"]
         for span in llm_spans
     } == {"unified answer", "legacy answer"}
+
+
+@pytest.mark.asyncio
+async def test_internal_probe_callback_flow_does_not_create_trajectory_span() -> None:
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    runtime.initialize(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="internal-probe-suppression-test",
+            sample_rate=1.0,
+            backend="otlp",
+        ),
+        span_exporter_override=exporter,
+    )
+    framework = Runner.callback_framework
+    root = runtime.get_tracer("internal-probe-suppression-test").start_span(
+        "agent.root"
+    )
+    set_root_span(root, session_id="probe-session")
+    try:
+        with LlmObservationSuppression(), LlmCallScope(
+            "probe-call",
+            unified_completion=True,
+        ):
+            await framework.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=[{"role": "user", "content": "image probe"}],
+                model="fake",
+            )
+            await framework.trigger(
+                LLMCallEvents.LLM_INVOKE_OUTPUT,
+                result=AssistantMessage(content="red", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="probe-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    assert not [
+        span for span in exporter.get_finished_spans() if span.name == "llm.call"
+    ]
 
 
 @pytest.mark.asyncio

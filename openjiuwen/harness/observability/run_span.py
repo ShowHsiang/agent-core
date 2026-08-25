@@ -97,6 +97,10 @@ def open_agent_run_span(
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
             OJ_AGENT_MODE,
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            OJ_EXECUTION_SUBJECT_ID,
+            OJ_EXECUTION_SUBJECT_KIND,
+            OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,
             OJ_SESSION_ID,
@@ -128,6 +132,10 @@ def open_agent_run_span(
             GEN_AI_OPERATION_NAME: "invoke_agent",
             OJ_TRAJECTORY_RECORD_KIND: "turn",
             LANGFUSE_OBSERVATION_TYPE: "agent",
+            OJ_EXECUTION_SUBJECT_ID: "main",
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: "Main Agent",
+            OJ_EXECUTION_SUBJECT_KIND: "main_agent",
+            OJ_EXECUTION_SUBJECT_SESSION_ID: session_id or "",
         }
         if session_id:
             base_attributes[GEN_AI_CONVERSATION_ID] = session_id

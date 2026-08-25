@@ -32,6 +32,10 @@ _unified_completion_expected: ContextVar[bool] = ContextVar(
     "_openjiuwen_unified_llm_completion_expected",
     default=False,
 )
+_llm_observation_suppressed: ContextVar[bool] = ContextVar(
+    "_openjiuwen_llm_observation_suppressed",
+    default=False,
+)
 
 
 def get_current_llm_call_id() -> str:
@@ -57,6 +61,28 @@ def expects_unified_llm_completion() -> bool:
     without prematurely closing spans owned by that unified lifecycle.
     """
     return _unified_completion_expected.get()
+
+
+def is_llm_observation_suppressed() -> bool:
+    """Return whether this internal call is excluded from agent trajectories."""
+    return _llm_observation_suppressed.get()
+
+
+class LlmObservationSuppression:
+    """Exclude internal model probes from user-visible agent trajectories."""
+
+    def __init__(self) -> None:
+        self._previous = False
+
+    def __enter__(self) -> "LlmObservationSuppression":
+        """Bind suppression for this context and tasks created inside it."""
+        self._previous = _llm_observation_suppressed.get()
+        _llm_observation_suppressed.set(True)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Restore the enclosing observation policy."""
+        _llm_observation_suppressed.set(self._previous)
 
 
 class LlmCallScope:

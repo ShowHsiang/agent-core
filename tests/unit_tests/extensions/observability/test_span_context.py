@@ -20,12 +20,14 @@ from openjiuwen.extensions.observability.span_context import (
     clear_root_span,
     clear_current_session_id,
     flush_child_spans,
+    get_current_tool_span,
     get_root_span,
     reset_state,
     set_active_span_tracker,
     set_current_agent_span,
     set_current_session_id,
     set_root_span,
+    push_tool_span,
 )
 
 
@@ -155,5 +157,44 @@ def test_cascade_marks_abandoned_llm_unset_and_surfaces_forced_root() -> None:
         clear_root_span(session_id="single-agent", expected_span=root)
         set_current_agent_span(None)
         set_active_span_tracker(None)
+        reset_state()
+        provider.shutdown()
+
+
+def test_subagent_cascade_preserves_dispatching_parent_tool() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test.subagent-tool-cascade")
+    root = tracer.start_span("agent.main", kind=SpanKind.SERVER)
+    main_step = tracer.start_span("agent.main.step", context=set_span_in_context(root))
+    dispatch_tool = tracer.start_span("tool.task_tool", context=set_span_in_context(main_step))
+    subagent = tracer.start_span("agent.explore", context=set_span_in_context(dispatch_tool))
+    leaked_child = tracer.start_span("tool.bash", context=set_span_in_context(subagent))
+    push_tool_span("task_tool", dispatch_tool)
+    push_tool_span("bash", leaked_child)
+    set_current_agent_span(subagent)
+    try:
+        assert cascade_close_children() == 1
+
+        assert dispatch_tool.is_recording()
+        assert not leaked_child.is_recording()
+        assert get_current_tool_span() is dispatch_tool
+        leaked_record = next(
+            span for span in exporter.get_finished_spans() if span.name == "tool.bash"
+        )
+        assert leaked_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
+            "missing_tool_terminal_callback"
+        )
+    finally:
+        if subagent.is_recording():
+            subagent.end()
+        if dispatch_tool.is_recording():
+            dispatch_tool.end()
+        if main_step.is_recording():
+            main_step.end()
+        if root.is_recording():
+            root.end()
+        set_current_agent_span(None)
         reset_state()
         provider.shutdown()

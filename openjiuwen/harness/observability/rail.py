@@ -77,6 +77,11 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
@@ -88,6 +93,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
+from openjiuwen.harness.execution_subject import current_execution_subject
 # Imported as a module, never by name: the run-root fallback installs itself by
 # rebinding ``get_root_span`` on this module, and a name bound at import time
 # would keep calling the unwrapped accessor.
@@ -910,6 +916,11 @@ class AgentObservabilityRail(DeepAgentRail):
             OJ_RUN_ID,
             OJ_TURN_ID,
             OJ_TURN_NUMBER,
+            OJ_EXECUTION_SUBJECT_ID,
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            OJ_EXECUTION_SUBJECT_KIND,
+            OJ_EXECUTION_SUBJECT_PARENT_ID,
+            OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_STEP_ID,
             OJ_STEP_NUMBER,
         ):
@@ -1047,11 +1058,41 @@ class AgentObservabilityRail(DeepAgentRail):
                 OJ_RUN_ID,
                 OJ_TURN_ID,
                 OJ_TURN_NUMBER,
+                OJ_EXECUTION_SUBJECT_ID,
+                OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+                OJ_EXECUTION_SUBJECT_KIND,
+                OJ_EXECUTION_SUBJECT_PARENT_ID,
+                OJ_EXECUTION_SUBJECT_SESSION_ID,
             ):
                 value = root_span.attributes.get(key)
                 if value is not None:
                     span.set_attribute(key, value)
-        session_id = current_session_id()
+        subject = current_execution_subject()
+        if subject is not None:
+            span.set_attribute(OJ_EXECUTION_SUBJECT_ID, subject.subject_id)
+            span.set_attribute(
+                OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+                subject.display_name,
+            )
+            span.set_attribute(OJ_EXECUTION_SUBJECT_KIND, subject.kind)
+            if subject.parent_subject_id:
+                span.set_attribute(
+                    OJ_EXECUTION_SUBJECT_PARENT_ID,
+                    subject.parent_subject_id,
+                )
+            if subject.session_id:
+                span.set_attribute(
+                    OJ_EXECUTION_SUBJECT_SESSION_ID,
+                    subject.session_id,
+                )
+        # Preserve the root trajectory owner. A subagent's isolated runtime
+        # session is already represented by OJ_EXECUTION_SUBJECT_SESSION_ID.
+        session_id = str(
+            span.attributes.get(OJ_SESSION_ID)
+            or span.attributes.get(GEN_AI_CONVERSATION_ID)
+            or current_session_id()
+            or ""
+        )
         if session_id:
             span.set_attribute(LANGFUSE_SESSION_ID, session_id)
         for key, value in decoration.attributes.items():

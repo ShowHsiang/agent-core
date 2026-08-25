@@ -96,6 +96,12 @@ from openjiuwen.extensions.observability.semconv import (
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
     OJ_EVENT_SEQUENCE,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
@@ -136,6 +142,7 @@ from openjiuwen.extensions.observability.span_context import (
     get_current_session_id,
     get_current_tool_span,
     get_root_span,
+    next_execution_subject_request_number,
     pop_current_llm_span,
     pop_tool_span,
     push_tool_span,
@@ -148,6 +155,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
 from openjiuwen.core.foundation.llm.call_scope import (
     expects_unified_llm_completion,
     get_current_llm_call_id,
+    is_llm_observation_suppressed,
 )
 
 
@@ -830,6 +838,8 @@ class OtelCallbackHandler:
         is_streaming: bool = False,
     ) -> Span | None:
         """Open an LLM span with explicit parent context."""
+        if is_llm_observation_suppressed():
+            return None
         parent_ctx = self._get_parent_context_for_llm_tool()
         if parent_ctx is None:
             return
@@ -865,6 +875,7 @@ class OtelCallbackHandler:
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
+        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         if not attribute_pressure:
             span.set_attribute(GEN_AI_REQUEST_STREAM, is_streaming)
         provider_name = self._derive_provider_name(kwargs)
@@ -1026,6 +1037,22 @@ class OtelCallbackHandler:
             span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
 
         self._propagate_session_context(span, include_additive=not attribute_pressure)
+        subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
+        session_id = str(
+            span.attributes.get(OJ_SESSION_ID)
+            or span.attributes.get(GEN_AI_CONVERSATION_ID)
+            or get_current_session_id()
+            or ""
+        )
+        if subject_id and session_id:
+            subject_request_number = next_execution_subject_request_number(
+                session_id=session_id,
+                subject_id=subject_id,
+            )
+            span.set_attribute(
+                OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
+                subject_request_number,
+            )
         self._stamp_parent_member_name(span)
 
         _llm_st = LlmSpanState(
@@ -1036,6 +1063,7 @@ class OtelCallbackHandler:
             attribute_pressure=attribute_pressure,
         )
         span.otel_llm_state = _llm_st  # attach state to span object (context-immune)
+        self._stamp_llm_semantic_identity(_llm_st)
 
         tracker = get_active_span_tracker()
         if tracker is not None:
@@ -1155,6 +1183,7 @@ class OtelCallbackHandler:
             # Always end the main llm.call span — even if attribute setting
             # above threw, the span must not become an orphan.
             if state.span.is_recording():
+                self._stamp_llm_semantic_identity(state)
                 state.span.set_status(Status(StatusCode.OK))
                 state.span.end()
 
@@ -1229,6 +1258,19 @@ class OtelCallbackHandler:
                     reasoning_span.end(end_time=call_start_wall_ns)
             except Exception as exc:
                 logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
+
+    @staticmethod
+    def _stamp_llm_semantic_identity(state: LlmSpanState) -> None:
+        """Keep inference identity after bounded-attribute FIFO eviction."""
+        span = state.span
+        if state.call_id:
+            span.set_attribute(GEN_AI_REQUEST_ID, state.call_id)
+        span.set_attribute(OJ_INFERENCE_ID, f"{span.context.span_id:016x}")
+        span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
+        span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
+        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
+        span.set_attribute(GEN_AI_REQUEST_STREAM, state.is_streaming)
 
     def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
         """Record usage attributes (tokens, model_name) from usage_metadata.
@@ -1749,6 +1791,11 @@ class OtelCallbackHandler:
                     OJ_RUN_ID,
                     OJ_TURN_ID,
                     OJ_TURN_NUMBER,
+                    OJ_EXECUTION_SUBJECT_ID,
+                    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+                    OJ_EXECUTION_SUBJECT_KIND,
+                    OJ_EXECUTION_SUBJECT_PARENT_ID,
+                    OJ_EXECUTION_SUBJECT_SESSION_ID,
                     OJ_STEP_ID,
                     OJ_STEP_NUMBER,
                 ):
@@ -1765,7 +1812,16 @@ class OtelCallbackHandler:
                         value = source.attributes.get(key)
                         if value is not None:
                             span.set_attribute(key, value)
-            sid = get_current_session_id()
+            # The root/agent session is the trajectory owner used by the sink
+            # and HTTP path.  A nested subagent binds its isolated runtime
+            # session while streaming, but that identity belongs in
+            # OJ_EXECUTION_SUBJECT_SESSION_ID and must not move child records
+            # into a different trajectory partition.
+            owner_session_id = (
+                span.attributes.get(OJ_SESSION_ID)
+                or span.attributes.get(GEN_AI_CONVERSATION_ID)
+            )
+            sid = str(owner_session_id or get_current_session_id() or "")
             if sid:
                 span.set_attribute(LANGFUSE_SESSION_ID, sid)
                 span.set_attribute(AT_SESSION_ID, sid)
@@ -1791,6 +1847,12 @@ class OtelCallbackHandler:
             OJ_RUN_ID,
             OJ_TURN_ID,
             OJ_TURN_NUMBER,
+            OJ_EXECUTION_SUBJECT_ID,
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            OJ_EXECUTION_SUBJECT_KIND,
+            OJ_EXECUTION_SUBJECT_PARENT_ID,
+            OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
+            OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_STEP_ID,
             OJ_STEP_NUMBER,
             OJ_REQUEST_NUMBER,

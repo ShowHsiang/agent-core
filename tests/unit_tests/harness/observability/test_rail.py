@@ -42,10 +42,17 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_ID,
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
+    LANGFUSE_SESSION_ID,
+    AT_SESSION_ID,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
     OJ_REQUEST_ID,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
     OJ_SESSION_ID,
@@ -67,6 +74,14 @@ from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
     AgentSpanDecoration,
 )
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
+from openjiuwen.extensions.observability.span_context import (
+    clear_current_session_id,
+    set_current_session_id,
+)
 
 
 @pytest.fixture
@@ -84,6 +99,10 @@ def tracing():
     root.set_attribute(OJ_REQUEST_ID, "request")
     root.set_attribute(OJ_RUN_ID, "run")
     root.set_attribute(OJ_TRACE_ROOT, True)
+    root.set_attribute(OJ_EXECUTION_SUBJECT_ID, "main")
+    root.set_attribute(OJ_EXECUTION_SUBJECT_DISPLAY_NAME, "Main Agent")
+    root.set_attribute(OJ_EXECUTION_SUBJECT_KIND, "main_agent")
+    root.set_attribute(OJ_EXECUTION_SUBJECT_SESSION_ID, "session")
     shared_span_context.set_root_span(root)
     yield SimpleNamespace(exporter=exporter, tracer=tracer, root=root)
     if root.is_recording():
@@ -301,16 +320,45 @@ async def test_subagent_invoke_nests_under_the_dispatching_agent_span(tracing):
     parent_span = parent_ctx.extra["_otel_agent_scope"].span
 
     subagent_rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
     subagent_ctx = AgentCallbackContext(
         agent=_agent("explore_agent", enable_task_loop=False),
         inputs=SimpleNamespace(query="look", result=None),
     )
-    await subagent_rail.before_invoke(subagent_ctx)
-    await subagent_rail.after_invoke(subagent_ctx)
+    with execution_subject_scope(ExecutionSubject(
+        subject_id="subagent:dispatch-1",
+        display_name="Explore Agent",
+        kind="subagent",
+        parent_subject_id="main",
+        session_id="session_sub_explore_1",
+    )):
+        await subagent_rail.before_invoke(subagent_ctx)
+        request = handler._open_llm_span(
+            {"messages": [{"role": "user", "content": "look"}], "model": "fake"}
+        )
+        assert request is not None
+        handler._close_llm_span(
+            request.otel_llm_state,
+            SimpleNamespace(
+                content="done",
+                reasoning_content="",
+                finish_reason="stop",
+                tool_calls=None,
+                usage_metadata=None,
+            ),
+        )
+        await subagent_rail.after_invoke(subagent_ctx)
     await parent_rail.after_task_iteration(parent_ctx)
 
     subagent_span = _finished(tracing.exporter, "agent.explore_agent.invoke")[0]
     assert subagent_span.parent.span_id == parent_span.context.span_id
+    request_span = _finished(tracing.exporter, "llm.call")[0]
+    assert request_span.parent.span_id == subagent_span.context.span_id
+    assert request_span.attributes[OJ_EXECUTION_SUBJECT_ID] == "subagent:dispatch-1"
+    assert request_span.attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] == "main"
 
 
 @pytest.mark.asyncio
@@ -444,13 +492,37 @@ async def test_subagent_invoke_nests_under_the_tool_span_that_dispatched_it(trac
         agent=_agent("explore_agent", enable_task_loop=False),
         inputs=SimpleNamespace(query="look", result=None),
     )
-    await subagent_rail.before_invoke(subagent_ctx)
-    await subagent_rail.after_invoke(subagent_ctx)
+    with execution_subject_scope(ExecutionSubject(
+        subject_id="subagent:dispatch-1",
+        display_name="Explore Agent",
+        kind="subagent",
+        parent_subject_id="main",
+        session_id="session_sub_explore_1",
+    )):
+        await subagent_rail.before_invoke(subagent_ctx)
+        model_ctx = AgentCallbackContext(
+            agent=subagent_ctx.agent,
+            inputs=ModelCallInputs(react_iteration=1),
+            extra=subagent_ctx.extra,
+        )
+        await subagent_rail.before_model_call(model_ctx)
+        await subagent_rail.after_react_iteration(model_ctx)
+        assert tool_span.is_recording()
+        await subagent_rail.after_invoke(subagent_ctx)
     tool_span.end()
     await parent_rail.after_task_iteration(parent_ctx)
 
     subagent_span = _finished(tracing.exporter, "agent.explore_agent.invoke")[0]
     assert subagent_span.parent.span_id == tool_span.context.span_id
+    assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_ID] == "subagent:dispatch-1"
+    assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_DISPLAY_NAME] == "Explore Agent"
+    assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_KIND] == "subagent"
+    assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] == "main"
+    assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "session_sub_explore_1"
+    assert OJ_SPAN_FORCED_CLOSE not in _finished(
+        tracing.exporter,
+        "tool.task_tool",
+    )[0].attributes
 
 
 def _tool_ctx(agent, *, call_id: str, shared_extra=None):
@@ -586,6 +658,44 @@ async def test_llm_child_context_propagation_inherits_agent_card_identity(tracin
     assert span.attributes[GEN_AI_AGENT_NAME] == "solo"
     assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "solo description"
     assert GEN_AI_AGENT_VERSION not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_subagent_ambient_session_does_not_replace_trajectory_owner(tracing):
+    agent = _agent("explore_agent", enable_task_loop=False)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(query="look", result=None),
+    )
+
+    with execution_subject_scope(ExecutionSubject(
+        subject_id="subagent:dispatch-1",
+        display_name="Explore Agent",
+        kind="subagent",
+        parent_subject_id="main",
+        session_id="session_sub_explore_1",
+    )):
+        await rail.before_invoke(ctx)
+        set_current_session_id("session_sub_explore_1")
+        try:
+            child = tracing.tracer.start_span("llm.child")
+            handler._propagate_session_context(child)
+            child.end()
+        finally:
+            clear_current_session_id()
+        await rail.after_invoke(ctx)
+
+    span = _finished(tracing.exporter, "llm.child")[0]
+    assert span.attributes[OJ_SESSION_ID] == "session"
+    assert span.attributes[GEN_AI_CONVERSATION_ID] == "session"
+    assert span.attributes[LANGFUSE_SESSION_ID] == "session"
+    assert span.attributes[AT_SESSION_ID] == "session"
+    assert span.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "session_sub_explore_1"
 
 
 @pytest.mark.asyncio

@@ -24,8 +24,10 @@ from openjiuwen.core.foundation.llm import (
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.call_scope import (
+    LlmObservationSuppression,
     expects_unified_llm_completion,
     get_current_llm_call_id,
+    is_llm_observation_suppressed,
 )
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
@@ -44,6 +46,16 @@ def _build_model() -> Model:
         ),
         model_config=ModelRequestConfig(model="mock-model"),
     )
+
+
+def test_observation_suppression_is_nested_and_restored() -> None:
+    assert not is_llm_observation_suppressed()
+    with LlmObservationSuppression():
+        assert is_llm_observation_suppressed()
+        with LlmObservationSuppression():
+            assert is_llm_observation_suppressed()
+        assert is_llm_observation_suppressed()
+    assert not is_llm_observation_suppressed()
 
 
 @pytest.mark.asyncio

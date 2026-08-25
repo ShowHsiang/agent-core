@@ -22,6 +22,11 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     LANGFUSE_SESSION_ID,
     OJ_AGENT_MODE,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
@@ -47,6 +52,11 @@ class OtlpSpanRecord:
     record_revision: int = 1
     observed_time_unix_nano: int = 0
     lifecycle: str = "final"
+    execution_subject_id: str | None = None
+    execution_subject_display_name: str | None = None
+    execution_subject_kind: str | None = None
+    execution_subject_parent_id: str | None = None
+    execution_subject_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +78,11 @@ class OtlpSpanSnapshotRecord:
     agent_mode: str | None
     schema_version: str = "1"
     lifecycle: str = "running"
+    execution_subject_id: str | None = None
+    execution_subject_display_name: str | None = None
+    execution_subject_kind: str | None = None
+    execution_subject_parent_id: str | None = None
+    execution_subject_session_id: str | None = None
 
 
 class OtlpSpanRecordConsumer(Protocol):
@@ -433,6 +448,20 @@ class SpanRecordProcessor(SpanProcessor):
             schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
             record_revision=record_revision,
             observed_time_unix_nano=time.time_ns(),
+            execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
+            execution_subject_display_name=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            ),
+            execution_subject_kind=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_KIND),
+            execution_subject_parent_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_PARENT_ID,
+            ),
+            execution_subject_session_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_SESSION_ID,
+            ),
         )
 
     @staticmethod
@@ -471,6 +500,20 @@ class SpanRecordProcessor(SpanProcessor):
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_attribute_text(attributes, OJ_AGENT_MODE),
             schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
+            execution_subject_display_name=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            ),
+            execution_subject_kind=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_KIND),
+            execution_subject_parent_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_PARENT_ID,
+            ),
+            execution_subject_session_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_SESSION_ID,
+            ),
         )
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
