@@ -65,6 +65,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_REQUEST_MESSAGES,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
@@ -308,7 +309,14 @@ async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> N
         await framework.trigger(
             LLMCallEvents.LLM_STREAM_INPUT,
             messages=[
-                {"role": "system", "content": "Be precise"},
+                {
+                    "role": "system",
+                    "content": "Be precise",
+                    "metadata": {
+                        "_openjiuwen_prompt_attachment_history": True,
+                        "mode": "snapshot",
+                    },
+                },
                 {"role": "user", "content": "hello"},
                 {
                     "role": "assistant",
@@ -329,7 +337,14 @@ async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> N
         await framework.trigger(
             LLMCallEvents.LLM_INPUT,
             messages=[
-                {"role": "system", "content": "Be precise"},
+                {
+                    "role": "system",
+                    "content": "Be precise",
+                    "metadata": {
+                        "_openjiuwen_prompt_attachment_history": True,
+                        "mode": "snapshot",
+                    },
+                },
                 {"role": "user", "content": "hello"},
                 {
                     "role": "assistant",
@@ -420,6 +435,20 @@ async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> N
     assert json.loads(attrs[GEN_AI_SYSTEM_INSTRUCTIONS]) == [
         {"type": "text", "content": "Be precise"}
     ]
+    request_messages = json.loads(attrs[OJ_GEN_AI_REQUEST_MESSAGES])
+    assert [message["role"] for message in request_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert request_messages[0]["parts"] == [
+        {"type": "text", "content": "Be precise"}
+    ]
+    assert request_messages[0]["openjiuwen"] == {
+        "kind": "prompt_attachment_history",
+        "mode": "snapshot",
+    }
     input_messages = json.loads(attrs[GEN_AI_INPUT_MESSAGES])
     assert input_messages[0]["parts"][0]["content"] == "hello"
     assert input_messages[1]["parts"][0] == {

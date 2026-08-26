@@ -82,7 +82,7 @@ def reset_run_root_spans() -> None:
     _ROOT_SPANS.clear()
 
 
-def resolve_run_root_span() -> Any:
+def resolve_run_root_span(*, session_id: str | None = None) -> Any:
     """Return the root span of the run the calling task belongs to, or None.
 
     Resolution is by session id first: the session id is set around agent
@@ -94,11 +94,17 @@ def resolve_run_root_span() -> Any:
     rather than a guess: attaching one run's spans to another run's trace is
     worse than the span being missing.
     """
-    session_id = current_session_id()
+    requested_session_id = str(session_id or current_session_id() or "")
 
-    span = _ROOT_SPANS.get(session_id)
+    span = _ROOT_SPANS.get(requested_session_id)
     if _is_recording(span):
         return span
+
+    # A concrete owner that is not registered is not ambiguous: it has no
+    # live run root.  Never let a late callback from that operation adopt the
+    # sole root of a different conversation.
+    if requested_session_id:
+        return None
 
     live = [candidate for candidate in list(_ROOT_SPANS.values()) if _is_recording(candidate)]
     if len(live) == 1:
@@ -156,7 +162,7 @@ def install_root_span_fallback() -> None:
             span = original()
         if _is_recording(span):
             return span
-        return resolve_run_root_span()
+        return resolve_run_root_span(session_id=session_id)
 
     setattr(get_root_span_with_fallback, ROOT_SPAN_FALLBACK_ATTR, True)
     shared.get_root_span = get_root_span_with_fallback

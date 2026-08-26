@@ -321,6 +321,29 @@ class TaskTool(Tool):
             parent_subject_id=parent_subject_id,
             session_id=sub_session_id,
         )
+        owner_root = None
+        try:
+            from openjiuwen.extensions.observability.span_context import get_root_span
+            from openjiuwen.harness.observability.span_context import (
+                register_run_root_span,
+                unregister_run_root_span,
+            )
+
+            owner_root = get_root_span(session_id=parent_session_id)
+            if owner_root is not None and owner_root.is_recording():
+                # The subagent runtime binds its isolated sub-session in
+                # callbacks that may execute outside the dispatch task's
+                # ContextVars.  Register an explicit alias to the owning run
+                # so those callbacks resolve A -> A, never "the only live"
+                # unrelated run B.
+                register_run_root_span(owner_root, session_id=sub_session_id)
+            else:
+                owner_root = None
+        except Exception as exc:
+            logger.debug(
+                "[TaskTool] Failed to bind subagent observability owner: %s",
+                exc,
+            )
         with execution_subject_scope(subject):
             try:
                 await prepare_subagent_task_resources(subagent)
@@ -384,6 +407,11 @@ class TaskTool(Tool):
                     reason=f"Subagent {subagent_type} execution failed: {e}",
                 ) from e
             finally:
+                if owner_root is not None:
+                    unregister_run_root_span(
+                        owner_root,
+                        session_id=sub_session_id,
+                    )
                 await cleanup_subagent_task_resources(subagent)
                 if affinity_enabled:
                     await kv_cache_hooks.finish_subagent(

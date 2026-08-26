@@ -57,6 +57,39 @@ def test_run_is_resolved_by_session_id_when_available(monkeypatch) -> None:
         agent_span_context.reset_run_root_spans()
 
 
+def test_known_session_without_registered_root_never_adopts_another_run(monkeypatch) -> None:
+    """A cancelled run's late callback must not migrate into the next trace."""
+    agent_span_context.reset_run_root_spans()
+    other = _root_span("other")
+    agent_span_context.register_run_root_span(other, session_id="sess-B")
+    monkeypatch.setattr(
+        agent_span_context,
+        "current_session_id",
+        lambda: "sess-A-sub-worker",
+    )
+    try:
+        assert agent_span_context.resolve_run_root_span() is None
+        assert agent_span_context.resolve_run_root_span(
+            session_id="sess-A-sub-worker"
+        ) is None
+    finally:
+        agent_span_context.reset_run_root_spans()
+
+
+def test_explicit_session_resolution_does_not_use_ambient_session(monkeypatch) -> None:
+    """The wrapper's explicit owner argument wins over stale ambient state."""
+    agent_span_context.reset_run_root_spans()
+    root_a = _root_span("a")
+    root_b = _root_span("b")
+    agent_span_context.register_run_root_span(root_a, session_id="sess-A")
+    agent_span_context.register_run_root_span(root_b, session_id="sess-B")
+    monkeypatch.setattr(agent_span_context, "current_session_id", lambda: "sess-A")
+    try:
+        assert agent_span_context.resolve_run_root_span(session_id="sess-B") is root_b
+    finally:
+        agent_span_context.reset_run_root_spans()
+
+
 def test_one_session_closing_does_not_blind_another_still_running() -> None:
     """A finished run drops only its own entry.
 

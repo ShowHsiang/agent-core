@@ -331,6 +331,16 @@ class AgentObservabilityRail(DeepAgentRail):
         self._open_react_step_parent: Span | None = None
         self._open_react_step_iteration: int = 0
 
+    def fork_for_agent(self) -> "AgentObservabilityRail":
+        """Return an empty lifecycle owner for one concrete Agent instance.
+
+        Sub-agent specs are reusable templates.  Reusing this rail object from
+        such a spec would also reuse its open invoke/Step state, so concurrent
+        sub-agents could close or parent each other's spans.  Preserve only
+        the injected tracer; all lifecycle state must start empty.
+        """
+        return AgentObservabilityRail(tracer=self._injected_tracer)
+
     def _tracer(self) -> Tracer:
         if self._injected_tracer is not None:
             return self._injected_tracer
@@ -345,6 +355,22 @@ class AgentObservabilityRail(DeepAgentRail):
 
         return get_config()
 
+    @staticmethod
+    def _root_span_for(ctx: AgentCallbackContext) -> Span | None:
+        """Resolve only the run owning this callback's concrete session."""
+        session = getattr(ctx, "session", None)
+        session_id = ""
+        if session is not None:
+            try:
+                session_id = str(session.get_session_id() or "")
+            except Exception:
+                session_id = ""
+        return (
+            shared_span_context.get_root_span(session_id=session_id)
+            if session_id
+            else shared_span_context.get_root_span()
+        )
+
     async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
         try:
             inputs = ctx.inputs
@@ -353,7 +379,7 @@ class AgentObservabilityRail(DeepAgentRail):
             agent = ctx.agent
             agent_name = self.resolve_agent_name(agent)
 
-            root_span = shared_span_context.get_root_span()
+            root_span = self._root_span_for(ctx)
             if root_span is None:
                 # No run root — nothing to attach to, and an orphan root span
                 # would start a trace of its own. The host opens the root
@@ -412,6 +438,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent=agent,
                 agent_name=agent_name,
                 decoration=decoration,
+                root_span=root_span,
             )
             span.set_attribute(DA_TASK_ITERATION, iteration)
             span.set_attribute(DA_TASK_IS_FOLLOW_UP, is_follow_up)
@@ -473,7 +500,7 @@ class AgentObservabilityRail(DeepAgentRail):
             # Re-attach the run root so anything that follows this round —
             # another rail's work, the host's own spans — still nests correctly
             # instead of hanging off a span that has ended.
-            root_span = shared_span_context.get_root_span()
+            root_span = self._root_span_for(ctx)
             if root_span is not None and root_span.is_recording():
                 root_ctx = set_span_in_context(root_span, otel_context.get_current())
                 otel_context.attach(root_ctx)
@@ -521,7 +548,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             agent_name = self.resolve_agent_name(agent) or "unknown"
 
-            root_span = shared_span_context.get_root_span()
+            root_span = self._root_span_for(ctx)
             if root_span is None:
                 # No run root (e.g. a sub-agent invoked outside any run) —
                 # there is no parent span to attach to, so skip rather than
@@ -588,6 +615,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent=agent,
                 agent_name=agent_name,
                 decoration=decoration,
+                root_span=root_span,
             )
 
             query = getattr(inputs, "query", "") or ""
@@ -671,7 +699,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             self._close_react_step(exception=None)
             scope_parent = get_current_agent_span()
-            root_span = shared_span_context.get_root_span()
+            root_span = self._root_span_for(ctx)
             if scope_parent is None or not scope_parent.is_recording():
                 scope_parent = root_span
             if scope_parent is None or not scope_parent.is_recording():
@@ -708,6 +736,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent=agent,
                 agent_name=agent_name,
                 decoration=AgentSpanDecoration.collect(ctx),
+                root_span=root_span,
             )
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "step")
             span.set_attribute(DA_TASK_ITERATION, iteration)
@@ -767,7 +796,7 @@ class AgentObservabilityRail(DeepAgentRail):
             inputs = getattr(ctx, "inputs", None)
             tool_name = str(getattr(inputs, "tool_name", "") or "unknown")
             current_agent = get_current_agent_span()
-            root_span = shared_span_context.get_root_span()
+            root_span = self._root_span_for(ctx)
             if (
                 root_span is None
                 or not root_span.attributes.get(OJ_TRACE_ROOT)
@@ -1027,6 +1056,7 @@ class AgentObservabilityRail(DeepAgentRail):
         agent: Any,
         agent_name: str,
         decoration: AgentSpanDecoration,
+        root_span: Span | None,
     ) -> None:
         """Apply the attributes shared by iteration and invoke spans."""
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
@@ -1049,7 +1079,6 @@ class AgentObservabilityRail(DeepAgentRail):
             version = getattr(card, "version", None)
             if isinstance(version, str) and version:
                 span.set_attribute(GEN_AI_AGENT_VERSION, version)
-        root_span = shared_span_context.get_root_span()
         if root_span is not None:
             for key in (
                 GEN_AI_CONVERSATION_ID,

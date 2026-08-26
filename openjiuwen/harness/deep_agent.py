@@ -1442,13 +1442,22 @@ class DeepAgent(BaseAgent):
                 language=self._deep_config.language
             )
 
+        subagent_rails = None
+        if spec.rails is not None:
+            subagent_rails = []
+            for rail in spec.rails:
+                fork_for_agent = getattr(rail, "fork_for_agent", None)
+                subagent_rails.append(
+                    fork_for_agent() if callable(fork_for_agent) else rail
+                )
+
         create_kwargs = {
             "model": spec.model or self._deep_config.model,
             "card": spec.agent_card,
             "system_prompt": spec.system_prompt,
             "tools": spec.tools,
             "mcps": spec.mcps,
-            "rails": spec.rails,
+            "rails": subagent_rails,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
                 spec.max_iterations

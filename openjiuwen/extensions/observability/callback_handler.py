@@ -104,6 +104,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_REQUEST_MESSAGES,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
     OJ_GEN_AI_RESPONSE_PARSER_RESULT,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
@@ -1429,8 +1430,11 @@ class OtelCallbackHandler:
         normalized = self._normalize_messages(messages)
         system_parts: list[dict[str, Any]] = []
         input_messages: list[dict[str, Any]] = []
+        request_messages: list[dict[str, Any]] = []
         for message in normalized:
             role = _message_role(message)
+            structured = self._structured_message(message, is_output=False)
+            request_messages.append(structured)
             if role == "system":
                 system_parts.extend(
                     self._structured_content_parts(
@@ -1439,7 +1443,18 @@ class OtelCallbackHandler:
                     )
                 )
                 continue
-            input_messages.append(self._structured_message(message, is_output=False))
+            input_messages.append(structured)
+        if request_messages:
+            # Additive OpenJiuwen fact source preserving the exact request
+            # message order and boundaries.  The standard
+            # gen_ai.system_instructions attribute remains unchanged for OTel
+            # compatibility, but it is a content-parts array and therefore
+            # cannot distinguish two system messages from one two-part
+            # system message.
+            span.set_attribute(
+                OJ_GEN_AI_REQUEST_MESSAGES,
+                json.dumps(request_messages, ensure_ascii=False, default=str),
+            )
         if system_parts:
             span.set_attribute(
                 GEN_AI_SYSTEM_INSTRUCTIONS,
@@ -1572,6 +1587,18 @@ class OtelCallbackHandler:
             parts.append(part)
 
         structured: dict[str, Any] = {"role": role, "parts": parts}
+        if not is_output and role == "system":
+            metadata = _get_field(message, "metadata")
+            if (
+                isinstance(metadata, Mapping)
+                and metadata.get("_openjiuwen_prompt_attachment_history") is True
+            ):
+                history_mode = metadata.get("mode")
+                if history_mode in {"snapshot", "delta"}:
+                    structured["openjiuwen"] = {
+                        "kind": "prompt_attachment_history",
+                        "mode": history_mode,
+                    }
         message_name = _get_field(message, "name")
         if message_name:
             structured["name"] = str(message_name)
