@@ -121,6 +121,12 @@ class Model:
         Returns:
             AssistantMessage
         """
+        from openjiuwen.core.context_engine.context.compression_scope import (
+            stamp_context_compression_model_kwargs,
+        )
+
+        stamp_context_compression_model_kwargs(kwargs)
+
         # Identify this request for the whole callback chain (input event,
         # the client's own LLM_OUTPUT trigger, output event, error event) so
         # observers can attribute what they receive to this call and not to
@@ -170,6 +176,11 @@ class Model:
         Yields:
             AssistantMessageChunk
         """
+        from openjiuwen.core.context_engine.context.compression_scope import (
+            stamp_context_compression_model_kwargs,
+        )
+
+        stamp_context_compression_model_kwargs(kwargs)
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 

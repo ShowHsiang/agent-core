@@ -564,7 +564,12 @@ class BaseModelClient(ABC):
 
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
-        internal_params = {"parser", "output_parser"}
+        internal_params = {
+            "parser",
+            "output_parser",
+            "request_purpose",
+            "context_operation_id",
+        }
 
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(

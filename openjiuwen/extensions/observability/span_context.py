@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from copy import deepcopy
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
@@ -462,6 +464,11 @@ class LlmSpanState:
     last_chunk_ns: int | None = None
     stream_event_sequence: int = 0
     attribute_pressure: bool = False
+    request_purpose: str = "assistant"
+    message_occurrence_ids: tuple[str, ...] = ()
+    message_metadata: tuple[Any, ...] = ()
+    initial_trajectory_messages: tuple[dict[str, Any], ...] = ()
+    context_window_committed: bool = False
     reasoning_first_ns: int | None = None
     reasoning_last_ns: int | None = None
     # Wall-clock epoch (time.time_ns) captured at the first reasoning chunk.
@@ -479,6 +486,12 @@ _root_registry: dict[str, Span] = {}
 _root_registry_lock = threading.RLock()
 _execution_subject_request_sequences: dict[tuple[str, str], int] = {}
 _execution_subject_request_sequence_lock = threading.Lock()
+_trajectory_subject_sequences: dict[tuple[str, str], int] = {}
+_trajectory_subject_states: dict[
+    tuple[str, str],
+    tuple[str, tuple[tuple[str, str], ...]],
+] = {}
+_trajectory_subject_state_lock = threading.Lock()
 _ambient_root_span: Span | None = None
 
 
@@ -510,6 +523,89 @@ def next_execution_subject_request_number(
         request_number = _execution_subject_request_sequences.get(key, 0) + 1
         _execution_subject_request_sequences[key] = request_number
     return request_number
+
+
+def advance_context_window(
+    *,
+    session_id: str,
+    subject_id: str,
+    window_id: str,
+    messages: list[dict[str, Any]],
+) -> tuple[int, str | None, list[dict[str, Any]]]:
+    """Atomically advance one subject's canonical context-window state.
+
+    Occurrence identity is the message_id carried by each canonical message.
+    Content equality is deliberately never used to join occurrences.
+    """
+    key = (_normalize_session_id(session_id), str(subject_id))
+    current: tuple[tuple[str, str], ...] = tuple(
+        (
+            str(message.get("message_id", "")),
+            json.dumps(message, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        for message in messages
+    )
+    with _trajectory_subject_state_lock:
+        previous = _trajectory_subject_states.get(key)
+        sequence = _next_trajectory_subject_sequence_locked(key)
+        base_window_id = previous[0] if previous is not None else None
+        before = previous[1] if previous is not None else ()
+
+        before_by_id = {
+            message_id: (index, fingerprint)
+            for index, (message_id, fingerprint) in enumerate(before)
+        }
+        current_by_id = {
+            message_id: (index, fingerprint, messages[index])
+            for index, (message_id, fingerprint) in enumerate(current)
+        }
+        delta: list[dict[str, Any]] = []
+
+        for message_id, (index, _fingerprint) in before_by_id.items():
+            if message_id not in current_by_id:
+                delta.append({"op": "remove", "message_id": message_id, "index": index})
+
+        for message_id, (index, fingerprint, message) in current_by_id.items():
+            prior = before_by_id.get(message_id)
+            if prior is None:
+                delta.append({
+                    "op": "insert",
+                    "message_id": message_id,
+                    "index": index,
+                    "message": deepcopy(message),
+                })
+                continue
+            prior_index, prior_fingerprint = prior
+            if prior_index != index:
+                delta.append({
+                    "op": "move",
+                    "message_id": message_id,
+                    "from_index": prior_index,
+                    "index": index,
+                })
+            if prior_fingerprint != fingerprint:
+                delta.append({
+                    "op": "replace",
+                    "message_id": message_id,
+                    "index": index,
+                    "message": deepcopy(message),
+                })
+
+        _trajectory_subject_states[key] = (str(window_id), current)
+        return sequence, base_window_id, delta
+
+
+def next_trajectory_subject_sequence(*, session_id: str, subject_id: str) -> int:
+    """Allocate one sequence shared by every v2 event kind for a subject."""
+    key = (_normalize_session_id(session_id), str(subject_id))
+    with _trajectory_subject_state_lock:
+        return _next_trajectory_subject_sequence_locked(key)
+
+
+def _next_trajectory_subject_sequence_locked(key: tuple[str, str]) -> int:
+    sequence = _trajectory_subject_sequences.get(key, 0) + 1
+    _trajectory_subject_sequences[key] = sequence
+    return sequence
 
 
 def set_root_span(span: Span, *, session_id: str | None = None) -> None:
@@ -826,6 +922,9 @@ def reset_state() -> None:
         _root_registry.clear()
     with _execution_subject_request_sequence_lock:
         _execution_subject_request_sequences.clear()
+    with _trajectory_subject_state_lock:
+        _trajectory_subject_sequences.clear()
+        _trajectory_subject_states.clear()
 
 
 def flush_child_spans(*, trace_id: int | None = None) -> int:

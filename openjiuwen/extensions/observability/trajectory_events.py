@@ -1,0 +1,148 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Immutable native trajectory event emission."""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from typing import Any
+
+from opentelemetry import context as otel_context
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer, set_span_in_context
+
+from openjiuwen.extensions.observability.semconv import (
+    OJ_REQUEST_ID,
+    OJ_RUN_ID,
+    OJ_SESSION_ID,
+    OJ_STEP_ID,
+    OJ_STEP_NUMBER,
+    OJ_AGENT_MODE,
+    OJ_TRAJECTORY_EVENT_ID,
+    OJ_TRAJECTORY_EVENT_KIND,
+    OJ_TRAJECTORY_PAYLOAD,
+    OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
+    OJ_TRAJECTORY_RECORD_KIND,
+    OJ_TRAJECTORY_REQUEST_ID,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SESSION_ID,
+    OJ_TRAJECTORY_STEP_ID,
+    OJ_TRAJECTORY_SUBJECT_ID,
+    OJ_TRAJECTORY_SUBJECT_SEQUENCE,
+    OJ_TRAJECTORY_TURN_ID,
+    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TURN_ID,
+    OJ_TURN_NUMBER,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
+)
+from openjiuwen.extensions.observability.span_context import (
+    advance_context_window,
+    next_trajectory_subject_sequence,
+)
+
+
+def emit_native_trajectory_event(
+    *,
+    tracer: Tracer,
+    parent_span: Span,
+    event_kind: str,
+    payload: dict[str, Any],
+    subject_sequence: int | None = None,
+) -> Span | None:
+    """Emit one immutable v2 event using the parent's concrete owner."""
+    if not parent_span.is_recording():
+        return None
+    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
+    sequence = subject_sequence or next_trajectory_subject_sequence(
+        session_id=session_id,
+        subject_id=subject_id,
+    )
+    event_id = uuid.uuid4().hex
+    parent_context = set_span_in_context(parent_span, otel_context.get_current())
+    span = tracer.start_span(name=event_kind, context=parent_context, kind=SpanKind.INTERNAL)
+    recorded_at = time.time_ns()
+    attributes: dict[str, Any] = {
+        OJ_TRAJECTORY_SCHEMA_VERSION: "2",
+        OJ_TRAJECTORY_EVENT_ID: event_id,
+        OJ_TRAJECTORY_EVENT_KIND: event_kind,
+        OJ_TRAJECTORY_SUBJECT_ID: subject_id,
+        OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
+        OJ_TRAJECTORY_SESSION_ID: session_id,
+        OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
+        OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
+        OJ_TRAJECTORY_RECORD_KIND: "event",
+        OJ_TRACE_SCHEMA_VERSION: "2",
+    }
+    for source_key, target_key in (
+        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
+        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
+        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
+    ):
+        value = parent_span.attributes.get(source_key)
+        if value not in (None, ""):
+            attributes[target_key] = str(value)
+    for routing_key in (
+        OJ_SESSION_ID,
+        OJ_REQUEST_ID,
+        OJ_RUN_ID,
+        OJ_AGENT_MODE,
+        OJ_TURN_NUMBER,
+        OJ_STEP_NUMBER,
+        OJ_EXECUTION_SUBJECT_ID,
+        OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+        OJ_EXECUTION_SUBJECT_KIND,
+        OJ_EXECUTION_SUBJECT_PARENT_ID,
+        OJ_EXECUTION_SUBJECT_SESSION_ID,
+    ):
+        value = parent_span.attributes.get(routing_key)
+        if value not in (None, ""):
+            attributes[routing_key] = value
+    for key, value in attributes.items():
+        span.set_attribute(key, value)
+    span.set_status(Status(StatusCode.OK))
+    span.end()
+    return span
+
+
+def emit_context_window_commit(
+    *,
+    tracer: Tracer,
+    llm_span: Span,
+    messages: list[dict[str, Any]],
+    request_purpose: str,
+) -> Span | None:
+    """Emit one ended context.window.commit child span."""
+    session_id = str(llm_span.attributes.get(OJ_SESSION_ID) or "")
+    subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
+    window_id = uuid.uuid4().hex
+    sequence, base_window_id, delta = advance_context_window(
+        session_id=session_id,
+        subject_id=subject_id,
+        window_id=window_id,
+        messages=messages,
+    )
+    payload = {
+        "window_id": window_id,
+        "base_window_id": base_window_id,
+        "complete": True,
+        "messages": messages,
+        "delta": delta,
+        "request_purpose": request_purpose,
+    }
+    return emit_native_trajectory_event(
+        tracer=tracer,
+        parent_span=llm_span,
+        event_kind="context.window.commit",
+        payload=payload,
+        subject_sequence=sequence,
+    )
+
+
+__all__ = ["emit_context_window_commit", "emit_native_trajectory_event"]

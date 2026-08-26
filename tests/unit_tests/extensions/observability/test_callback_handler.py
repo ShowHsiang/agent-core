@@ -653,8 +653,8 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
     assert all("metadata" not in message for message in structured)
     assert span.attributes[f"{GEN_AI_PROMPT}.1.content"] == repeated_content
     assert span.attributes[f"{GEN_AI_PROMPT}.2.content"] == repeated_content
-    assert span.attributes[f"{LANGFUSE_GEN_AI_PROMPT}.1.content"] == repeated_content
-    assert span.attributes[f"{LANGFUSE_GEN_AI_PROMPT}.2.content"] == repeated_content
+    assert f"{LANGFUSE_GEN_AI_PROMPT}.1.content" not in span.attributes
+    assert f"{LANGFUSE_GEN_AI_PROMPT}.2.content" not in span.attributes
     langfuse_input = json.loads(span.attributes[LANGFUSE_OBSERVATION_INPUT])
     assert [message["content"] for message in langfuse_input] == [
         repeated_content,
@@ -685,7 +685,7 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
             sample_rate=1.0,
             backend="otlp",
             redact_prompts=True,
-            max_attributes=40,
+            max_attributes=35,
         ),
         span_exporter_override=exporter,
     )

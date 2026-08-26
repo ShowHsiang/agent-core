@@ -25,9 +25,12 @@ from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
+from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.context_compression_handler import (
+    ContextCompressionObservabilityBridge,
+)
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
@@ -97,6 +100,7 @@ class ObservabilityRuntime:
         self._additional_processors: list[SpanProcessor] = []
         self._tracker: ActiveSpanTracker | None = None
         self._callback_handler: OtelCallbackHandler | None = None
+        self._context_compression_handler: ContextCompressionObservabilityBridge | None = None
         self._registered_callbacks: list[tuple[str, Any]] = []
         self._callback_framework: Any | None = None
         self._callback_namespace = "extensions.observability"
@@ -160,8 +164,14 @@ class ObservabilityRuntime:
                     config,
                     tracer=provider.get_tracer("openjiuwen.extensions.observability"),
                 )
+                context_compression_handler = ContextCompressionObservabilityBridge(
+                    tracer=provider.get_tracer("openjiuwen.extensions.observability.context"),
+                )
                 self._callback_handler = callback_handler
-                self._register_callbacks(self._callback_pairs(callback_handler))
+                self._context_compression_handler = context_compression_handler
+                self._register_callbacks(
+                    self._callback_pairs(callback_handler, context_compression_handler)
+                )
                 try:
                     trace.set_tracer_provider(provider)
                 except Exception as exc:
@@ -177,6 +187,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 set_active_span_tracker(None)
                 self._additional_processors.clear()
                 raise
@@ -243,6 +254,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 if get_active_span_tracker() is tracker:
                     set_active_span_tracker(None)
                 self._additional_processors.clear()
@@ -253,11 +265,22 @@ class ObservabilityRuntime:
             return self._tracker
 
     @staticmethod
-    def _callback_pairs(handler: OtelCallbackHandler) -> list[tuple[str, Any]]:
+    def _callback_pairs(
+        handler: OtelCallbackHandler,
+        context_compression_handler: ContextCompressionObservabilityBridge,
+    ) -> list[tuple[str, Any]]:
         """Return the framework events handled by the common callback rail."""
         return [
             (LLMCallEvents.LLM_INVOKE_INPUT, handler.on_llm_invoke_input),
+            (
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
             (LLMCallEvents.LLM_STREAM_INPUT, handler.on_llm_stream_input),
+            (
+                LLMCallEvents.LLM_STREAM_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
             (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
             (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
@@ -271,6 +294,10 @@ class ObservabilityRuntime:
             (AgentEvents.AGENT_INVOKE_OUTPUT, handler.on_agent_invoke_output),
             (AgentEvents.AGENT_STREAM_INPUT, handler.on_agent_stream_input),
             (AgentEvents.AGENT_STREAM_OUTPUT, handler.on_agent_stream_output),
+            (
+                ContextEvents.CONTEXT_COMPRESSION_STATE,
+                context_compression_handler.on_context_compression_state,
+            ),
         ]
 
     def _register_callbacks(

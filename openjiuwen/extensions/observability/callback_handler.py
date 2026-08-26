@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from enum import Enum
@@ -35,6 +36,7 @@ from openjiuwen.extensions.observability.redaction import (
 )
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.demand import publish_span_snapshot
+from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
@@ -425,9 +427,27 @@ class OtelCallbackHandler:
             if state is None or not state.span.is_recording():
                 return
             messages = kwargs.get("messages")
-            if messages and not state.attribute_pressure:
-                self._record_structured_input(state.span, messages)
+            if messages and not state.context_window_committed:
+                provider_messages = self._normalize_messages(messages)
+                if len(provider_messages) == len(state.message_occurrence_ids):
+                    self._record_canonical_request(state.span, provider_messages)
+                    if not state.attribute_pressure:
+                        self._record_standard_structured_input(state.span, provider_messages)
+                    trajectory_messages = self._trajectory_messages(
+                        provider_messages,
+                        occurrence_ids=state.message_occurrence_ids,
+                        source_metadata=state.message_metadata,
+                    )
+                else:
+                    trajectory_messages = [dict(item) for item in state.initial_trajectory_messages]
                 publish_span_snapshot(state.span, "attributes")
+                emit_context_window_commit(
+                    tracer=self._tracer(),
+                    llm_span=state.span,
+                    messages=trajectory_messages,
+                    request_purpose=state.request_purpose,
+                )
+                state.context_window_committed = True
         except Exception as exc:
             logger.warning("otel: on_llm_input failed: {}", exc)
 
@@ -853,7 +873,8 @@ class OtelCallbackHandler:
         # callback still runs inside the caller's LLM call scope.
         call_id = get_current_llm_call_id()
         emit_standard_prompt = self._config.backend != "langfuse"
-        attrs_per_msg = 4 if emit_standard_prompt else 2
+        emit_langfuse_prompt = self._config.backend == "langfuse"
+        attrs_per_msg = 2
         non_prompt_budget = 30
         writable_msg_count = max(
             (self._config.max_attributes - non_prompt_budget) // attrs_per_msg,
@@ -898,8 +919,9 @@ class OtelCallbackHandler:
         msg_count = len(messages)
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
         self._record_input_message_provenance(span, messages)
+        self._record_canonical_request(span, messages)
         if not attribute_pressure:
-            self._record_structured_input(span, messages)
+            self._record_standard_structured_input(span, messages)
 
         root_span = get_root_span()
         if root_span is not None:
@@ -910,6 +932,8 @@ class OtelCallbackHandler:
                 root_span._otel_llm_request_sequence = request_number
             span.set_attribute(OJ_REQUEST_NUMBER, request_number)
         request_purpose = kwargs.get("request_purpose")
+        if request_purpose not in ("assistant", "compaction"):
+            request_purpose = "assistant"
         if request_purpose in ("assistant", "compaction") and not attribute_pressure:
             span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
 
@@ -977,7 +1001,9 @@ class OtelCallbackHandler:
         # for non-system messages.
         # langfuse.observation.input still uses delta (messages[prev_count_raw:])
         # so each iteration shows only the new prompt content.
-        delta_idxs = [i for i in range(0, msg_count) if _message_role(messages[i]) != "system"]
+        delta_idxs = [] if attribute_pressure else [
+            i for i in range(0, msg_count) if _message_role(messages[i]) != "system"
+        ]
         if len(delta_idxs) > writable_msg_count:
             # Keep only the trailing N so the oldest prompt slots — not the
             # top-level attrs — are the ones dropped by FIFO.
@@ -996,8 +1022,9 @@ class OtelCallbackHandler:
             if emit_standard_prompt:
                 span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
                 span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
-            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
-            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
+            if emit_langfuse_prompt:
+                span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
+                span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
 
             # tool_calls on assistant messages — content is often empty,
             # but the LLM context includes the full tool call metadata.
@@ -1008,7 +1035,8 @@ class OtelCallbackHandler:
                     tc_redacted = redact_prompt(tc_json, self._config)
                     if emit_standard_prompt:
                         span.set_attribute(f"{GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
-                    span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
+                    if emit_langfuse_prompt:
+                        span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
 
         # ── langfuse.observation.input (delta, same logic) ───────────
         if is_first_call:
@@ -1056,12 +1084,23 @@ class OtelCallbackHandler:
             )
         self._stamp_parent_member_name(span)
 
+        message_occurrence_ids = self._message_occurrence_ids(messages)
+        message_metadata = tuple(_get_field(message, "metadata") for message in messages)
+        initial_trajectory_messages = self._trajectory_messages(
+            messages,
+            occurrence_ids=message_occurrence_ids,
+            source_metadata=message_metadata,
+        )
         _llm_st = LlmSpanState(
             span=span,
             start_ns=time.monotonic_ns(),
             call_id=call_id,
             is_streaming=is_streaming,
             attribute_pressure=attribute_pressure,
+            request_purpose=request_purpose,
+            message_occurrence_ids=message_occurrence_ids,
+            message_metadata=message_metadata,
+            initial_trajectory_messages=tuple(initial_trajectory_messages),
         )
         span.otel_llm_state = _llm_st  # attach state to span object (context-immune)
         self._stamp_llm_semantic_identity(_llm_st)
@@ -1152,8 +1191,9 @@ class OtelCallbackHandler:
                 state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
                 state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
             # Langfuse-compatible t_ prefix keys
-            state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
-            state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
+            if self._config.backend == "langfuse":
+                state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
+                state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
 
             # Build langfuse.observation.output
             choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
@@ -1426,15 +1466,91 @@ class OtelCallbackHandler:
 
         state.span.add_event("openjiuwen.stream.chunk", attributes=attributes)
 
-    def _record_structured_input(self, span: Span, messages: Any) -> None:
+    @staticmethod
+    def _message_occurrence_ids(messages: Any) -> tuple[str, ...]:
+        normalized = OtelCallbackHandler._normalize_messages(messages)
+        seen: dict[str, int] = {}
+        occurrence_ids: list[str] = []
+        system_slot = 0
+        for message in normalized:
+            metadata = _get_field(message, "metadata")
+            explicit = metadata.get("context_message_id") if isinstance(metadata, Mapping) else None
+            if not explicit:
+                explicit = _get_field(message, "message_id") or _get_field(message, "id")
+            if not explicit and isinstance(metadata, Mapping):
+                explicit = metadata.get("message_id") or metadata.get("openjiuwen.message_id")
+            if not explicit and _message_role(message) == "system":
+                explicit = f"openjiuwen:request-system-slot:{system_slot}"
+                system_slot += 1
+            if explicit:
+                base = str(explicit)
+                duplicate_index = seen.get(base, 0)
+                seen[base] = duplicate_index + 1
+                occurrence_ids.append(
+                    base if duplicate_index == 0 else f"{base}#occurrence:{duplicate_index}"
+                )
+            else:
+                occurrence_ids.append(uuid.uuid4().hex)
+        return tuple(occurrence_ids)
+
+    def _trajectory_value(self, value: Any) -> Any:
+        normalized = _json_compatible(value)
+        if isinstance(normalized, str):
+            return redact_prompt(normalized, self._config)
+        if isinstance(normalized, list):
+            return [self._trajectory_value(item) for item in normalized]
+        if isinstance(normalized, dict):
+            return {key: self._trajectory_value(item) for key, item in normalized.items()}
+        return normalized
+
+    def _trajectory_messages(
+        self,
+        messages: Any,
+        *,
+        occurrence_ids: tuple[str, ...],
+        source_metadata: tuple[Any, ...],
+    ) -> list[dict[str, Any]]:
+        normalized = self._normalize_messages(messages)
+        ids = occurrence_ids
+        if len(ids) != len(normalized):
+            ids = self._message_occurrence_ids(normalized)
+        result: list[dict[str, Any]] = []
+        for index, message in enumerate(normalized):
+            item: dict[str, Any] = {
+                "message_id": ids[index],
+                "role": _message_role(message),
+                "content": self._trajectory_value(_message_content(message)),
+            }
+            for key in ("tool_calls", "tool_call_id", "name"):
+                value = _get_field(message, key)
+                if value not in (None, ""):
+                    item[key] = self._trajectory_value(value)
+            metadata = _get_field(message, "metadata")
+            if metadata is None and index < len(source_metadata):
+                metadata = source_metadata[index]
+            if metadata is not None:
+                item["metadata"] = self._trajectory_value(metadata)
+            result.append(item)
+        return result
+
+    def _record_canonical_request(self, span: Span, messages: Any) -> None:
+        normalized = self._normalize_messages(messages)
+        request_messages = [
+            self._structured_message(message, is_output=False)
+            for message in normalized
+        ]
+        span.set_attribute(
+            OJ_GEN_AI_REQUEST_MESSAGES,
+            json.dumps(request_messages, ensure_ascii=False, default=str),
+        )
+
+    def _record_standard_structured_input(self, span: Span, messages: Any) -> None:
         normalized = self._normalize_messages(messages)
         system_parts: list[dict[str, Any]] = []
         input_messages: list[dict[str, Any]] = []
-        request_messages: list[dict[str, Any]] = []
         for message in normalized:
             role = _message_role(message)
             structured = self._structured_message(message, is_output=False)
-            request_messages.append(structured)
             if role == "system":
                 system_parts.extend(
                     self._structured_content_parts(
@@ -1444,17 +1560,6 @@ class OtelCallbackHandler:
                 )
                 continue
             input_messages.append(structured)
-        if request_messages:
-            # Additive OpenJiuwen fact source preserving the exact request
-            # message order and boundaries.  The standard
-            # gen_ai.system_instructions attribute remains unchanged for OTel
-            # compatibility, but it is a content-parts array and therefore
-            # cannot distinguish two system messages from one two-part
-            # system message.
-            span.set_attribute(
-                OJ_GEN_AI_REQUEST_MESSAGES,
-                json.dumps(request_messages, ensure_ascii=False, default=str),
-            )
         if system_parts:
             span.set_attribute(
                 GEN_AI_SYSTEM_INSTRUCTIONS,
