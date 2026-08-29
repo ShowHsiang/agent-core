@@ -1322,3 +1322,25 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
         "llm.chunk",
         "openjiuwen.stream.chunk",
     ]
+
+
+
+def test_request_numbers_are_allocated_without_a_root_span() -> None:
+    """A call made while no root span is registered still gets numbered.
+
+    The counter used to live on the root span object, so these calls got no
+    number at all and the trajectory UI invented substitutes for the gaps.
+    """
+    from openjiuwen.extensions.observability import callback_handler as handler_module
+
+    reset_state()
+    handler_module._FALLBACK_REQUEST_SEQUENCES.clear()
+    try:
+        allocated = [
+            OtelCallbackHandler._next_request_number() for _ in range(3)
+        ]
+    finally:
+        handler_module._FALLBACK_REQUEST_SEQUENCES.clear()
+        reset_state()
+
+    assert allocated == [1, 2, 3]

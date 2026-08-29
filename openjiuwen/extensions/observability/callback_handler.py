@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import OrderedDict
 import time
 import uuid
 from collections.abc import Mapping
@@ -169,6 +170,12 @@ from openjiuwen.core.foundation.llm.call_scope import (
 
 _TRACER_NAME = "openjiuwen.extensions.observability"
 _REQUEST_SEQUENCE_LOCK = threading.Lock()
+# Fallback LLM request counters for calls made while no root span is
+# resolvable, keyed by session. Bounded because nothing signals when a session
+# is done; the counter for a live session is always among the most recent.
+# Guarded by _REQUEST_SEQUENCE_LOCK.
+_MAX_FALLBACK_REQUEST_SEQUENCES = 256
+_FALLBACK_REQUEST_SEQUENCES: OrderedDict[str, int] = OrderedDict()
 _PROVIDER_METADATA_ALLOWLIST = frozenset({
     "system_fingerprint",
     "service_tier",
@@ -960,14 +967,7 @@ class OtelCallbackHandler:
         self._record_canonical_request(span, messages)
         self._record_standard_structured_input(span, messages)
 
-        root_span = get_root_span()
-        if root_span is not None:
-            with _REQUEST_SEQUENCE_LOCK:
-                request_number = int(
-                    getattr(root_span, "_otel_llm_request_sequence", 0) or 0
-                ) + 1
-                root_span._otel_llm_request_sequence = request_number
-            span.set_attribute(OJ_REQUEST_NUMBER, request_number)
+        span.set_attribute(OJ_REQUEST_NUMBER, self._next_request_number())
         request_purpose = kwargs.get("request_purpose")
         if request_purpose not in ("assistant", "compaction"):
             request_purpose = "assistant"
@@ -1910,6 +1910,33 @@ class OtelCallbackHandler:
             return json.dumps(result, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             return str(result)
+
+    @staticmethod
+    def _next_request_number() -> int:
+        """Allocate this request's number within the run it belongs to.
+
+        The counter used to live on the root span, so a call made while no
+        root span was resolvable got no number at all and the trajectory UI
+        had to invent one. Key it by the root span when there is one and by
+        the session otherwise, so every request is numbered either way.
+        """
+
+        root_span = get_root_span()
+        with _REQUEST_SEQUENCE_LOCK:
+            if root_span is not None:
+                # Held on the span itself, so the counter dies with the run.
+                request_number = int(
+                    getattr(root_span, "_otel_llm_request_sequence", 0) or 0
+                ) + 1
+                root_span._otel_llm_request_sequence = request_number
+                return request_number
+            key = str(get_current_session_id() or "unknown")
+            request_number = _FALLBACK_REQUEST_SEQUENCES.get(key, 0) + 1
+            _FALLBACK_REQUEST_SEQUENCES[key] = request_number
+            _FALLBACK_REQUEST_SEQUENCES.move_to_end(key)
+            while len(_FALLBACK_REQUEST_SEQUENCES) > _MAX_FALLBACK_REQUEST_SEQUENCES:
+                _FALLBACK_REQUEST_SEQUENCES.popitem(last=False)
+        return request_number
 
     @staticmethod
     def _matching_authoritative_tool_span(tool_name: str) -> Span | None:
