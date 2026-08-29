@@ -49,6 +49,11 @@ from openjiuwen.extensions.observability.redaction import (
     redact_prompt,
 )
 from openjiuwen.extensions.observability.demand import publish_span_snapshot
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
+)
 from openjiuwen.extensions.observability.semconv import (
     DA_AGENT_NAME,
     DA_TASK_IS_FOLLOW_UP,
@@ -275,6 +280,19 @@ class ToolSpanScope:
         return scope if isinstance(scope, cls) else None
 
     def close(self, *, output: Any, exception: BaseException | None) -> None:
+        """End the tool span, recording the result and the real outcome.
+
+        The output is written on every path, raised calls included: the ability
+        manager hands the model a tool result for those too, and a span without
+        one makes the trajectory disagree with the conversation. The status is
+        read from the outcome rather than from "did it raise", so a tool that
+        returns ``success=False`` no longer lands as OK.
+
+        Args:
+            output: What the ability returned; None when the call raised.
+            exception: The exception the call raised, or None.
+        """
+
         popped = pop_tool_span(self.tool_name)
         span = self.span
         if popped is not None and popped is not span:
@@ -285,29 +303,40 @@ class ToolSpanScope:
         if not span.is_recording():
             return
 
+        recorded_output = (
+            tool_result_for_exception(exception) if exception is not None else output
+        )
+        raw_output = AgentObservabilityRail._serialize_ability_value(recorded_output)
+        raw_call_result = (
+            "null" if recorded_output is None else raw_output
+        )
+        redacted = (
+            redact_completion(raw_output, self._config)
+            if self._config
+            else raw_output
+        )
+        redacted_call_result = (
+            redact_completion(raw_call_result, self._config)
+            if self._config
+            else raw_call_result
+        )
+        span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
+        span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted_call_result)
+        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+
         if exception is not None:
             span.record_exception(exception)
             span.set_attribute(ERROR_TYPE, type(exception).__name__)
             span.set_status(Status(StatusCode.ERROR, str(exception)))
-        else:
-            raw_output = AgentObservabilityRail._serialize_ability_value(output)
-            raw_call_result = (
-                "null" if output is None else raw_output
-            )
-            redacted = (
-                redact_completion(raw_output, self._config)
-                if self._config
-                else raw_output
-            )
-            redacted_call_result = (
-                redact_completion(raw_call_result, self._config)
-                if self._config
-                else raw_call_result
-            )
-            span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
-            span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted_call_result)
-            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+            span.end()
+            return
+
+        failure_reason = tool_failure_reason(output)
+        if failure_reason is None:
             span.set_status(Status(StatusCode.OK))
+        else:
+            span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
+            span.set_status(Status(StatusCode.ERROR, failure_reason))
         span.end()
 
 

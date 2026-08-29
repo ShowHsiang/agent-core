@@ -137,6 +137,11 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
+)
 from openjiuwen.extensions.observability.span_context import (
     LlmSpanState,
     get_active_span_tracker,
@@ -777,7 +782,14 @@ class OtelCallbackHandler:
             span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
             span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
             span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
-            span.set_status(Status(StatusCode.OK))
+            # A tool that returns ``success=False`` never raises, so the status
+            # has to come from the result itself or the call reports OK.
+            failure_reason = tool_failure_reason(result)
+            if failure_reason is None:
+                span.set_status(Status(StatusCode.OK))
+            else:
+                span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
+                span.set_status(Status(StatusCode.ERROR, failure_reason))
             span.end()
         except Exception as exc:
             import traceback
@@ -804,6 +816,15 @@ class OtelCallbackHandler:
 
             if span.is_recording():
                 if isinstance(exc, BaseException):
+                    # The ability manager still hands the model a tool result
+                    # for a raised call; record the same text so the span is
+                    # not the one place that call looks like it returned
+                    # nothing.
+                    recorded_output = tool_result_for_exception(exc)
+                    redacted = redact_completion(recorded_output, self._config)
+                    span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
+                    span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
+                    span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
                     span.record_exception(exc)
                     span.set_attribute(ERROR_TYPE, type(exc).__name__)
                     span.set_status(Status(StatusCode.ERROR, str(exc)))

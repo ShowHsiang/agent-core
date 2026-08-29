@@ -42,6 +42,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_ID,
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_OUTPUT,
     LANGFUSE_SESSION_ID,
     AT_SESSION_ID,
     LANGFUSE_OBSERVATION_INPUT,
@@ -70,10 +71,12 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
 )
+from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
 from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
     AgentSpanDecoration,
 )
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.execution_subject import (
     ExecutionSubject,
     execution_subject_scope,
@@ -780,3 +783,143 @@ async def test_concrete_tool_global_callbacks_enrich_without_duplicate_span(trac
     assert len(spans) == 1
     assert spans[0].attributes[GEN_AI_TOOL_CALL_ID] == "call-global"
     assert spans[0].attributes[GEN_AI_TOOL_ID] == "resource-search"
+
+
+@pytest.mark.asyncio
+async def test_a_raised_tool_call_still_records_the_result_the_model_saw(tracing):
+    """A raised call is handed back to the model as a tool result, so the span keeps one."""
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-raised")
+
+    await rail.before_tool_call(ctx)
+    ctx.exception = ValueError("bad tool")
+    await rail.on_tool_exception(ctx)
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.attributes["error.type"] == "ValueError"
+    assert span.attributes[GEN_AI_TOOL_OUTPUT] == "Ability execution error: bad tool"
+    assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == "Ability execution error: bad tool"
+    assert span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "Ability execution error: bad tool"
+
+
+@pytest.mark.asyncio
+async def test_a_result_reporting_failure_closes_the_span_as_an_error(tracing):
+    """``ToolOutput(success=False)`` never raises; the status has to come from the result."""
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-failed")
+
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = ToolOutput(success=False, error="exit code 1")
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.status.description == "exit code 1"
+    assert span.attributes["error.type"] == TOOL_REPORTED_FAILURE
+    assert "exit code 1" in span.attributes[GEN_AI_TOOL_OUTPUT]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_result_without_an_error_message_still_reports_an_error(tracing):
+    """The reason is optional; ``success=False`` alone is enough to fail the span."""
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-bare-failure")
+
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = ToolOutput(success=False)
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.attributes["error.type"] == TOOL_REPORTED_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_a_result_without_a_success_field_is_left_alone(tracing):
+    """Workflow outputs and raw payloads carry no ``success``; they must stay OK."""
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-plain")
+
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "OK"
+    assert "error.type" not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_a_succeeding_result_still_closes_the_span_as_ok(tracing):
+    """The common path must not regress into an error just because it is read now."""
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-ok")
+
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = ToolOutput(success=True, data={"answer": 42})
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "OK"
+    assert "error.type" not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_the_global_tool_callbacks_also_read_failure_from_the_result(tracing):
+    """Team mode owns the span in the callback handler; it needs the same reading."""
+    agent = _agent()
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    await handler.on_tool_call_started(
+        tool_name="search",
+        tool_id="resource-search",
+        inputs=(({"q": "hello"},), {}),
+    )
+    await handler.on_tool_call_finished(
+        tool_name="search",
+        result=ToolOutput(success=False, error="exit code 1"),
+    )
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.status.description == "exit code 1"
+    assert span.attributes["error.type"] == TOOL_REPORTED_FAILURE
