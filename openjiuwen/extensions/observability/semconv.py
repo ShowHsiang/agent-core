@@ -146,6 +146,8 @@ OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
 OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
 OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
+# Retained for reading trajectories recorded before the request was stored as
+# gen_ai.system_instructions + gen_ai.input.messages. Not written any more.
 OJ_GEN_AI_REQUEST_MESSAGES = "openjiuwen.gen_ai.request.messages"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"

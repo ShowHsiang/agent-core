@@ -22,7 +22,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
-    OJ_GEN_AI_REQUEST_MESSAGES,
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
@@ -120,8 +121,9 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
         reset_state()
 
     llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
-    canonical = json.loads(_attrs(llm_span)[OJ_GEN_AI_REQUEST_MESSAGES])
-    assert len(canonical) == 111
+    instructions = json.loads(_attrs(llm_span)[GEN_AI_SYSTEM_INSTRUCTIONS])
+    history = json.loads(_attrs(llm_span)[GEN_AI_INPUT_MESSAGES])
+    assert len(instructions) + len(history) == 111
     assert not any(key.startswith(f"{LANGFUSE_GEN_AI_PROMPT}.") for key in _attrs(llm_span))
 
     event_span = next(

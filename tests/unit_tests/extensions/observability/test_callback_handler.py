@@ -61,7 +61,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
-    OJ_GEN_AI_REQUEST_MESSAGES,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
@@ -432,20 +431,6 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     # belongs to the chat history rather than to the instructions given
     # alongside it, so it stays in gen_ai.input.messages.
     assert GEN_AI_SYSTEM_INSTRUCTIONS not in attrs
-    request_messages = json.loads(attrs[OJ_GEN_AI_REQUEST_MESSAGES])
-    assert [message["role"] for message in request_messages] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-    ]
-    assert request_messages[0]["parts"] == [
-        {"type": "text", "content": "Be precise"}
-    ]
-    assert request_messages[0]["openjiuwen"] == {
-        "kind": "prompt_attachment_history",
-        "mode": "snapshot",
-    }
     input_messages = json.loads(attrs[GEN_AI_INPUT_MESSAGES])
     assert input_messages[0]["role"] == "system"
     assert input_messages[0]["openjiuwen"] == {

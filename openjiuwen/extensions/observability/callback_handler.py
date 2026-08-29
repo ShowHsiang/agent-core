@@ -103,7 +103,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
-    OJ_GEN_AI_REQUEST_MESSAGES,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
     OJ_GEN_AI_RESPONSE_PARSER_RESULT,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
@@ -475,7 +474,6 @@ class OtelCallbackHandler:
             if messages and not state.context_window_committed:
                 provider_messages = self._normalize_messages(messages)
                 if len(provider_messages) == len(state.message_occurrence_ids):
-                    self._record_canonical_request(state.span, provider_messages)
                     self._record_standard_structured_input(state.span, provider_messages)
                     trajectory_messages = self._trajectory_messages(
                         provider_messages,
@@ -964,7 +962,6 @@ class OtelCallbackHandler:
         msg_count = len(messages)
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
         self._record_input_message_provenance(span, messages)
-        self._record_canonical_request(span, messages)
         self._record_standard_structured_input(span, messages)
 
         span.set_attribute(OJ_REQUEST_NUMBER, self._next_request_number())
@@ -1516,17 +1513,6 @@ class OtelCallbackHandler:
                 item["metadata"] = self._trajectory_value(metadata)
             result.append(item)
         return result
-
-    def _record_canonical_request(self, span: Span, messages: Any) -> None:
-        normalized = self._normalize_messages(messages)
-        request_messages = [
-            self._structured_message(message, is_output=False)
-            for message in normalized
-        ]
-        span.set_attribute(
-            OJ_GEN_AI_REQUEST_MESSAGES,
-            json.dumps(request_messages, ensure_ascii=False, default=str),
-        )
 
     @staticmethod
     def _is_prompt_attachment_history(message: Any) -> bool:
