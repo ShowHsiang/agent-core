@@ -39,8 +39,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
-    GEN_AI_COMPLETION,
-    GEN_AI_PROMPT,
     GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_STREAM,
     GEN_AI_RESPONSE_FINISH_REASON,
@@ -57,8 +55,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_COMPLETION_TOKENS,
-    LANGFUSE_GEN_AI_COMPLETION,
-    LANGFUSE_GEN_AI_PROMPT,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
@@ -275,7 +271,7 @@ def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> N
 
 
 @pytest.mark.asyncio
-async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> None:
+async def test_stream_completion_records_the_standard_structured_fields() -> None:
     exporter = InMemorySpanExporter()
     runtime = ObservabilityRuntime()
     config = ObservabilityConfig(
@@ -472,8 +468,6 @@ async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> N
         "name": "search",
         "arguments": {"q": "next"},
     }
-    assert attrs[f"{LANGFUSE_GEN_AI_PROMPT}.0.content"] == "Be precise"
-    assert attrs[f"{LANGFUSE_GEN_AI_COMPLETION}.0.content"] == "hello"
 
     # Existing Langfuse carve-out remains unchanged; additive totals stay raw.
     assert attrs[GEN_AI_USAGE_PROMPT_TOKENS] == 8
@@ -509,7 +503,7 @@ async def test_stream_completion_dual_writes_structured_and_legacy_fields() -> N
 
 
 @pytest.mark.asyncio
-async def test_structured_and_legacy_content_share_redaction_decisions() -> None:
+async def test_structured_input_and_output_share_redaction_decisions() -> None:
     exporter = InMemorySpanExporter()
     runtime = ObservabilityRuntime()
     runtime.initialize(
@@ -549,8 +543,6 @@ async def test_structured_and_legacy_content_share_redaction_decisions() -> None
     span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
     input_text = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]["parts"][0]["content"]
     output_text = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
-    assert input_text == span.attributes[f"{GEN_AI_PROMPT}.1.content"]
-    assert output_text == span.attributes[f"{GEN_AI_COMPLETION}.0.content"]
     assert input_text.startswith("sha256:")
     assert output_text.startswith("sha256:")
 
@@ -651,10 +643,6 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         "preserved tail",
     ]
     assert all("metadata" not in message for message in structured)
-    assert span.attributes[f"{GEN_AI_PROMPT}.1.content"] == repeated_content
-    assert span.attributes[f"{GEN_AI_PROMPT}.2.content"] == repeated_content
-    assert f"{LANGFUSE_GEN_AI_PROMPT}.1.content" not in span.attributes
-    assert f"{LANGFUSE_GEN_AI_PROMPT}.2.content" not in span.attributes
     langfuse_input = json.loads(span.attributes[LANGFUSE_OBSERVATION_INPUT])
     assert [message["content"] for message in langfuse_input] == [
         repeated_content,
@@ -732,7 +720,9 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
         reset_state()
 
     span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
-    assert GEN_AI_INPUT_MESSAGES not in span.attributes
+    # Every message is recorded now: the per-message expansion that used to
+    # crowd this attribute out of the span's budget is gone.
+    assert GEN_AI_INPUT_MESSAGES in span.attributes
     provenance_json = span.attributes[OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE]
     assert "secret" not in provenance_json
     assert json.loads(provenance_json) == [
@@ -932,10 +922,6 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
         "page": 2,
     }
 
-    # The existing indexed attributes keep their historical whole-content
-    # string shape and emission conditions; only the additive field is parted.
-    assert json.loads(span.attributes[f"{GEN_AI_PROMPT}.0.content"]) == input_content
-    assert json.loads(span.attributes[f"{GEN_AI_COMPLETION}.0.content"]) == output_content
 
 
 @pytest.mark.asyncio
@@ -1006,7 +992,7 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
     llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
     assert len(llm_spans) == 2
     assert {
-        span.attributes[f"{GEN_AI_COMPLETION}.0.content"]
+        json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
         for span in llm_spans
     } == {"unified answer", "legacy answer"}
 

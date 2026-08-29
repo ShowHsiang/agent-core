@@ -47,15 +47,11 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
     GEN_AI_AGENT_VERSION,
-    GEN_AI_COMPLETION,
     GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
-    GEN_AI_PROMPT,
     GEN_AI_PROVIDER_NAME,
-    LANGFUSE_GEN_AI_COMPLETION,
-    LANGFUSE_GEN_AI_PROMPT,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MESSAGE_COUNT,
     GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
@@ -473,8 +469,7 @@ class OtelCallbackHandler:
                 provider_messages = self._normalize_messages(messages)
                 if len(provider_messages) == len(state.message_occurrence_ids):
                     self._record_canonical_request(state.span, provider_messages)
-                    if not state.attribute_pressure:
-                        self._record_standard_structured_input(state.span, provider_messages)
+                    self._record_standard_structured_input(state.span, provider_messages)
                     trajectory_messages = self._trajectory_messages(
                         provider_messages,
                         occurrence_ids=state.message_occurrence_ids,
@@ -508,8 +503,7 @@ class OtelCallbackHandler:
                 ttft_ms = (state.first_chunk_ns - state.start_ns) / 1_000_000.0
                 if state.span.is_recording():
                     state.span.set_attribute(GEN_AI_RESPONSE_TTFT_MS, ttft_ms)
-                    if not state.attribute_pressure:
-                        state.span.set_attribute(GEN_AI_RESPONSE_TTFC, ttft_ms / 1000.0)
+                    state.span.set_attribute(GEN_AI_RESPONSE_TTFC, ttft_ms / 1000.0)
             state.last_chunk_ns = now_ns
             delta = _coerce_message_content(_message_content(chunk))
             reasoning_chunk = str(getattr(chunk, "reasoning_content", "") or "")
@@ -930,19 +924,6 @@ class OtelCallbackHandler:
         # to the span through it, so it must be read here, while the opening
         # callback still runs inside the caller's LLM call scope.
         call_id = get_current_llm_call_id()
-        emit_standard_prompt = self._config.backend != "langfuse"
-        emit_langfuse_prompt = self._config.backend == "langfuse"
-        attrs_per_msg = 2
-        non_prompt_budget = 30
-        writable_msg_count = max(
-            (self._config.max_attributes - non_prompt_budget) // attrs_per_msg,
-            0,
-        )
-        non_system_count = sum(
-            1 for message in messages if _message_role(message) != "system"
-        )
-        attribute_pressure = non_system_count > writable_msg_count
-
         span = self._tracer().start_span(
             name="llm.call",
             kind=SpanKind.CLIENT,
@@ -956,8 +937,7 @@ class OtelCallbackHandler:
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
-        if not attribute_pressure:
-            span.set_attribute(GEN_AI_REQUEST_STREAM, is_streaming)
+        span.set_attribute(GEN_AI_REQUEST_STREAM, is_streaming)
         provider_name = self._derive_provider_name(kwargs)
         span.set_attribute(GEN_AI_PROVIDER_NAME, provider_name)
         span.set_attribute(GEN_AI_REQUEST_MODEL, str(model_name))
@@ -978,8 +958,7 @@ class OtelCallbackHandler:
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
         self._record_input_message_provenance(span, messages)
         self._record_canonical_request(span, messages)
-        if not attribute_pressure:
-            self._record_standard_structured_input(span, messages)
+        self._record_standard_structured_input(span, messages)
 
         root_span = get_root_span()
         if root_span is not None:
@@ -992,7 +971,7 @@ class OtelCallbackHandler:
         request_purpose = kwargs.get("request_purpose")
         if request_purpose not in ("assistant", "compaction"):
             request_purpose = "assistant"
-        if request_purpose in ("assistant", "compaction") and not attribute_pressure:
+        if request_purpose in ("assistant", "compaction"):
             span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
 
         # ── Delta tracking ──────────────────────────────────────────
@@ -1041,65 +1020,11 @@ class OtelCallbackHandler:
         if agent_span is not None:
             agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
-        # ── Per-message prompt attributes (delta + tail cap) ─────────
-        # OTel BoundedAttributes evicts FIFO (oldest first). The top-level
-        # gen_ai.system / operation.name / provider.name / request.model are
-        # written before this loop, so if the prompt attributes fill the
-        # span's max_attributes budget they would be evicted first. Reserve
-        # a fixed non-prompt budget and write only the trailing N messages.
-        # The same budget was computed before opening the span so additive
-        # detail can yield when this legacy tail is already at capacity.
-        non_prompt_budget = 30  # top system + request params + root context +
-        # member name + output-stage completion/usage/finish_reason (≈22, 30
-        # leaves headroom); covers the 1 system message too.
-        writable_msg_count = max((self._config.max_attributes - non_prompt_budget) // attrs_per_msg, 0)
-
-        # All non-system messages (full prompt, not delta). System is
-        # always emitted separately, so it does not consume the writable budget
-        # for non-system messages.
-        # langfuse.observation.input still uses delta (messages[prev_count_raw:])
-        # so each iteration shows only the new prompt content.
-        delta_idxs = [] if attribute_pressure else [
-            i for i in range(0, msg_count) if _message_role(messages[i]) != "system"
-        ]
-        if len(delta_idxs) > writable_msg_count:
-            # Keep only the trailing N so the oldest prompt slots — not the
-            # top-level attrs — are the ones dropped by FIFO.
-            delta_idxs = delta_idxs[-writable_msg_count:] if writable_msg_count > 0 else []
-        emit_set = set(delta_idxs)
-
-        for i, m in enumerate(messages):
-            role = _message_role(m)
-            is_system = role == "system"
-            # System message → always emit.  Non-system → only emit delta,
-            # and only if it survived the tail cap.
-            if not is_system and i not in emit_set:
-                continue
-            raw_content = _coerce_message_content(_message_content(m))
-            redacted = redact_prompt(raw_content, self._config)
-            if emit_standard_prompt:
-                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
-                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
-            if emit_langfuse_prompt:
-                span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
-                span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
-
-            # tool_calls on assistant messages — content is often empty,
-            # but the LLM context includes the full tool call metadata.
-            tool_calls = m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None)
-            if tool_calls:
-                tc_json = _serialize_tool_calls(tool_calls)
-                if tc_json:
-                    tc_redacted = redact_prompt(tc_json, self._config)
-                    if emit_standard_prompt:
-                        span.set_attribute(f"{GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
-                    if emit_langfuse_prompt:
-                        span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
-
         # ── langfuse.observation.input (delta, same logic) ───────────
         if is_first_call:
-            # Drop system messages from the observation input — the UI
-            # already shows the full prompt via gen_ai.prompt.{i}.* attrs.
+            # System messages are carried by gen_ai.system_instructions and
+            # gen_ai.input.messages; this channel is Langfuse's own view of
+            # what the turn added.
             delta_msgs = [m for m in messages if _message_role(m) != "system"]
         else:
             delta_msgs = messages[prev_count_raw:]
@@ -1123,7 +1048,7 @@ class OtelCallbackHandler:
                 serialized_tools = json.dumps(_controlled_string(tools), ensure_ascii=False)
             span.set_attribute(GEN_AI_TOOL_DEFINITIONS, serialized_tools)
 
-        self._propagate_session_context(span, include_additive=not attribute_pressure)
+        self._propagate_session_context(span, include_additive=True)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
         session_id = str(
             span.attributes.get(OJ_SESSION_ID)
@@ -1154,7 +1079,6 @@ class OtelCallbackHandler:
             start_ns=time.monotonic_ns(),
             call_id=call_id,
             is_streaming=is_streaming,
-            attribute_pressure=attribute_pressure,
             request_purpose=request_purpose,
             message_occurrence_ids=message_occurrence_ids,
             message_metadata=message_metadata,
@@ -1237,21 +1161,15 @@ class OtelCallbackHandler:
         best-effort and created after the main span is safely closed.
         """
         try:
-            if not state.attribute_pressure:
-                self._record_structured_output(state.span, response)
-                self._record_response_details(state, response)
-                total_latency_ms = (time.monotonic_ns() - state.start_ns) / 1_000_000.0
-                state.span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency_ms)
+            self._record_structured_output(
+                state.span,
+                response,
+                fallback_text=completion_text,
+            )
+            self._record_response_details(state, response)
+            total_latency_ms = (time.monotonic_ns() - state.start_ns) / 1_000_000.0
+            state.span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency_ms)
             redacted_compl = redact_completion(completion_text, self._config)
-            emit_standard_completion = self._config.backend != "langfuse"
-            # Standard gen_ai.completion keys
-            if emit_standard_completion:
-                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
-                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
-            # Langfuse-compatible t_ prefix keys
-            if self._config.backend == "langfuse":
-                state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
-                state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
 
             # Build langfuse.observation.output
             choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
@@ -1321,10 +1239,16 @@ class OtelCallbackHandler:
                     **start_kwarg,
                 )
                 redacted_reasoning = redact_completion(reasoning_text, self._config)
-                # Standard gen_ai.completion attributes (Langfuse reasoning display)
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
+                reasoning_span.set_attribute(
+                    GEN_AI_OUTPUT_MESSAGES,
+                    json.dumps(
+                        [{
+                            "role": "reasoning",
+                            "parts": [{"type": "text", "content": redacted_reasoning}],
+                        }],
+                        ensure_ascii=False,
+                    ),
+                )
                 # Langfuse observation input/output for UI visibility
                 reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
                 reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
@@ -1431,31 +1355,28 @@ class OtelCallbackHandler:
                 GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
             ),
         )
-        if not state.attribute_pressure:
-            for value, dst_attr in raw_usage:
-                if not (skip_existing and dst_attr in state.span.attributes):
-                    state.span.set_attribute(dst_attr, value)
-            cache_creation = getattr(usage, "cache_creation_input_tokens", None)
-            if cache_creation is not None and not (
-                skip_existing and GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS in state.span.attributes
-            ):
-                state.span.set_attribute(
-                    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
-                    max(int(cache_creation), 0),
-                )
+        for value, dst_attr in raw_usage:
+            if not (skip_existing and dst_attr in state.span.attributes):
+                state.span.set_attribute(dst_attr, value)
+        cache_creation = getattr(usage, "cache_creation_input_tokens", None)
+        if cache_creation is not None and not (
+            skip_existing and GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS in state.span.attributes
+        ):
+            state.span.set_attribute(
+                GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+                max(int(cache_creation), 0),
+            )
 
-            for value, dst_attr in (
-                (float(getattr(usage, "input_cost", 0) or 0), OJ_GEN_AI_USAGE_INPUT_COST),
-                (float(getattr(usage, "output_cost", 0) or 0), OJ_GEN_AI_USAGE_OUTPUT_COST),
-                (float(getattr(usage, "total_cost", 0) or 0), OJ_GEN_AI_USAGE_TOTAL_COST),
-            ):
-                if value and not (skip_existing and dst_attr in state.span.attributes):
-                    state.span.set_attribute(dst_attr, value)
+        for value, dst_attr in (
+            (float(getattr(usage, "input_cost", 0) or 0), OJ_GEN_AI_USAGE_INPUT_COST),
+            (float(getattr(usage, "output_cost", 0) or 0), OJ_GEN_AI_USAGE_OUTPUT_COST),
+            (float(getattr(usage, "total_cost", 0) or 0), OJ_GEN_AI_USAGE_TOTAL_COST),
+        ):
+            if value and not (skip_existing and dst_attr in state.span.attributes):
+                state.span.set_attribute(dst_attr, value)
 
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         if (
-            not state.attribute_pressure
-            and
             raw_output_tokens > 1
             and state.first_chunk_ns is not None
             and state.last_chunk_ns is not None
@@ -1482,8 +1403,7 @@ class OtelCallbackHandler:
         finish_reason = getattr(response, "finish_reason", None)
         if finish_reason and finish_reason != "null":
             state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASON, str(finish_reason))
-            if not state.attribute_pressure:
-                state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
+            state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
 
     def _record_stream_event(
         self,
@@ -1686,16 +1606,38 @@ class OtelCallbackHandler:
                 json.dumps(provenance_entries, ensure_ascii=False),
             )
 
-    def _record_structured_output(self, span: Span, response: Any) -> None:
+    def _record_structured_output(
+        self,
+        span: Span,
+        response: Any,
+        *,
+        fallback_text: str = "",
+    ) -> None:
+        """Record the reply as the standard output attribute.
+
+        Args:
+            span: The LLM span to record on.
+            response: The provider reply; may be a message object or bare text.
+            fallback_text: Text to record when ``response`` carries no content
+                of its own -- a plain string reply has no ``content`` field to
+                read, and this attribute is the only carrier of the reply.
+        """
+
         if response is None:
             return
+        structured = self._structured_message(response, is_output=True)
+        has_text = any(
+            part.get("content") for part in structured.get("parts", [])
+            if isinstance(part, Mapping)
+        )
+        if not has_text and fallback_text:
+            structured.setdefault("parts", []).append({
+                "type": "text",
+                "content": redact_completion(fallback_text, self._config),
+            })
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
-            json.dumps(
-                [self._structured_message(response, is_output=True)],
-                ensure_ascii=False,
-                default=str,
-            ),
+            json.dumps([structured], ensure_ascii=False, default=str),
         )
 
     @staticmethod
@@ -1741,14 +1683,21 @@ class OtelCallbackHandler:
                 parts.extend(self._structured_content_parts(content, redact))
 
         for tool_call in _get_field(message, "tool_calls") or []:
-            raw_arguments = _coerce_message_content(_get_field(tool_call, "arguments"))
+            # OpenAI-shape calls nest name/arguments under "function"; native
+            # ones carry them directly. Read whichever this one uses.
+            function = _get_field(tool_call, "function")
+            raw_arguments = _coerce_message_content(
+                _get_field(tool_call, "arguments")
+                if _get_field(tool_call, "arguments") is not None
+                else _get_field(function, "arguments")
+            )
             redacted_arguments = redact(raw_arguments, self._config)
             part = {
                 "type": "tool_call",
                 "arguments": _json_value_if_unchanged(raw_arguments, redacted_arguments),
             }
             tool_id = _get_field(tool_call, "id")
-            tool_name = _get_field(tool_call, "name")
+            tool_name = _get_field(tool_call, "name") or _get_field(function, "name")
             if tool_id:
                 part["id"] = str(tool_id)
             if tool_name:

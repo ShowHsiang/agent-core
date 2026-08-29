@@ -176,6 +176,60 @@ def _attr(span: Any, key: str, default: Any = None) -> Any:
     return attrs.get(key, default)
 
 
+def _prompt_messages(span: Any) -> list[dict[str, Any]]:
+    """Flatten the standard GenAI input attributes into ordered messages.
+
+    Instrumentation writes one structured value per attribute; the indexed
+    per-message view is derived for Langfuse at export, not recorded here.
+    """
+    messages: list[dict[str, Any]] = []
+    raw_system = _attr(span, "gen_ai.system_instructions")
+    if raw_system:
+        text = "\n".join(
+            part.get("content", "")
+            for part in json.loads(raw_system)
+            if isinstance(part, dict) and part.get("content")
+        )
+        if text:
+            messages.append({"role": "system", "content": text})
+    raw_input = _attr(span, "gen_ai.input.messages")
+    for message in json.loads(raw_input) if raw_input else []:
+        flat = {key: value for key, value in message.items() if key != "parts"}
+        parts = message.get("parts", [])
+        flat.setdefault("content", "\n".join(
+            part.get("content", "")
+            for part in parts
+            if isinstance(part, dict) and part.get("content")
+        ))
+        tool_calls = [
+            {key: value for key, value in part.items() if key != "type"}
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "tool_call"
+        ]
+        if tool_calls:
+            flat["tool_calls"] = tool_calls
+        messages.append(flat)
+    return messages
+
+
+def _completion_text(span: Any) -> str:
+    """Read the assistant text out of the standard output attribute."""
+    raw = _attr(span, "gen_ai.output.messages")
+    if not raw:
+        return ""
+    messages = json.loads(raw)
+    if not messages:
+        return ""
+    first = messages[0]
+    if isinstance(first.get("content"), str):
+        return first["content"]
+    return "\n".join(
+        part.get("content", "")
+        for part in first.get("parts", [])
+        if isinstance(part, dict) and part.get("content")
+    )
+
+
 def _create_team_span(team_name: str) -> Any:
     """Create a team span, simulating what Runner._maybe_attach_observability does.
 
@@ -375,8 +429,8 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     ttft = _attr(span, "gen_ai.response.time_to_first_token_ms")
     assert ttft is not None and ttft >= 0.0, "TTFT must be recorded on the LLM span"
 
-    assert "Compute 6 * 7" in _attr(span, "langfuse.gen_ai.prompt.1.content", "")
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert "Compute 6 * 7" in _prompt_messages(span)[1]["content"]
+    assert _completion_text(span) == "42"
     assert _attr(span, "gen_ai.response.finish_reason") == "stop"
 
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
@@ -384,7 +438,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     rs = reasoning_spans[0]
     # Content comes from the trigger's reasoning_content (the business-layer
     # assembled text), not from the collector stitching chunk deltas.
-    assert _attr(rs, "gen_ai.completion.0.content") == "Six times seven equals forty-two."
+    assert _completion_text(rs) == "Six times seven equals forty-two."
     assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
     # Reasoning duration is measured from the chunk stream (first..last reasoning
@@ -439,17 +493,17 @@ async def test_streaming_llm_call_closes_through_team_span_accessor_across_conte
 
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) == 1
-    assert _attr(llm_spans[0], "langfuse.gen_ai.completion.0.content") == "hello"
+    assert _completion_text(llm_spans[0]) == "hello"
 
     team_span.end()
     span_context.clear_ambient_root_span()
 
 
 @pytest.mark.asyncio
-async def test_backend_langfuse_only_writes_langfuse_attrs(
+async def test_the_recorded_span_carries_one_shape_whatever_the_backend(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Verify backend='langfuse' (default) only writes langfuse.* attrs, not gen_ai.*."""
+    """Instrumentation is backend-agnostic; Langfuse's view is derived at export."""
     fw = Runner.callback_framework
     _create_team_span("test_team")
 
@@ -468,12 +522,14 @@ async def test_backend_langfuse_only_writes_langfuse_attrs(
     )
 
     span = _spans_by_name(in_memory_exporter, "llm.call")[0]
-    # Langfuse backend: only langfuse.* attrs should be present, gen_ai.* should be absent
-    assert _attr(span, "langfuse.gen_ai.prompt.0.content") == "test question"
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "test answer"
-    # Standard gen_ai.* attrs should NOT be present when backend="langfuse"
-    assert _attr(span, "gen_ai.prompt.0.content") is None
-    assert _attr(span, "gen_ai.completion.0.content") is None
+    assert _prompt_messages(span)[0]["content"] == "test question"
+    assert _completion_text(span) == "test answer"
+    # The prefixed mirror is gone entirely: Langfuse's view is derived from
+    # the standard attributes at export, never recorded alongside them.
+    assert not [
+        key for key in dict(span.attributes or {})
+        if key.startswith(("langfuse.gen_ai.prompt.", "langfuse.gen_ai.completion."))
+    ]
 
 
 @pytest.mark.asyncio
@@ -824,7 +880,7 @@ async def test_llm_response_with_content_and_tool_calls(
     span = llm_spans[0]
 
     # Both content and tool_calls should be recorded
-    assert "Let me check the weather for you." in _attr(span, "langfuse.gen_ai.completion.0.content", "")
+    assert "Let me check the weather for you." in _completion_text(span)
     tool_calls_attr = _attr(span, "gen_ai.tool_calls", "")
     assert tool_calls_attr, "tool_calls should be recorded"
     assert "get_weather" in tool_calls_attr
@@ -869,18 +925,17 @@ async def test_prompt_includes_tool_calls_for_assistant_message(
 
     span = _spans_by_name(in_memory_exporter, "llm.call")[0]
 
-    # Assistant message at index 2 should have tool_calls attribute.
-    tc_attr = _attr(span, "langfuse.gen_ai.prompt.2.tool_calls", "")
-    assert tc_attr, "assistant message with tool_calls should have tool_calls attribute"
-    assert "send_message" in tc_attr
-    assert "task done" in tc_attr
+    prompts = _prompt_messages(span)
 
-    # Messages without tool_calls should NOT have the attribute.
-    for i in (0, 1, 3, 4):
-        assert _attr(span, f"langfuse.gen_ai.prompt.{i}.tool_calls", "") == "", (
-            f"message {i} ({_attr(span, f'langfuse.gen_ai.prompt.{i}.role', '')}) "
-            f"should not have tool_calls attribute"
-        )
+    # The assistant turn carries its tool calls; nothing else does.
+    assistant = next(m for m in prompts if m["role"] == "assistant")
+    assert "send_message" in json.dumps(assistant["tool_calls"], ensure_ascii=False)
+    assert "task done" in json.dumps(assistant["tool_calls"], ensure_ascii=False)
+    for message in prompts:
+        if message["role"] != "assistant":
+            assert "tool_calls" not in message, (
+                f"{message['role']} message should not carry tool_calls"
+            )
 
 
 @pytest.mark.asyncio
@@ -1335,8 +1390,8 @@ async def test_redaction_replaces_prompt_and_completion_text() -> None:
         )
         spans = [s for s in exporter.get_finished_spans() if s.name == "llm.call"]
         assert spans
-        prompt = _attr(spans[0], "langfuse.gen_ai.prompt.0.content", "")
-        completion = _attr(spans[0], "langfuse.gen_ai.completion.0.content", "")
+        prompt = _prompt_messages(spans[0])[0]["content"]
+        completion = _completion_text(spans[0])
         assert prompt.startswith("sha256:") and "secret" not in prompt
         assert completion.startswith("sha256:") and "secret" not in completion
     finally:
@@ -1910,20 +1965,12 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) >= 2
     iter2_llm = llm_spans[-1]
-    # system always emitted.
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
+    prompts = _prompt_messages(iter2_llm)
+    assert prompts[0]["role"] == "system"
     # m1/m2/m3 ARE re-emitted in iteration 2 (full prompt, not delta).
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.role") == "user", (
-        "iteration 2 should include iteration 1's m1 (full prompt)"
-    )
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.content") == "m1"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.2.content") == "m2"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.3.content") == "m3"
-    # m4/m5 are also emitted (indices 4 and 5 in the full list).
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.role") == "user"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.content") == "m4"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.role") == "user"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.content") == "m5"
+    assert [message["content"] for message in prompts[1:]] == [
+        "m1", "m2", "m3", "m4", "m5",
+    ], "iteration 2 should carry the full prompt, not a delta"
     # observation.input still uses delta — iteration 2 only has new messages.
     input_json = _attr(iter2_llm, "langfuse.observation.input", "")
     assert "m4" in input_json and "m5" in input_json, (
@@ -1946,7 +1993,7 @@ def _get_iter_span(exporter: InMemorySpanExporter, iteration: int) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
+async def test_a_long_conversation_costs_a_fixed_number_of_attributes(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """A huge prompt must not evict the top-level gen_ai.* request attrs.
@@ -2001,19 +2048,33 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
     # The per-span message_count is still recorded.
     assert _attr(llm_span, GEN_AI_REQUEST_MESSAGE_COUNT) == len(big_messages)
 
-    # Only the trailing N user messages are emitted (the head is dropped by
-    # the tail-cap, NOT by evicting the top-level attrs).
+    # A long conversation costs a fixed number of attributes: the messages
+    # ride in one structured value, so nothing competes with the request's own
+    # identity attributes for the span's budget.
     attrs = dict(llm_span.attributes or {})
-    user_prompt_idxs = sorted(
-        int(k.split(".")[3])
-        for k in attrs
-        if k.startswith("langfuse.gen_ai.prompt.") and k.endswith(".role") and attrs[k] == "user"
+    user_messages = [m for m in _prompt_messages(llm_span) if m["role"] == "user"]
+    assert len(user_messages) == 300, (
+        f"every message must be recorded, got {len(user_messages)}"
     )
-    # Cap = (200 - 30) // 2 = 85 writable messages; 300 user messages → 85.
-    assert len(user_prompt_idxs) == 85, f"expected 85 trailing user prompts, got {len(user_prompt_idxs)}"
-    # The kept ones are the LAST 85 (indices 216..300), not the first.
-    assert user_prompt_idxs[0] == 216, f"expected first kept user prompt at index 216, got {user_prompt_idxs[0]}"
-    assert user_prompt_idxs[-1] == 300
+    assert user_messages[0]["content"] == "msg-0"
+    assert user_messages[-1]["content"] == "msg-299"
+    for key in (
+        "gen_ai.request.model",
+        "gen_ai.system",
+        "gen_ai.request.message_count",
+        "openjiuwen.request.number",
+    ):
+        assert key in attrs, f"{key} must survive a long conversation"
+    # The exported span also carries Langfuse's derived per-message view, which
+    # is allowed to scale -- it is built at export, where no limit applies. What
+    # must stay fixed-size is the recorded span underneath it.
+    recorded = [
+        key for key in attrs
+        if not key.startswith(("gen_ai.prompt.", "gen_ai.completion."))
+    ]
+    assert len(recorded) < 200, (
+        f"the recorded span must stay far below the cap, got {len(recorded)}"
+    )
 
     remove_team_span("test_team")
 
@@ -2231,15 +2292,15 @@ async def test_concurrent_llm_requests_never_cross_write(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) == 2, f"expected one span per request, got {len(llm_spans)}"
 
-    by_prompt = {_attr(s, "langfuse.gen_ai.prompt.0.content"): s for s in llm_spans}
+    by_prompt = {_prompt_messages(s)[0]["content"]: s for s in llm_spans}
     assert set(by_prompt) == {"Compute 6 * 7.", "What color is this image?"}
 
     member_span = by_prompt["Compute 6 * 7."]
     probe_span = by_prompt["What color is this image?"]
 
-    assert _attr(member_span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _completion_text(member_span) == "42"
     assert _attr(member_span, "gen_ai.usage.total_tokens") == 101
-    assert _attr(probe_span, "langfuse.gen_ai.completion.0.content") == "red"
+    assert _completion_text(probe_span) == "red"
     assert _attr(probe_span, "gen_ai.usage.total_tokens") == 10
 
     # Both spans carry the id their request ran under, and the two differ.
@@ -2306,11 +2367,11 @@ async def test_stream_callbacks_resolve_across_per_frame_task_hops(
 
     finished = [
         s for s in _spans_by_name(in_memory_exporter, "llm.call")
-        if _attr(s, "langfuse.gen_ai.prompt.0.content") == "stream please"
+        if _prompt_messages(s)[0]["content"] == "stream please"
     ]
     assert len(finished) == 1
     span = finished[0]
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _completion_text(span) == "42"
     assert _attr(span, "gen_ai.response.time_to_first_token_ms") is not None, (
         "the first chunk callback must have reached this span"
     )
@@ -2437,7 +2498,7 @@ async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
     span = llm_spans[0]
     assert span.parent is not None
     assert span.parent.span_id == root_span.context.span_id
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "pong"
+    assert _completion_text(span) == "pong"
     assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT), "llm span exported without output"
 
 

@@ -447,10 +447,6 @@ class LlmSpanState:
             the first chunk arrives.
         last_chunk_ns: Monotonic-ns of the most recent stream chunk.
         stream_event_sequence: Sequence number for additive stream events.
-        attribute_pressure: Whether the legacy prompt tail already consumes
-            the configured span-attribute budget. Additive high-detail fields
-            yield in that exceptional case so existing top-level attributes
-            and the historical prompt tail remain stable.
         reasoning_first_ns: Monotonic-ns of the first reasoning chunk.
         reasoning_last_ns: Monotonic-ns of the last reasoning chunk.
         reasoning_start_wall_ns: Wall-clock epoch (time.time_ns) captured
@@ -464,7 +460,6 @@ class LlmSpanState:
     first_chunk_ns: int | None = None
     last_chunk_ns: int | None = None
     stream_event_sequence: int = 0
-    attribute_pressure: bool = False
     request_purpose: str = "assistant"
     message_occurrence_ids: tuple[str, ...] = ()
     message_metadata: tuple[Any, ...] = ()
