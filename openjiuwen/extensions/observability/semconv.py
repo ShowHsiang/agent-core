@@ -146,9 +146,6 @@ OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
 OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
 OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
-# Retained for reading trajectories recorded before the request was stored as
-# gen_ai.system_instructions + gen_ai.input.messages. Not written any more.
-OJ_GEN_AI_REQUEST_MESSAGES = "openjiuwen.gen_ai.request.messages"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
 OJ_STREAM_KIND = "openjiuwen.stream.kind"
@@ -239,9 +236,3 @@ LANGFUSE_SESSION_ID = "session.id"
 LANGFUSE_OBSERVATION_INPUT = "langfuse.observation.input"
 LANGFUSE_OBSERVATION_OUTPUT = "langfuse.observation.output"
 LANGFUSE_OBSERVATION_TYPE = "langfuse.observation.type"
-
-# Langfuse-specific gen_ai mirror keys — avoid collision with standard
-# gen_ai.prompt / gen_ai.completion which Langfuse's OTel processor
-# maps differently (expects zero-based indices).
-LANGFUSE_GEN_AI_PROMPT = "langfuse.gen_ai.prompt"
-LANGFUSE_GEN_AI_COMPLETION = "langfuse.gen_ai.completion"

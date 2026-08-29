@@ -17,7 +17,6 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
-    LANGFUSE_GEN_AI_PROMPT,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
@@ -124,7 +123,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     instructions = json.loads(_attrs(llm_span)[GEN_AI_SYSTEM_INSTRUCTIONS])
     history = json.loads(_attrs(llm_span)[GEN_AI_INPUT_MESSAGES])
     assert len(instructions) + len(history) == 111
-    assert not any(key.startswith(f"{LANGFUSE_GEN_AI_PROMPT}.") for key in _attrs(llm_span))
+    assert not any(key.startswith("gen_ai.prompt.") for key in _attrs(llm_span))
 
     event_span = next(
         span for span in exporter.get_finished_spans()
@@ -525,7 +524,7 @@ def test_langfuse_only_span_is_not_a_native_v2_event() -> None:
     tracer = provider.get_tracer("langfuse-isolation-test")
     span = tracer.start_span(
         "legacy.langfuse",
-        attributes={f"{LANGFUSE_GEN_AI_PROMPT}.0.content": "legacy"},
+        attributes={"langfuse.observation.input": "legacy"},
     )
     span.end()
     provider.shutdown()

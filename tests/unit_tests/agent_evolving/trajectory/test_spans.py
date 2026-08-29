@@ -8,6 +8,7 @@ from copy import deepcopy
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
+    write_llm_exchange,
     attributes_to_map,
     decode_json_attribute,
     iter_spans,
@@ -90,10 +91,10 @@ def test_read_llm_tool_usage_and_error_use_observability_keys() -> None:
     llm = _span(
         "llm-1",
         attrs={
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "done",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "done"}],
+            ),
             semconv.GEN_AI_TOOL_CALLS: '[{"name": "search", "arguments": {"q": "x"}}]',
             semconv.GEN_AI_USAGE_PROMPT_TOKENS: 3,
             semconv.GEN_AI_USAGE_COMPLETION_TOKENS: 2,
@@ -155,10 +156,10 @@ def test_shared_attribute_decoder_and_llm_exchange_are_detached() -> None:
     span = _span(
         "llm-exchange",
         attrs={
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "done",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "done"}],
+            ),
             semconv.GEN_AI_TOOL_CALLS: '[{"id": "call-1"}]',
         },
     )
@@ -177,50 +178,11 @@ def test_shared_attribute_decoder_and_llm_exchange_are_detached() -> None:
     assert read_llm_exchange(span)[0][0]["content"] == "hello"
 
 
-def test_llm_exchange_reads_langfuse_indexed_messages_without_rewriting_span() -> None:
-    span = _span(
-        "llm-langfuse",
-        attrs={
-            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.content": "done",
-        },
-    )
-    original = deepcopy(span)
-
-    assert read_llm_exchange(span) == (
-        [{"role": "user", "content": "hello"}],
-        [{"role": "assistant", "content": "done"}],
-    )
-    assert span == original
-
-
-def test_llm_exchange_prefers_standard_fields_and_falls_back_independently() -> None:
-    span = _span(
-        "llm-mixed",
-        attrs={
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "standard prompt",
-            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.content": "langfuse prompt",
-            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.content": "langfuse completion",
-        },
-    )
-
-    assert read_llm_exchange(span) == (
-        [{"role": "user", "content": "standard prompt"}],
-        [{"role": "assistant", "content": "langfuse completion"}],
-    )
-
-
 def test_llm_exchange_preserves_tool_call_without_completion_attributes() -> None:
     span = _span(
         "llm-tool-call",
         attrs={
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "search",
+            **write_llm_exchange([{"role": "user", "content": "search"}], []),
             semconv.GEN_AI_TOOL_CALLS: '[{"id": "call-1", "name": "search"}]',
         },
     )
@@ -320,42 +282,20 @@ def test_llm_exchange_reads_the_standard_structured_attributes() -> None:
     assert completions == [{"role": "assistant", "content": "done"}]
 
 
-def test_llm_exchange_still_reads_records_written_before_the_standard_shape() -> None:
-    """Stored trajectories keep the indexed keys and must stay readable."""
-    span = _span(
-        "llm",
-        attrs={
-            f"{semconv.GEN_AI_PROMPT}.0.role": "system",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "OLD SYS",
-            f"{semconv.GEN_AI_PROMPT}.1.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.1.content": "old hi",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "old done",
+def test_an_llm_exchange_round_trips_through_the_standard_attributes() -> None:
+    """What write_llm_exchange records, read_llm_exchange gives back unchanged."""
+    prompts = [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1", "name": "search"}],
         },
-    )
-
-    prompts, completions = read_llm_exchange(span)
-
-    assert prompts == [
-        {"role": "system", "content": "OLD SYS"},
-        {"role": "user", "content": "old hi"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "found"},
     ]
-    assert completions == [{"role": "assistant", "content": "old done"}]
+    completions = [{"role": "assistant", "content": "done"}]
 
+    span = _span("llm", attrs=write_llm_exchange(prompts, completions))
 
-def test_the_standard_shape_wins_over_indexed_keys_on_the_same_span() -> None:
-    """A span carrying both must read as the standard one, not the derived view."""
-    span = _span(
-        "llm",
-        attrs={
-            semconv.GEN_AI_INPUT_MESSAGES: json.dumps(
-                [{"role": "user", "parts": [{"type": "text", "content": "standard"}]}]
-            ),
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "indexed",
-        },
-    )
-
-    prompts, _ = read_llm_exchange(span)
-
-    assert prompts == [{"role": "user", "content": "standard"}]
+    assert read_llm_exchange(span) == (prompts, completions)
