@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
@@ -279,3 +280,82 @@ def test_trim_trajectory_keeps_newest_spans_and_original_is_unchanged() -> None:
     assert [span["spanId"] for span in iter_spans(trimmed)] == ["s2", "s3"]
     assert payload == original
     assert len(list(iter_spans(trajectory))) == 3
+
+
+def test_llm_exchange_reads_the_standard_structured_attributes() -> None:
+    """Instrumentation writes one standard shape; the reader flattens it here."""
+    span = _span(
+        "llm",
+        attrs={
+            semconv.GEN_AI_SYSTEM_INSTRUCTIONS: json.dumps(
+                [{"type": "text", "content": "FIXED"}]
+            ),
+            semconv.GEN_AI_INPUT_MESSAGES: json.dumps([
+                {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
+                {
+                    "role": "assistant",
+                    "parts": [{"type": "text", "content": ""}],
+                    "tool_calls": [{"id": "t1"}],
+                },
+                {"role": "system", "parts": [{"type": "text", "content": "DELTA"}]},
+            ]),
+            semconv.GEN_AI_OUTPUT_MESSAGES: json.dumps(
+                [{"role": "assistant", "parts": [{"type": "text", "content": "done"}]}]
+            ),
+        },
+    )
+
+    prompts, completions = read_llm_exchange(span)
+
+    assert [message["role"] for message in prompts] == [
+        "system",
+        "user",
+        "assistant",
+        "system",
+    ]
+    assert prompts[0]["content"] == "FIXED"
+    assert prompts[1]["content"] == "hi"
+    assert prompts[2]["tool_calls"] == [{"id": "t1"}]
+    assert prompts[3]["content"] == "DELTA"
+    assert completions == [{"role": "assistant", "content": "done"}]
+
+
+def test_llm_exchange_still_reads_records_written_before_the_standard_shape() -> None:
+    """Stored trajectories keep the indexed keys and must stay readable."""
+    span = _span(
+        "llm",
+        attrs={
+            f"{semconv.GEN_AI_PROMPT}.0.role": "system",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "OLD SYS",
+            f"{semconv.GEN_AI_PROMPT}.1.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.1.content": "old hi",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "old done",
+        },
+    )
+
+    prompts, completions = read_llm_exchange(span)
+
+    assert prompts == [
+        {"role": "system", "content": "OLD SYS"},
+        {"role": "user", "content": "old hi"},
+    ]
+    assert completions == [{"role": "assistant", "content": "old done"}]
+
+
+def test_the_standard_shape_wins_over_indexed_keys_on_the_same_span() -> None:
+    """A span carrying both must read as the standard one, not the derived view."""
+    span = _span(
+        "llm",
+        attrs={
+            semconv.GEN_AI_INPUT_MESSAGES: json.dumps(
+                [{"role": "user", "parts": [{"type": "text", "content": "standard"}]}]
+            ),
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "indexed",
+        },
+    )
+
+    prompts, _ = read_llm_exchange(span)
+
+    assert prompts == [{"role": "user", "content": "standard"}]

@@ -529,12 +529,70 @@ def _message_list(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _structured_parts_text(parts: Any) -> str:
+    """Join the text carried by one message's structured parts."""
+
+    if not isinstance(parts, list):
+        return ""
+    texts: list[str] = []
+    for part in parts:
+        if isinstance(part, Mapping) and isinstance(part.get("content"), str):
+            texts.append(part["content"])
+    return "\n".join(texts)
+
+
+def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Collapse a structured message onto the flat role/content shape.
+
+    Standard GenAI messages carry their text in ``parts``; every consumer here
+    reads ``content``. Other fields (``tool_calls``, ``name``) pass through.
+    """
+
+    flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
+    if not isinstance(flat.get("content"), str):
+        flat["content"] = _structured_parts_text(message.get("parts"))
+    flat.setdefault("role", "unknown")
+    return flat
+
+
+def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read the standard input attributes back as one ordered message list.
+
+    ``gen_ai.system_instructions`` holds the instructions given outside the
+    chat history, so it leads; ``gen_ai.input.messages`` follows in order.
+    """
+
+    messages: list[dict[str, Any]] = []
+    system_text = _structured_parts_text(
+        _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
+    )
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.extend(
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+    )
+    return messages
+
+
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached LLM messages, preferring standard attributes over Langfuse mirrors."""
+    """Read detached LLM messages, preferring the standard GenAI attributes.
+
+    Indexed ``gen_ai.prompt.<n>`` keys and the Langfuse mirrors are read only
+    when the standard attributes are absent, which is the case for records
+    stored before instrumentation moved to a single standard shape.
+    """
 
     attrs = span_attributes(span)
-    prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
-    completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
+    prompts = _standard_prompt_messages(attrs)
+    completions = [
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+    ]
+    if not prompts:
+        prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
+    if not completions:
+        completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
     if not prompts:
         prompts = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
     if not completions:
