@@ -541,16 +541,35 @@ def _structured_parts_text(parts: Any) -> str:
     return "\n".join(texts)
 
 
+def _tool_calls_from_parts(parts: Any) -> list[dict[str, Any]]:
+    """Rebuild the flat tool-call list from a message's structured parts."""
+
+    if not isinstance(parts, list):
+        return []
+    tool_calls: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, Mapping) or part.get("type") != "tool_call":
+            continue
+        call = {key: deepcopy(value) for key, value in part.items() if key != "type"}
+        tool_calls.append(call)
+    return tool_calls
+
+
 def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
     """Collapse a structured message onto the flat role/content shape.
 
-    Standard GenAI messages carry their text in ``parts``; every consumer here
-    reads ``content``. Other fields (``tool_calls``, ``name``) pass through.
+    Standard GenAI messages carry their text and their tool calls as ``parts``;
+    every consumer here reads ``content`` and ``tool_calls``. Remaining fields
+    (``name``, ``finish_reason``) pass through untouched.
     """
 
     flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
     if not isinstance(flat.get("content"), str):
         flat["content"] = _structured_parts_text(message.get("parts"))
+    if "tool_calls" not in flat:
+        tool_calls = _tool_calls_from_parts(message.get("parts"))
+        if tool_calls:
+            flat["tool_calls"] = tool_calls
     flat.setdefault("role", "unknown")
     return flat
 
