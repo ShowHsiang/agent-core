@@ -32,6 +32,7 @@ from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import 
     _convert_tool_schemas,
     _last_input_is_transient,
     _mark_cache_control,
+    _supports_mid_conversation_system,
 )
 
 
@@ -98,6 +99,133 @@ class TestConvertMessageSchemas:
         ])
         assert system_blocks is None
         assert len(messages) == 1
+
+    def test_mid_conversation_system_stays_in_place_when_supported(self):
+        """Hoisting it would rewrite the prefix ahead of the whole history."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == ["user", "system"]
+        assert messages[1]["content"] == "DELTA"
+
+    def test_mid_conversation_system_is_hoisted_when_unsupported(self):
+        """Models without the capability answer 400, so keep the old shape."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=False,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "DELTA"},
+        ]
+        assert [message["role"] for message in messages] == ["user"]
+
+    def test_mid_conversation_system_after_a_tool_result_stays_in_place(self):
+        """Tool results become a user turn, which is a position the API allows."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "do it"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "t1", "type": "function",
+                     "function": {"name": "bash", "arguments": "{}"}},
+                ]},
+                {"role": "tool", "tool_call_id": "t1", "content": "ok"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+            "system",
+        ]
+
+    def test_a_system_turn_followed_by_a_user_turn_is_hoisted(self):
+        """The API needs it last or before an assistant turn; this is neither."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "sure"},
+                {"role": "system", "content": "DELTA"},
+                {"role": "user", "content": "again"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "DELTA"},
+        ]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+
+    def test_adjacent_system_turns_both_fall_back(self):
+        """Neither may assume the other gets moved away, so both are hoisted."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "D1"},
+                {"role": "system", "content": "D2"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "D1"},
+            {"type": "text", "text": "D2"},
+        ]
+        assert [message["role"] for message in messages] == ["user"]
+
+    def test_a_leading_system_turn_is_never_left_in_messages(self):
+        """``messages[0]`` can never be a system turn, capability or not."""
+        system_blocks, messages = _convert_message_schemas(
+            [{"role": "system", "content": "FIXED"}, {"role": "user", "content": "hi"}],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == ["user"]
+
+
+class TestMidConversationSystemSupport:
+    @pytest.mark.parametrize("model", [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "anthropic/claude-opus-5",
+        "us.anthropic.claude-opus-4-8-v1:0",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ])
+    def test_supported_models(self, model):
+        assert _supports_mid_conversation_system(model) is True
+
+    @pytest.mark.parametrize("model", [
+        "claude-sonnet-5",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-haiku-4-5",
+        "deepseek-v4-flash",
+        "",
+        None,
+    ])
+    def test_unsupported_models_keep_the_hoisting_behavior(self, model):
+        assert _supports_mid_conversation_system(model) is False
 
     def test_consecutive_tool_results_merged_into_one_user(self):
         _, messages = _convert_message_schemas([
@@ -455,6 +583,20 @@ class TestApplyMessagesCacheBreakpoint:
         messages = [{"role": "user", "content": "plain string"}]
         _apply_messages_cache_breakpoint(messages, exclude_tail=False)
         assert messages[0]["content"] == "plain string"
+
+    def test_a_system_tail_anchors_on_the_message_before_it(self):
+        # A mid-conversation system turn is plain text with no block to mark;
+        # walking back keeps the breakpoint instead of dropping it.
+        messages = [self._msg("a"), {"role": "system", "content": "DELTA"}]
+        _apply_messages_cache_breakpoint(messages, exclude_tail=False)
+        assert _is_5m_ephemeral(messages[0]["content"][0]["cache_control"])
+        assert messages[1]["content"] == "DELTA"
+
+    def test_only_unmarkable_messages_noop(self):
+        # Nothing to anchor on; must not raise or wrap around to the end.
+        messages = [{"role": "system", "content": "DELTA"}]
+        _apply_messages_cache_breakpoint(messages, exclude_tail=False)
+        assert messages[0]["content"] == "DELTA"
 
 
 # ---------------------------------------------------------------------------
