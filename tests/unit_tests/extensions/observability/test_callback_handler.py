@@ -428,9 +428,10 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
 
     llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
     attrs = llm_span.attributes
-    assert json.loads(attrs[GEN_AI_SYSTEM_INSTRUCTIONS]) == [
-        {"type": "text", "content": "Be precise"}
-    ]
+    # The only system turn here is injected prompt-attachment history, which
+    # belongs to the chat history rather than to the instructions given
+    # alongside it, so it stays in gen_ai.input.messages.
+    assert GEN_AI_SYSTEM_INSTRUCTIONS not in attrs
     request_messages = json.loads(attrs[OJ_GEN_AI_REQUEST_MESSAGES])
     assert [message["role"] for message in request_messages] == [
         "system",
@@ -446,14 +447,19 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         "mode": "snapshot",
     }
     input_messages = json.loads(attrs[GEN_AI_INPUT_MESSAGES])
-    assert input_messages[0]["parts"][0]["content"] == "hello"
-    assert input_messages[1]["parts"][0] == {
+    assert input_messages[0]["role"] == "system"
+    assert input_messages[0]["openjiuwen"] == {
+        "kind": "prompt_attachment_history",
+        "mode": "snapshot",
+    }
+    assert input_messages[1]["parts"][0]["content"] == "hello"
+    assert input_messages[2]["parts"][0] == {
         "type": "tool_call",
         "id": "call-0",
         "name": "lookup",
         "arguments": {"q": "x"},
     }
-    assert input_messages[2]["parts"][0] == {
+    assert input_messages[3]["parts"][0] == {
         "type": "tool_call_response",
         "id": "call-0",
         "name": "lookup",

@@ -1528,14 +1528,39 @@ class OtelCallbackHandler:
             json.dumps(request_messages, ensure_ascii=False, default=str),
         )
 
+    @staticmethod
+    def _is_prompt_attachment_history(message: Any) -> bool:
+        """Report whether this system message is injected dynamic context.
+
+        Prompt-attachment snapshots and deltas are written into the
+        conversation as it runs, so they belong to the chat history rather
+        than to the instructions given alongside it.
+        """
+
+        metadata = _get_field(message, "metadata")
+        return (
+            isinstance(metadata, Mapping)
+            and metadata.get("_openjiuwen_prompt_attachment_history") is True
+        )
+
     def _record_standard_structured_input(self, span: Span, messages: Any) -> None:
+        """Record the request as the two standard input attributes.
+
+        ``gen_ai.system_instructions`` is defined as the instructions supplied
+        separately from the chat history, which is the stable system prompt.
+        A system turn injected into the conversation -- prompt-attachment
+        history -- stays in ``gen_ai.input.messages`` as a ``system`` entry, so
+        its boundary and its history marker survive; flattening it in with the
+        instructions would lose both.
+        """
+
         normalized = self._normalize_messages(messages)
         system_parts: list[dict[str, Any]] = []
         input_messages: list[dict[str, Any]] = []
         for message in normalized:
             role = _message_role(message)
             structured = self._structured_message(message, is_output=False)
-            if role == "system":
+            if role == "system" and not self._is_prompt_attachment_history(message):
                 system_parts.extend(
                     self._structured_content_parts(
                         _message_content(message),

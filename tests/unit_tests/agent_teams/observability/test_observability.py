@@ -2962,3 +2962,49 @@ def test_a_subagent_spec_gets_the_agent_rail_only(in_memory_exporter):
     # Idempotent: wrapping the same spec twice must not stack rails.
     _attach_observability_rail(spec)
     assert len(spec.rails) == 1
+
+
+@pytest.mark.asyncio
+async def test_injected_system_turns_stay_in_the_chat_history(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """gen_ai.system_instructions is for instructions given outside the history.
+
+    The stable system prompt qualifies; a prompt-attachment snapshot written
+    into the conversation does not, and keeps its own message boundary and
+    history marker inside gen_ai.input.messages.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "go"},
+        {
+            "role": "system",
+            "content": "dynamic context",
+            "metadata": {
+                "_openjiuwen_prompt_attachment_history": True,
+                "mode": "snapshot",
+            },
+        },
+    ]
+    await fw.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=messages, model="fake-llm-1")
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="ok",
+        usage=_FakeUsage(),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    instructions = json.loads(_attr(span, "gen_ai.system_instructions"))
+    assert [part["content"] for part in instructions] == ["You are helpful."]
+
+    recorded = json.loads(_attr(span, "gen_ai.input.messages"))
+    assert [message["role"] for message in recorded] == ["user", "system"]
+    assert recorded[1]["openjiuwen"] == {
+        "kind": "prompt_attachment_history",
+        "mode": "snapshot",
+    }
