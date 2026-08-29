@@ -27,6 +27,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TRAJECTORY_REQUEST_ID,
     OJ_TRAJECTORY_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SEQUENCE_EPOCH,
     OJ_TRAJECTORY_SESSION_ID,
     OJ_TRAJECTORY_STEP_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
@@ -43,7 +44,8 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.extensions.observability.span_context import (
     advance_context_window,
-    next_trajectory_subject_sequence,
+    consume_context_window_compaction,
+    next_trajectory_subject_position,
 )
 
 
@@ -54,16 +56,23 @@ def emit_native_trajectory_event(
     event_kind: str,
     payload: dict[str, Any],
     subject_sequence: int | None = None,
+    sequence_epoch: str | None = None,
 ) -> Span | None:
     """Emit one immutable v2 event using the parent's concrete owner."""
     if not parent_span.is_recording():
         return None
     session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
     subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
-    sequence = subject_sequence or next_trajectory_subject_sequence(
-        session_id=session_id,
-        subject_id=subject_id,
-    )
+    if subject_sequence is None and sequence_epoch is None:
+        resolved_epoch, sequence = next_trajectory_subject_position(
+            session_id=session_id,
+            subject_id=subject_id,
+        )
+    elif subject_sequence is not None and sequence_epoch is not None:
+        resolved_epoch = sequence_epoch
+        sequence = subject_sequence
+    else:
+        raise ValueError("subject_sequence and sequence_epoch must be provided together")
     event_id = uuid.uuid4().hex
     parent_context = set_span_in_context(parent_span, otel_context.get_current())
     span = tracer.start_span(name=event_kind, context=parent_context, kind=SpanKind.INTERNAL)
@@ -73,6 +82,7 @@ def emit_native_trajectory_event(
         OJ_TRAJECTORY_EVENT_ID: event_id,
         OJ_TRAJECTORY_EVENT_KIND: event_kind,
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
+        OJ_TRAJECTORY_SEQUENCE_EPOCH: resolved_epoch,
         OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
         OJ_TRAJECTORY_SESSION_ID: session_id,
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
@@ -122,7 +132,7 @@ def emit_context_window_commit(
     session_id = str(llm_span.attributes.get(OJ_SESSION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     window_id = uuid.uuid4().hex
-    sequence, base_window_id, delta = advance_context_window(
+    sequence_epoch, sequence, base_window_id, delta = advance_context_window(
         session_id=session_id,
         subject_id=subject_id,
         window_id=window_id,
@@ -136,12 +146,26 @@ def emit_context_window_commit(
         "delta": delta,
         "request_purpose": request_purpose,
     }
+    caused_by_operation_id = consume_context_window_compaction(
+        session_id=session_id,
+        subject_id=subject_id,
+        request_id=str(llm_span.attributes.get(OJ_REQUEST_ID) or ""),
+        step_id=str(llm_span.attributes.get(OJ_STEP_ID) or ""),
+    )
+    if caused_by_operation_id is not None:
+        payload.update({
+            "transition_kind": "compaction",
+            "caused_by_operation_id": caused_by_operation_id,
+            "input_window_id": base_window_id,
+            "output_window_id": window_id,
+        })
     return emit_native_trajectory_event(
         tracer=tracer,
         parent_span=llm_span,
         event_kind="context.window.commit",
         payload=payload,
         subject_sequence=sequence,
+        sequence_epoch=sequence_epoch,
     )
 
 

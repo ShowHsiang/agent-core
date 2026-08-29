@@ -153,7 +153,11 @@ from openjiuwen.extensions.observability.span_context import (
 )
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
     OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
 )
 from openjiuwen.core.foundation.llm.call_scope import (
     expects_unified_llm_completion,
@@ -224,6 +228,39 @@ def _get_field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
     return getattr(value, name, default)
+
+
+def _trajectory_message_origin(
+    message: Any,
+    source_metadata: Any = None,
+) -> dict[str, str]:
+    """Return explicit origin facts without inspecting message content."""
+    metadata = _get_field(message, "metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    fallback_metadata = source_metadata if isinstance(source_metadata, Mapping) else {}
+    origin = (
+        metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA)
+        or fallback_metadata.get(OPENJIUWEN_MESSAGE_ORIGIN_METADATA)
+    )
+    external_user = (
+        _message_role(message) == "user"
+        and origin == OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER
+    )
+    result = {
+        "origin": (
+            OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER
+            if external_user
+            else OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL
+        )
+    }
+    source_kind = (
+        metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA)
+        or fallback_metadata.get(OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA)
+    )
+    if external_user and isinstance(source_kind, str) and source_kind.strip():
+        result["source_kind"] = source_kind.strip()
+    return result
 
 
 def _json_value_if_unchanged(raw: str, redacted: str) -> Any:
@@ -1516,18 +1553,24 @@ class OtelCallbackHandler:
             ids = self._message_occurrence_ids(normalized)
         result: list[dict[str, Any]] = []
         for index, message in enumerate(normalized):
+            source_message_metadata = (
+                source_metadata[index]
+                if index < len(source_metadata)
+                else None
+            )
             item: dict[str, Any] = {
                 "message_id": ids[index],
                 "role": _message_role(message),
                 "content": self._trajectory_value(_message_content(message)),
+                **_trajectory_message_origin(message, source_message_metadata),
             }
             for key in ("tool_calls", "tool_call_id", "name"):
                 value = _get_field(message, key)
                 if value not in (None, ""):
                     item[key] = self._trajectory_value(value)
             metadata = _get_field(message, "metadata")
-            if metadata is None and index < len(source_metadata):
-                metadata = source_metadata[index]
+            if metadata is None:
+                metadata = source_message_metadata
             if metadata is not None:
                 item["metadata"] = self._trajectory_value(metadata)
             result.append(item)

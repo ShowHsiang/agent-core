@@ -16,13 +16,18 @@ from openjiuwen.core.context_engine.schema.context_state import ContextCompressi
 from openjiuwen.extensions.observability.semconv import (
     GEN_AI_REQUEST_ID,
     OJ_CONTEXT_OPERATION_ID,
+    OJ_EXECUTION_SUBJECT_ID,
     OJ_INFERENCE_ID,
+    OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
+    OJ_SESSION_ID,
+    OJ_STEP_ID,
 )
 from openjiuwen.extensions.observability.span_context import (
     get_current_agent_span,
     get_current_llm_span,
     get_root_span,
+    queue_context_window_compaction,
 )
 from openjiuwen.extensions.observability.trajectory_events import emit_native_trajectory_event
 
@@ -79,12 +84,20 @@ class ContextCompressionObservabilityBridge:
             payload["context_id"] = str(kwargs.get("context_id") or "")
             payload["context_session_id"] = str(kwargs.get("session_id") or "")
             payload["model_requests"] = model_requests
-            emit_native_trajectory_event(
+            event = emit_native_trajectory_event(
                 tracer=self._tracer,
                 parent_span=parent_span,
                 event_kind="compaction.completed",
                 payload=payload,
             )
+            if event is not None:
+                queue_context_window_compaction(
+                    session_id=str(parent_span.attributes.get(OJ_SESSION_ID) or ""),
+                    subject_id=str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main"),
+                    request_id=str(parent_span.attributes.get(OJ_REQUEST_ID) or ""),
+                    step_id=str(parent_span.attributes.get(OJ_STEP_ID) or ""),
+                    operation_id=state.operation_id,
+                )
         except Exception as exc:
             logger.warning("otel: context compression completion bridge failed - {}", exc)
 

@@ -8,6 +8,10 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
 OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
+OPENJIUWEN_MESSAGE_ORIGIN_METADATA = "_openjiuwen_message_origin"
+OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA = "_openjiuwen_message_source_kind"
+OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER = "external_user"
+OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL = "harness_internal"
 
 
 class UsageMetadata(BaseModel):

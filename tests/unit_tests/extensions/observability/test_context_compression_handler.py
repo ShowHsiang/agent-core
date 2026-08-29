@@ -47,6 +47,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_NUMBER,
 )
 from openjiuwen.extensions.observability.span_context import reset_state
+from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 
 
 def _state(status: str) -> ContextCompressionState:
@@ -125,8 +126,50 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
                 )
                 assert llm_span.attributes[OJ_REQUEST_PURPOSE] == "compaction"
                 assert llm_span.attributes[OJ_CONTEXT_OPERATION_ID] == "compression-operation-1"
+            with tracer.start_as_current_span(
+                "llm.call",
+                attributes=parent_attributes,
+            ) as baseline_llm_span:
+                emit_context_window_commit(
+                    tracer=tracer,
+                    llm_span=baseline_llm_span,
+                    messages=[{
+                        "message_id": "message-before-compaction",
+                        "role": "user",
+                        "content": "before",
+                    }],
+                    request_purpose="assistant",
+                )
             await recorder.emit(object(), _state("started"))
             await recorder.emit(object(), _state("completed"))
+            with tracer.start_as_current_span(
+                "llm.call",
+                attributes=parent_attributes,
+            ) as next_llm_span:
+                emit_context_window_commit(
+                    tracer=tracer,
+                    llm_span=next_llm_span,
+                    messages=[{
+                        "message_id": "message-after-compaction",
+                        "role": "user",
+                        "content": "continue",
+                    }],
+                    request_purpose="assistant",
+                )
+            with tracer.start_as_current_span(
+                "llm.call",
+                attributes=parent_attributes,
+            ) as later_llm_span:
+                emit_context_window_commit(
+                    tracer=tracer,
+                    llm_span=later_llm_span,
+                    messages=[{
+                        "message_id": "message-after-compaction",
+                        "role": "user",
+                        "content": "continue",
+                    }],
+                    request_purpose="assistant",
+                )
 
         spans = list(exporter.get_finished_spans())
         events = [span for span in spans if span.name == "compaction.completed"]
@@ -137,7 +180,7 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
         assert event.attributes[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
         assert event.attributes[OJ_TRAJECTORY_EVENT_KIND] == "compaction.completed"
         assert event.attributes[OJ_TRAJECTORY_SUBJECT_ID] == "subagent:one"
-        assert event.attributes[OJ_TRAJECTORY_SUBJECT_SEQUENCE] == 1
+        assert event.attributes[OJ_TRAJECTORY_SUBJECT_SEQUENCE] == 2
         assert event.attributes[OJ_TRAJECTORY_SESSION_ID] == "root-session-1"
         assert event.attributes[OJ_TRAJECTORY_TURN_ID] == "turn-1"
         assert event.attributes[OJ_TRAJECTORY_STEP_ID] == "step-1"
@@ -158,6 +201,24 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
             "request_id": "compaction-request-1",
             "inference_id": "compaction-inference-1",
         }]
+        context_events = [span for span in spans if span.name == "context.window.commit"]
+        assert len(context_events) == 3
+        baseline_payload = json.loads(
+            context_events[0].attributes[OJ_TRAJECTORY_PAYLOAD]
+        )
+        transition_payload = json.loads(
+            context_events[1].attributes[OJ_TRAJECTORY_PAYLOAD]
+        )
+        assert transition_payload["transition_kind"] == "compaction"
+        assert transition_payload["caused_by_operation_id"] == "compression-operation-1"
+        assert transition_payload["input_window_id"] == baseline_payload["window_id"]
+        assert transition_payload["input_window_id"] == transition_payload["base_window_id"]
+        assert transition_payload["output_window_id"] == transition_payload["window_id"]
+        later_payload = json.loads(context_events[2].attributes[OJ_TRAJECTORY_PAYLOAD])
+        assert "transition_kind" not in later_payload
+        assert "caused_by_operation_id" not in later_payload
+        assert "input_window_id" not in later_payload
+        assert "output_window_id" not in later_payload
     finally:
         runtime.shutdown()
         reset_state()

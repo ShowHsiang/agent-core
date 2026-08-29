@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from copy import deepcopy
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -486,12 +487,18 @@ _root_registry: dict[str, Span] = {}
 _root_registry_lock = threading.RLock()
 _execution_subject_request_sequences: dict[tuple[str, str], int] = {}
 _execution_subject_request_sequence_lock = threading.Lock()
+_trajectory_sequence_epoch = uuid.uuid4().hex
 _trajectory_subject_sequences: dict[tuple[str, str], int] = {}
 _trajectory_subject_states: dict[
     tuple[str, str],
     tuple[str, tuple[tuple[str, str], ...]],
 ] = {}
 _trajectory_subject_state_lock = threading.Lock()
+_pending_context_window_compactions: dict[
+    tuple[str, str, str, str],
+    list[str],
+] = {}
+_pending_context_window_compactions_lock = threading.Lock()
 _ambient_root_span: Span | None = None
 
 
@@ -525,13 +532,80 @@ def next_execution_subject_request_number(
     return request_number
 
 
+def queue_context_window_compaction(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+    operation_id: str,
+) -> bool:
+    """Queue one completed compaction for its next matching context window."""
+    key = _context_window_transition_key(
+        session_id=session_id,
+        subject_id=subject_id,
+        request_id=request_id,
+        step_id=step_id,
+    )
+    resolved_operation_id = str(operation_id or "").strip()
+    if key is None or not resolved_operation_id:
+        return False
+    with _pending_context_window_compactions_lock:
+        pending = _pending_context_window_compactions.setdefault(key, [])
+        if resolved_operation_id not in pending:
+            pending.append(resolved_operation_id)
+    return True
+
+
+def consume_context_window_compaction(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+) -> str | None:
+    """Consume the oldest compaction for exactly one routed context window."""
+    key = _context_window_transition_key(
+        session_id=session_id,
+        subject_id=subject_id,
+        request_id=request_id,
+        step_id=step_id,
+    )
+    if key is None:
+        return None
+    with _pending_context_window_compactions_lock:
+        pending = _pending_context_window_compactions.get(key)
+        if not pending:
+            return None
+        operation_id = pending.pop(0)
+        if not pending:
+            _pending_context_window_compactions.pop(key, None)
+        return operation_id
+
+
+def _context_window_transition_key(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+) -> tuple[str, str, str, str] | None:
+    values = tuple(
+        str(value or "").strip()
+        for value in (session_id, subject_id, request_id, step_id)
+    )
+    if any(not value for value in values):
+        return None
+    return cast(tuple[str, str, str, str], values)
+
+
 def advance_context_window(
     *,
     session_id: str,
     subject_id: str,
     window_id: str,
     messages: list[dict[str, Any]],
-) -> tuple[int, str | None, list[dict[str, Any]]]:
+) -> tuple[str, int, str | None, list[dict[str, Any]]]:
     """Atomically advance one subject's canonical context-window state.
 
     Occurrence identity is the message_id carried by each canonical message.
@@ -547,6 +621,7 @@ def advance_context_window(
     )
     with _trajectory_subject_state_lock:
         previous = _trajectory_subject_states.get(key)
+        sequence_epoch = _trajectory_sequence_epoch
         sequence = _next_trajectory_subject_sequence_locked(key)
         base_window_id = previous[0] if previous is not None else None
         before = previous[1] if previous is not None else ()
@@ -592,14 +667,15 @@ def advance_context_window(
                 })
 
         _trajectory_subject_states[key] = (str(window_id), current)
-        return sequence, base_window_id, delta
+        return sequence_epoch, sequence, base_window_id, delta
 
 
-def next_trajectory_subject_sequence(*, session_id: str, subject_id: str) -> int:
-    """Allocate one sequence shared by every v2 event kind for a subject."""
+def next_trajectory_subject_position(*, session_id: str, subject_id: str) -> tuple[str, int]:
+    """Allocate one epoch-scoped sequence shared by every v2 event kind."""
     key = (_normalize_session_id(session_id), str(subject_id))
     with _trajectory_subject_state_lock:
-        return _next_trajectory_subject_sequence_locked(key)
+        sequence = _next_trajectory_subject_sequence_locked(key)
+        return _trajectory_sequence_epoch, sequence
 
 
 def _next_trajectory_subject_sequence_locked(key: tuple[str, str]) -> int:
@@ -913,6 +989,8 @@ def pop_any_tool_span() -> Span | None:
 
 def reset_state() -> None:
     """Reset all per-task span trackers. Used by tests between cases."""
+    global _trajectory_sequence_epoch
+
     clear_root_span()
     _current_agent_span.set(None)
     _tool_span_map.set({})
@@ -923,8 +1001,11 @@ def reset_state() -> None:
     with _execution_subject_request_sequence_lock:
         _execution_subject_request_sequences.clear()
     with _trajectory_subject_state_lock:
+        _trajectory_sequence_epoch = uuid.uuid4().hex
         _trajectory_subject_sequences.clear()
         _trajectory_subject_states.clear()
+    with _pending_context_window_compactions_lock:
+        _pending_context_window_compactions.clear()
 
 
 def flush_child_spans(*, trace_id: int | None = None) -> int:

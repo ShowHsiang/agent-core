@@ -26,7 +26,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
 # Messages
 from openjiuwen.core.foundation.llm.schema.message import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
     OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     BaseMessage,
     AssistantMessage,
     UserMessage,
@@ -89,8 +93,12 @@ _MESSAGE_CLASSES = [
     "UsageMetadata",
 ]
 
-_MESSAGE_METADATA_KEYS = [
+_MESSAGE_METADATA_CONSTANTS = [
+    "OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER",
+    "OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL",
+    "OPENJIUWEN_MESSAGE_ORIGIN_METADATA",
     "OPENJIUWEN_MESSAGE_PROVENANCE_METADATA",
+    "OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA",
 ]
 
 # Streaming message classes
@@ -121,7 +129,7 @@ __all__ = (
     + _CONFIG_CLASSES
     + _REASONING_APIS
     + _MESSAGE_CLASSES
-    + _MESSAGE_METADATA_KEYS
+    + _MESSAGE_METADATA_CONSTANTS
     + _MESSAGE_CHUNK_CLASSES
     + _TOOL_CLASSES
     + _PREBUILT_MODEL_CLIENTS

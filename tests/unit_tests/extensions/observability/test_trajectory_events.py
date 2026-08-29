@@ -32,6 +32,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_EVENT_KIND,
     OJ_TRAJECTORY_PAYLOAD,
     OJ_TRAJECTORY_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SEQUENCE_EPOCH,
     OJ_TRAJECTORY_SESSION_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
@@ -42,7 +43,10 @@ from openjiuwen.extensions.observability.span_context import (
     reset_state,
     set_root_span,
 )
-from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
+from openjiuwen.extensions.observability.trajectory_events import (
+    emit_context_window_commit,
+    emit_native_trajectory_event,
+)
 
 
 def _attrs(span) -> dict:
@@ -127,6 +131,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     assert attrs[OJ_TRACE_SCHEMA_VERSION] == "2"
     assert attrs[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
     assert attrs[OJ_TRAJECTORY_EVENT_KIND] == "context.window.commit"
+    assert len(attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH]) == 32
     assert attrs[OJ_TRAJECTORY_SESSION_ID] == "pressure-session"
     assert attrs[OJ_SESSION_ID] == "pressure-session"
     assert attrs[OJ_REQUEST_ID] == "request-1"
@@ -263,6 +268,96 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     third_ops = {(item["op"], item["message_id"]) for item in payloads[2]["delta"]}
     assert {("remove", "a"), ("move", "c"), ("insert", "d")} <= third_ops
     assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b", "c"]
+
+
+def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_traces() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-epoch-test")
+    parents = [
+        tracer.start_span(
+            "agent.root",
+            attributes={
+                OJ_SESSION_ID: session_id,
+                OJ_EXECUTION_SUBJECT_ID: subject_id,
+            },
+        )
+        for session_id, subject_id in (
+            ("shared-session", "subject-a"),
+            ("shared-session", "subject-a"),
+            ("other-session", "subject-b"),
+        )
+    ]
+    try:
+        emit_native_trajectory_event(
+            tracer=tracer,
+            parent_span=parents[0],
+            event_kind="test.first",
+            payload={"index": 1},
+        )
+        emit_native_trajectory_event(
+            tracer=tracer,
+            parent_span=parents[1],
+            event_kind="test.second",
+            payload={"index": 2},
+        )
+        emit_native_trajectory_event(
+            tracer=tracer,
+            parent_span=parents[2],
+            event_kind="test.other-subject",
+            payload={"index": 3},
+        )
+    finally:
+        for parent in parents:
+            parent.end()
+        provider.shutdown()
+        reset_state()
+
+    events = [span for span in exporter.get_finished_spans() if span.name.startswith("test.")]
+    assert len({_attrs(span)[OJ_TRAJECTORY_SEQUENCE_EPOCH] for span in events}) == 1
+    assert [_attrs(span)[OJ_TRAJECTORY_SUBJECT_SEQUENCE] for span in events] == [1, 2, 1]
+
+
+def test_reset_state_rotates_epoch_and_restarts_subject_sequence() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-epoch-reset-test")
+    parent = tracer.start_span(
+        "agent.root",
+        attributes={
+            OJ_SESSION_ID: "reset-session",
+            OJ_EXECUTION_SUBJECT_ID: "reset-subject",
+        },
+    )
+    try:
+        emit_native_trajectory_event(
+            tracer=tracer,
+            parent_span=parent,
+            event_kind="test.before-reset",
+            payload={},
+        )
+        reset_state()
+        emit_native_trajectory_event(
+            tracer=tracer,
+            parent_span=parent,
+            event_kind="test.after-reset",
+            payload={},
+        )
+    finally:
+        parent.end()
+        provider.shutdown()
+        reset_state()
+
+    before, after = [
+        span for span in exporter.get_finished_spans() if span.name.startswith("test.")
+    ]
+    before_attrs = _attrs(before)
+    after_attrs = _attrs(after)
+    assert before_attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH] != after_attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH]
+    assert before_attrs[OJ_TRAJECTORY_SUBJECT_SEQUENCE] == 1
+    assert after_attrs[OJ_TRAJECTORY_SUBJECT_SEQUENCE] == 1
 
 
 @pytest.mark.asyncio

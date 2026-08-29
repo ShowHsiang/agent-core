@@ -51,6 +51,9 @@ from openjiuwen.core.context_engine.usage import (
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     ToolMessage,
     UserMessage,
     SystemMessage
@@ -920,7 +923,13 @@ class ReActAgent(BaseAgent):
             return
         await self._sync_prompt_attachments(ctx, context)
         body = "\n".join(parts)
-        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+        await context.add_messages(UserMessage(
+            content=f"{prefix}{body}",
+            metadata={
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+            },
+        ))
 
     async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[str]:
         """Take the share of the steering backlog this model call absorbs.
