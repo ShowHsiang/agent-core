@@ -605,7 +605,7 @@ def advance_context_window(
     subject_id: str,
     window_id: str,
     messages: list[dict[str, Any]],
-) -> tuple[str, int, str | None, list[dict[str, Any]]]:
+) -> tuple[str, int, str | None, list[dict[str, Any]], bool]:
     """Atomically advance one subject's canonical context-window state.
 
     Occurrence identity is the message_id carried by each canonical message.
@@ -621,6 +621,7 @@ def advance_context_window(
     )
     with _trajectory_subject_state_lock:
         previous = _trajectory_subject_states.get(key)
+        is_epoch_baseline = previous is None
         sequence_epoch = _trajectory_sequence_epoch
         sequence = _next_trajectory_subject_sequence_locked(key)
         base_window_id = previous[0] if previous is not None else None
@@ -636,38 +637,39 @@ def advance_context_window(
         }
         delta: list[dict[str, Any]] = []
 
-        for message_id, (index, _fingerprint) in before_by_id.items():
-            if message_id not in current_by_id:
-                delta.append({"op": "remove", "message_id": message_id, "index": index})
+        if not is_epoch_baseline:
+            for message_id, (index, _fingerprint) in before_by_id.items():
+                if message_id not in current_by_id:
+                    delta.append({"op": "remove", "message_id": message_id, "index": index})
 
-        for message_id, (index, fingerprint, message) in current_by_id.items():
-            prior = before_by_id.get(message_id)
-            if prior is None:
-                delta.append({
-                    "op": "insert",
-                    "message_id": message_id,
-                    "index": index,
-                    "message": deepcopy(message),
-                })
-                continue
-            prior_index, prior_fingerprint = prior
-            if prior_index != index:
-                delta.append({
-                    "op": "move",
-                    "message_id": message_id,
-                    "from_index": prior_index,
-                    "index": index,
-                })
-            if prior_fingerprint != fingerprint:
-                delta.append({
-                    "op": "replace",
-                    "message_id": message_id,
-                    "index": index,
-                    "message": deepcopy(message),
-                })
+            for message_id, (index, fingerprint, message) in current_by_id.items():
+                prior = before_by_id.get(message_id)
+                if prior is None:
+                    delta.append({
+                        "op": "insert",
+                        "message_id": message_id,
+                        "index": index,
+                        "message": deepcopy(message),
+                    })
+                    continue
+                prior_index, prior_fingerprint = prior
+                if prior_index != index:
+                    delta.append({
+                        "op": "move",
+                        "message_id": message_id,
+                        "from_index": prior_index,
+                        "index": index,
+                    })
+                if prior_fingerprint != fingerprint:
+                    delta.append({
+                        "op": "replace",
+                        "message_id": message_id,
+                        "index": index,
+                        "message": deepcopy(message),
+                    })
 
         _trajectory_subject_states[key] = (str(window_id), current)
-        return sequence_epoch, sequence, base_window_id, delta
+        return sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline
 
 
 def next_trajectory_subject_position(*, session_id: str, subject_id: str) -> tuple[str, int]:

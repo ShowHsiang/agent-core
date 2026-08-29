@@ -26,6 +26,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
+    OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_EVENT_ID,
@@ -40,6 +41,7 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.extensions.observability.span_context import (
     clear_root_span,
+    queue_context_window_compaction,
     reset_state,
     set_root_span,
 )
@@ -142,7 +144,10 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     assert len(attrs[OJ_TRAJECTORY_EVENT_ID]) == 32
     assert payload["complete"] is True
     assert len(payload["messages"]) == 111
-    assert len(payload["delta"]) == 111
+    assert payload["base_window_id"] is None
+    assert payload["transition_kind"] == "epoch_baseline"
+    assert payload["baseline_reason"] == "runtime_epoch_start"
+    assert payload["delta"] == []
 
 
 @pytest.mark.asyncio
@@ -261,6 +266,10 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     payloads = [_payload(span) for span in events]
     assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b", "c"]
     assert [message["content"] for message in payloads[0]["messages"][:2]] == ["same", "same"]
+    assert payloads[0]["base_window_id"] is None
+    assert payloads[0]["transition_kind"] == "epoch_baseline"
+    assert payloads[0]["baseline_reason"] == "runtime_epoch_start"
+    assert payloads[0]["delta"] == []
     assert payloads[1]["base_window_id"] == payloads[0]["window_id"]
     assert payloads[2]["base_window_id"] == payloads[1]["window_id"]
     second_ops = {(item["op"], item["message_id"]) for item in payloads[1]["delta"]}
@@ -268,6 +277,100 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     third_ops = {(item["op"], item["message_id"]) for item in payloads[2]["delta"]}
     assert {("remove", "a"), ("move", "c"), ("insert", "d")} <= third_ops
     assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b", "c"]
+
+
+def test_context_window_first_commit_after_epoch_rotation_is_a_full_baseline() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-epoch-baseline-test")
+    parent = tracer.start_span(
+        "llm.call",
+        attributes={
+            OJ_SESSION_ID: "baseline-session",
+            OJ_EXECUTION_SUBJECT_ID: "baseline-subject",
+        },
+    )
+    messages = [{
+        "message_id": "stable-system",
+        "role": "system",
+        "content": "unchanged",
+    }]
+    try:
+        emit_context_window_commit(
+            tracer=tracer,
+            llm_span=parent,
+            messages=messages,
+            request_purpose="assistant",
+        )
+        reset_state()
+        emit_context_window_commit(
+            tracer=tracer,
+            llm_span=parent,
+            messages=messages,
+            request_purpose="assistant",
+        )
+    finally:
+        parent.end()
+        provider.shutdown()
+        reset_state()
+
+    events = [span for span in exporter.get_finished_spans() if span.name == "context.window.commit"]
+    assert len(events) == 2
+    assert len({_attrs(span)[OJ_TRAJECTORY_SEQUENCE_EPOCH] for span in events}) == 2
+    for event in events:
+        payload = _payload(event)
+        assert payload["base_window_id"] is None
+        assert payload["complete"] is True
+        assert payload["transition_kind"] == "epoch_baseline"
+        assert payload["baseline_reason"] == "runtime_epoch_start"
+        assert payload["messages"] == messages
+        assert payload["delta"] == []
+
+
+def test_epoch_baseline_preserves_compaction_correlation_independently() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-baseline-compaction-test")
+    parent = tracer.start_span(
+        "llm.call",
+        attributes={
+            OJ_SESSION_ID: "baseline-compaction-session",
+            OJ_EXECUTION_SUBJECT_ID: "baseline-compaction-subject",
+            OJ_REQUEST_ID: "request-1",
+            OJ_STEP_ID: "step-1",
+        },
+    )
+    try:
+        queued = queue_context_window_compaction(
+            session_id="baseline-compaction-session",
+            subject_id="baseline-compaction-subject",
+            request_id="request-1",
+            step_id="step-1",
+            operation_id="operation-1",
+        )
+        assert queued is True
+        emit_context_window_commit(
+            tracer=tracer,
+            llm_span=parent,
+            messages=[{"message_id": "summary", "role": "user", "content": "compacted"}],
+            request_purpose="assistant",
+        )
+    finally:
+        parent.end()
+        provider.shutdown()
+        reset_state()
+
+    event = next(span for span in exporter.get_finished_spans() if span.name == "context.window.commit")
+    payload = _payload(event)
+    assert payload["transition_kind"] == "epoch_baseline"
+    assert payload["baseline_reason"] == "runtime_epoch_start"
+    assert payload["correlation_kind"] == "compaction"
+    assert payload["caused_by_operation_id"] == "operation-1"
+    assert payload["input_window_id"] is None
+    assert payload["output_window_id"] == payload["window_id"]
+    assert payload["delta"] == []
 
 
 def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_traces() -> None:

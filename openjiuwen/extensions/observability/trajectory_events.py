@@ -132,7 +132,7 @@ def emit_context_window_commit(
     session_id = str(llm_span.attributes.get(OJ_SESSION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     window_id = uuid.uuid4().hex
-    sequence_epoch, sequence, base_window_id, delta = advance_context_window(
+    sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline = advance_context_window(
         session_id=session_id,
         subject_id=subject_id,
         window_id=window_id,
@@ -146,6 +146,11 @@ def emit_context_window_commit(
         "delta": delta,
         "request_purpose": request_purpose,
     }
+    if is_epoch_baseline:
+        payload.update({
+            "transition_kind": "epoch_baseline",
+            "baseline_reason": "runtime_epoch_start",
+        })
     caused_by_operation_id = consume_context_window_compaction(
         session_id=session_id,
         subject_id=subject_id,
@@ -154,11 +159,14 @@ def emit_context_window_commit(
     )
     if caused_by_operation_id is not None:
         payload.update({
-            "transition_kind": "compaction",
             "caused_by_operation_id": caused_by_operation_id,
             "input_window_id": base_window_id,
             "output_window_id": window_id,
         })
+        if is_epoch_baseline:
+            payload["correlation_kind"] = "compaction"
+        else:
+            payload["transition_kind"] = "compaction"
     return emit_native_trajectory_event(
         tracer=tracer,
         parent_span=llm_span,
