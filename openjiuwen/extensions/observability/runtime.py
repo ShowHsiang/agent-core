@@ -14,6 +14,8 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
+
+from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -143,7 +145,10 @@ class ObservabilityRuntime:
                 )
                 provider.add_span_processor(tracker)
 
-                exporter = span_exporter_override or build_span_exporter(config)
+                exporter = project_for_backend(
+                    span_exporter_override or build_span_exporter(config),
+                    config.backend,
+                )
                 if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
                     provider.add_span_processor(SimpleSpanProcessor(exporter))
                 else:
