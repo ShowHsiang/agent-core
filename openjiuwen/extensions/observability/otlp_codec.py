@@ -41,7 +41,7 @@ def _fix_hex_ids(node: Any) -> None:
 
 def _encode_readable_span(span: ReadableSpan) -> bytes:
     request = encode_spans([span])
-    payload = json_format.MessageToDict(request)
+    payload = json_format.MessageToDict(request, use_integers_for_enums=True)
     _fix_hex_ids(payload)
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
