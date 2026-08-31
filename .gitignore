@@ -288,3 +288,5 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 /.codex/
 /.agents/
 /AGENTS.local.md
+/records/
+/sub_agents/
