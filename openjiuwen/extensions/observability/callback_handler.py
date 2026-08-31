@@ -75,6 +75,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_OUTPUT,
     GEN_AI_TOOL_ID,
+    GEN_AI_TOOL_TYPE,
     GEN_AI_TOOL_CALLS,
     GEN_AI_TOOL_DEFINITIONS,
     GEN_AI_USAGE_COMPLETION_TOKENS,
@@ -129,6 +130,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
+    OJ_TOOL_RESOURCE_ID,
+    OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -709,7 +712,7 @@ class OtelCallbackHandler:
             tool_id = kwargs.get("tool_id")
             inputs = kwargs.get("inputs")
 
-            authoritative = self._matching_authoritative_tool_span(tool_name)
+            authoritative = self._matching_authoritative_tool_span(tool_name, tool_id)
             if authoritative is not None:
                 # The Ability rail owns start/end, but this lower-level event
                 # has the exact legacy input tuple and resource id. Enrich the
@@ -755,7 +758,8 @@ class OtelCallbackHandler:
         try:
             tool_name = str(kwargs.get("tool_name") or "unknown")
             result = kwargs.get("result")
-            authoritative = self._matching_authoritative_tool_span(tool_name)
+            tool_id = kwargs.get("tool_id")
+            authoritative = self._matching_authoritative_tool_span(tool_name, tool_id)
             if authoritative is not None:
                 serialized_output = self._serialize_tool_result(result)
                 redacted = redact_completion(serialized_output, self._config)
@@ -799,7 +803,8 @@ class OtelCallbackHandler:
         try:
             tool_name = str(kwargs.get("tool_name") or "unknown")
             exc = kwargs.get("error") or kwargs.get("exception")
-            if self._matching_authoritative_tool_span(tool_name) is not None:
+            tool_id = kwargs.get("tool_id")
+            if self._matching_authoritative_tool_span(tool_name, tool_id) is not None:
                 return
             span = pop_tool_span(tool_name)
             if span is None:
@@ -1925,13 +1930,31 @@ class OtelCallbackHandler:
         return request_number
 
     @staticmethod
-    def _matching_authoritative_tool_span(tool_name: str) -> Span | None:
+    def _matching_authoritative_tool_span(
+        tool_name: str,
+        tool_id: Any = None,
+    ) -> Span | None:
         span = get_current_tool_span()
         if span is None or not span.is_recording():
             return None
         if not span.attributes.get(OJ_TOOL_AUTHORITATIVE):
             return None
-        if str(span.attributes.get(GEN_AI_TOOL_NAME) or "") != tool_name:
+        if str(span.attributes.get(GEN_AI_TOOL_NAME) or "") == tool_name:
+            return span
+
+        tool_type = str(
+            span.attributes.get(OJ_TOOL_TYPE)
+            or span.attributes.get(GEN_AI_TOOL_TYPE)
+            or ""
+        )
+        if tool_type != "mcp" or tool_id is None:
+            return None
+        authoritative_id = str(
+            span.attributes.get(OJ_TOOL_RESOURCE_ID)
+            or span.attributes.get(GEN_AI_TOOL_ID)
+            or ""
+        )
+        if not authoritative_id or authoritative_id != str(tool_id):
             return None
         return span
 

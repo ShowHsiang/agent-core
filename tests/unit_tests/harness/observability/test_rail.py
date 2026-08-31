@@ -528,17 +528,17 @@ async def test_subagent_invoke_nests_under_the_tool_span_that_dispatched_it(trac
     )[0].attributes
 
 
-def _tool_ctx(agent, *, call_id: str, shared_extra=None):
+def _tool_ctx(agent, *, call_id: str, shared_extra=None, tool_name: str = "search"):
     return AgentCallbackContext(
         agent=agent,
         inputs=ToolCallInputs(
             tool_call=ToolCall(
                 id=call_id,
                 type="function",
-                name="search",
+                name=tool_name,
                 arguments='{"q":"hello"}',
             ),
-            tool_name="search",
+            tool_name=tool_name,
             tool_args='{"q":"hello"}',
         ),
         extra=shared_extra if shared_extra is not None else {},
@@ -783,6 +783,78 @@ async def test_concrete_tool_global_callbacks_enrich_without_duplicate_span(trac
     assert len(spans) == 1
     assert spans[0].attributes[GEN_AI_TOOL_CALL_ID] == "call-global"
     assert spans[0].attributes[GEN_AI_TOOL_ID] == "resource-search"
+
+
+@pytest.mark.asyncio
+async def test_mcp_raw_lifecycle_name_enriches_model_facing_authoritative_span(tracing):
+    resource_id = "playwright.playwright-official.browser_navigate"
+    model_name = "mcp_playwright-official_browser_navigate"
+    card = ToolCard(id=resource_id, name=model_name)
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(
+        get=lambda name: card,
+        _resolve_mcp_tool_scope=lambda name: ("playwright", "browser_navigate"),
+    )
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-mcp", tool_name=model_name)
+
+    await rail.before_tool_call(ctx)
+    await handler.on_tool_call_started(
+        tool_name="browser_navigate",
+        tool_id=resource_id,
+        inputs=(({"url": "https://example.test"},), {}),
+    )
+    await handler.on_tool_call_finished(
+        tool_name="browser_navigate",
+        tool_id=resource_id,
+        result={"ok": True},
+    )
+    ctx.inputs.tool_result = {"ok": True}
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    assert len(_finished(tracing.exporter, f"tool.{model_name}")) == 1
+    assert _finished(tracing.exporter, "tool.browser_navigate") == []
+
+
+@pytest.mark.asyncio
+async def test_non_mcp_name_mismatch_does_not_match_by_resource_id(tracing):
+    resource_id = "resource-wrapper"
+    card = ToolCard(id=resource_id, name="wrapper")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="otlp"),
+        tracer=tracing.tracer,
+    )
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    ctx = _tool_ctx(agent, call_id="call-wrapper", tool_name="wrapper")
+
+    await rail.before_tool_call(ctx)
+    await handler.on_tool_call_started(
+        tool_name="nested",
+        tool_id=resource_id,
+        inputs=((), {}),
+    )
+    await handler.on_tool_call_finished(
+        tool_name="nested",
+        tool_id=resource_id,
+        result="done",
+    )
+    ctx.inputs.tool_result = "done"
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    assert len(_finished(tracing.exporter, "tool.wrapper")) == 1
+    assert len(_finished(tracing.exporter, "tool.nested")) == 1
 
 
 @pytest.mark.asyncio
