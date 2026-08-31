@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import Span, StatusCode
+from opentelemetry.trace import Span, StatusCode, set_span_in_context
 from pydantic import BaseModel
 
 from openjiuwen.core.runner import Runner
@@ -40,6 +40,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_ID,
+    GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
     GEN_AI_RESPONSE_FINISH_REASON,
     GEN_AI_RESPONSE_FINISH_REASONS,
@@ -50,6 +51,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_DEFINITIONS,
     GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
@@ -104,6 +106,59 @@ class _LiveRecordConsumer:
 
     def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
         self.snapshots.append(record)
+
+
+def test_llm_span_omits_unknown_request_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = TracerProvider()
+    tracer = provider.get_tracer("unknown-model-test")
+    root = tracer.start_span("agent.root")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="unknown-model-test"),
+        tracer=tracer,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_get_parent_context_for_llm_tool",
+        lambda: set_span_in_context(root),
+    )
+
+    span = handler._open_llm_span({"messages": [], "model": "unknown"})
+
+    assert span is not None
+    assert GEN_AI_REQUEST_MODEL not in span.attributes
+    span.end()
+    root.end()
+    provider.shutdown()
+
+
+def test_usage_does_not_fallback_to_legacy_cache_fields() -> None:
+    provider = TracerProvider()
+    tracer = provider.get_tracer("standard-cache-test")
+    span = tracer.start_span("llm.call")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="standard-cache-test"),
+        tracer=tracer,
+    )
+    state = SimpleNamespace(
+        span=span,
+        first_chunk_ns=None,
+        last_chunk_ns=None,
+    )
+    usage = UsageMetadata(
+        input_tokens=100,
+        output_tokens=10,
+        total_tokens=110,
+        cache_tokens=90,
+        cache_creation_input_tokens=80,
+    )
+
+    handler._record_usage_attrs(state, usage)
+
+    assert GEN_AI_USAGE_CACHE_TOKENS not in span.attributes
+    assert GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS not in span.attributes
+    assert GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS not in span.attributes
+    span.end()
+    provider.shutdown()
 
 
 async def _emit_callback_flow(framework, session) -> None:
@@ -293,8 +348,10 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         input_tokens=11,
         output_tokens=7,
         total_tokens=18,
-        cache_tokens=3,
-        cache_creation_input_tokens=2,
+        cache_tokens=9,
+        cache_read_tokens=3,
+        cache_write_tokens=2,
+        cache_creation_input_tokens=8,
         reasoning_tokens=2,
         input_cost=0.1,
         output_cost=0.2,
@@ -465,6 +522,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     assert attrs[GEN_AI_USAGE_COMPLETION_TOKENS] == 5
     assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 11
     assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 7
+    assert GEN_AI_USAGE_CACHE_TOKENS not in attrs
     assert attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 3
     assert attrs[GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] == 2
     assert attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 2

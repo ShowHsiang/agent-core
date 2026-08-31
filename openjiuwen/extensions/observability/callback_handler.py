@@ -81,7 +81,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
-    GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
@@ -928,7 +927,7 @@ class OtelCallbackHandler:
             return
 
         messages = kwargs.get("messages") or []
-        model_name = kwargs.get("model") or self._derive_model_name(kwargs) or "unknown"
+        model_name = str(kwargs.get("model") or self._derive_model_name(kwargs) or "").strip()
         # Identity of the request this span stands for. Everything that
         # arrives later — chunks, usage, completion, errors — is matched back
         # to the span through it, so it must be read here, while the opening
@@ -950,7 +949,8 @@ class OtelCallbackHandler:
         span.set_attribute(GEN_AI_REQUEST_STREAM, is_streaming)
         provider_name = self._derive_provider_name(kwargs)
         span.set_attribute(GEN_AI_PROVIDER_NAME, provider_name)
-        span.set_attribute(GEN_AI_REQUEST_MODEL, str(model_name))
+        if model_name and model_name.lower() != "unknown":
+            span.set_attribute(GEN_AI_REQUEST_MODEL, model_name)
 
         for src_key, attr_key, caster in (
             ("temperature", GEN_AI_REQUEST_TEMPERATURE, float),
@@ -1327,7 +1327,13 @@ class OtelCallbackHandler:
             return
         prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        cache_tokens = int(getattr(usage, "cache_tokens", 0) or 0)
+        cache_read_raw = getattr(usage, "cache_read_tokens", None)
+        cache_read_tokens = (
+            max(int(cache_read_raw), 0)
+            if cache_read_raw is not None
+            else None
+        )
+        cache_tokens = cache_read_tokens or 0
         reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
         if self._config is not None and self._config.backend == "langfuse":
             if 0 < cache_tokens <= prompt_tokens:
@@ -1339,7 +1345,6 @@ class OtelCallbackHandler:
             (prompt_tokens, GEN_AI_USAGE_PROMPT_TOKENS),
             (completion_tokens, GEN_AI_USAGE_COMPLETION_TOKENS),
             (int(getattr(usage, "total_tokens", 0) or 0), GEN_AI_USAGE_TOTAL_TOKENS),
-            (cache_tokens, GEN_AI_USAGE_CACHE_TOKENS),
             (reasoning_tokens, GEN_AI_USAGE_REASONING_TOKENS),
         ):
             if value and not (skip_existing and state.span.attributes.get(dst_attr)):
@@ -1351,7 +1356,6 @@ class OtelCallbackHandler:
         raw_usage = (
             (int(getattr(usage, "input_tokens", 0) or 0), GEN_AI_USAGE_INPUT_TOKENS),
             (int(getattr(usage, "output_tokens", 0) or 0), GEN_AI_USAGE_OUTPUT_TOKENS),
-            (int(getattr(usage, "cache_tokens", 0) or 0), GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS),
             (
                 int(getattr(usage, "reasoning_tokens", 0) or 0),
                 GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
@@ -1360,13 +1364,20 @@ class OtelCallbackHandler:
         for value, dst_attr in raw_usage:
             if not (skip_existing and dst_attr in state.span.attributes):
                 state.span.set_attribute(dst_attr, value)
-        cache_creation = getattr(usage, "cache_creation_input_tokens", None)
-        if cache_creation is not None and not (
+        if cache_read_tokens is not None and not (
+            skip_existing and GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS in state.span.attributes
+        ):
+            state.span.set_attribute(
+                GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+                cache_read_tokens,
+            )
+        cache_write_tokens = getattr(usage, "cache_write_tokens", None)
+        if cache_write_tokens is not None and not (
             skip_existing and GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS in state.span.attributes
         ):
             state.span.set_attribute(
                 GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
-                max(int(cache_creation), 0),
+                max(int(cache_write_tokens), 0),
             )
 
         for value, dst_attr in (
