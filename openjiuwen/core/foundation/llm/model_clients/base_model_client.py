@@ -250,6 +250,22 @@ class BaseModelClient(ABC):
     @staticmethod
     def _extract_cache_creation_tokens(obj: Any) -> int | None:
         """Extract cache-write tokens only when the provider exposes them."""
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
         paths = (
             ("input_tokens_details", "cache_creation_tokens"),
             ("input_token_details", "cache_creation_tokens"),
