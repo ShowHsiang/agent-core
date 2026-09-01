@@ -148,6 +148,9 @@ OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_conte
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
+OJ_TEAM_ID = "openjiuwen.team.id"
+OJ_TEAM_NAME = "openjiuwen.team.name"
+OJ_TEAM_SESSION_ID = "openjiuwen.team.session.id"
 OJ_STREAM_KIND = "openjiuwen.stream.kind"
 OJ_STREAM_TEXT = "openjiuwen.stream.text"
 OJ_STREAM_TOOL_CALL_ID = "openjiuwen.stream.tool_call.id"

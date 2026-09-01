@@ -19,6 +19,8 @@ from openjiuwen.extensions.observability.otlp_codec import (
 )
 from openjiuwen.extensions.observability.semconv import (
     AT_SESSION_ID,
+    AT_TEAM_ID,
+    AT_TEAM_NAME,
     GEN_AI_CONVERSATION_ID,
     LANGFUSE_SESSION_ID,
     OJ_AGENT_MODE,
@@ -30,6 +32,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
+    OJ_TEAM_ID,
+    OJ_TEAM_NAME,
     OJ_TRACE_SCHEMA_VERSION,
 )
 
@@ -121,6 +125,16 @@ def _attribute_text(attributes: Any, *keys: str) -> str | None:
         text = str(value).strip()
         if text:
             return text
+    return None
+
+
+def _agent_mode(attributes: Any) -> str | None:
+    """Return the explicit request mode or infer Team from Team identity."""
+    explicit = _attribute_text(attributes, OJ_AGENT_MODE)
+    if explicit is not None:
+        return explicit
+    if _attribute_text(attributes, OJ_TEAM_ID, OJ_TEAM_NAME, AT_TEAM_ID, AT_TEAM_NAME) is not None:
+        return "team"
     return None
 
 
@@ -444,7 +458,7 @@ class SpanRecordProcessor(SpanProcessor):
             ),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
-            agent_mode=_attribute_text(attributes, OJ_AGENT_MODE),
+            agent_mode=_agent_mode(attributes),
             schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
             record_revision=record_revision,
             observed_time_unix_nano=time.time_ns(),
@@ -498,7 +512,7 @@ class SpanRecordProcessor(SpanProcessor):
             ),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
-            agent_mode=_attribute_text(attributes, OJ_AGENT_MODE),
+            agent_mode=_agent_mode(attributes),
             schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
             execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
             execution_subject_display_name=_attribute_text(

@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.execution_subject import ExecutionSubject
 from openjiuwen.harness.observability.span_context import (
     register_run_root_span,
     unregister_run_root_span,
@@ -73,6 +74,7 @@ def open_agent_run_span(
     run_id: str = "",
     turn_id: str = "",
     turn_number: int | None = None,
+    execution_subject: ExecutionSubject | None = None,
 ) -> Any:
     """Open the root span of a single-agent run.
 
@@ -83,6 +85,8 @@ def open_agent_run_span(
         run_id: Optional stable identity for this root run.
         turn_id: Optional identity for the user turn.
         turn_number: Optional known 1-based turn number.
+        execution_subject: Optional concrete owner for work that runs outside
+            the normal agent invoke/stream execution scope.
 
     Returns:
         An opaque handle to pass to :func:`close_agent_run_span`, or ``None``
@@ -100,6 +104,7 @@ def open_agent_run_span(
             OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
             OJ_EXECUTION_SUBJECT_ID,
             OJ_EXECUTION_SUBJECT_KIND,
+            OJ_EXECUTION_SUBJECT_PARENT_ID,
             OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,
@@ -124,6 +129,7 @@ def open_agent_run_span(
 
         tracer = get_tracer(_RUN_TRACER_NAME)
         name = build_run_span_name(mode=mode, session_id=session_id)
+        subject = execution_subject
         base_attributes: dict[str, Any] = {
             LANGFUSE_SESSION_ID: session_id or "",
             OJ_AGENT_MODE: mode or "",
@@ -132,11 +138,17 @@ def open_agent_run_span(
             GEN_AI_OPERATION_NAME: "invoke_agent",
             OJ_TRAJECTORY_RECORD_KIND: "turn",
             LANGFUSE_OBSERVATION_TYPE: "agent",
-            OJ_EXECUTION_SUBJECT_ID: "main",
-            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: "Main Agent",
-            OJ_EXECUTION_SUBJECT_KIND: "main_agent",
-            OJ_EXECUTION_SUBJECT_SESSION_ID: session_id or "",
+            OJ_EXECUTION_SUBJECT_ID: subject.subject_id if subject is not None else "main",
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (
+                subject.display_name if subject is not None else "Main Agent"
+            ),
+            OJ_EXECUTION_SUBJECT_KIND: subject.kind if subject is not None else "main_agent",
+            OJ_EXECUTION_SUBJECT_SESSION_ID: (
+                subject.session_id if subject is not None and subject.session_id else session_id or ""
+            ),
         }
+        if subject is not None and subject.parent_subject_id:
+            base_attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] = subject.parent_subject_id
         if session_id:
             base_attributes[GEN_AI_CONVERSATION_ID] = session_id
             base_attributes[OJ_SESSION_ID] = session_id

@@ -121,6 +121,45 @@ def emit_native_trajectory_event(
     return span
 
 
+def record_native_trajectory_log_event(
+    *,
+    parent_span: Span,
+    event_kind: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Record one immutable trajectory event on the current short-lived Span."""
+    if not parent_span.is_recording():
+        return False
+    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
+    sequence_epoch, sequence = next_trajectory_subject_position(
+        session_id=session_id,
+        subject_id=subject_id,
+    )
+    recorded_at = time.time_ns()
+    attributes: dict[str, Any] = {
+        OJ_TRAJECTORY_SCHEMA_VERSION: "2",
+        OJ_TRAJECTORY_EVENT_ID: uuid.uuid4().hex,
+        OJ_TRAJECTORY_EVENT_KIND: event_kind,
+        OJ_TRAJECTORY_SUBJECT_ID: subject_id,
+        OJ_TRAJECTORY_SEQUENCE_EPOCH: sequence_epoch,
+        OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
+        OJ_TRAJECTORY_SESSION_ID: session_id,
+        OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
+        OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
+    }
+    for source_key, target_key in (
+        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
+        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
+        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
+    ):
+        value = parent_span.attributes.get(source_key)
+        if value not in (None, ""):
+            attributes[target_key] = str(value)
+    parent_span.add_event(event_kind, attributes=attributes, timestamp=recorded_at)
+    return True
+
+
 def emit_context_window_commit(
     *,
     tracer: Tracer,
@@ -177,4 +216,8 @@ def emit_context_window_commit(
     )
 
 
-__all__ = ["emit_context_window_commit", "emit_native_trajectory_event"]
+__all__ = [
+    "emit_context_window_commit",
+    "emit_native_trajectory_event",
+    "record_native_trajectory_log_event",
+]
