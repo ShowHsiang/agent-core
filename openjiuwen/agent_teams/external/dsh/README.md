@@ -72,15 +72,26 @@ EOF；先等待 `stop()`、再回头读取事件，在缓冲区已满时会形�
 
 ## Optional SDK
 
-`deepseek-harness-sdk` 是 optional dependency。导入 OpenJiuwen、本包的 config/provider 或协议不会
-导入 SDK；只有 `DshHarness.start()` 才会 lazy import `deepseek_harness`。在 DSH 源码 checkout 中
-开发时可安装 Python SDK：
+`deepseek-harness-sdk` 是 optional dependency，声明在 pyproject 的 `dsh` extra 里。导入
+OpenJiuwen、本包的 config/provider 或协议不会导入 SDK；只有 `DshHarness.start()` 才会
+lazy import `deepseek_harness`（发布包名是 `deepseek-harness-sdk`，import 名不同）。
+
+```bash
+uv pip install 'openjiuwen[dsh]'
+```
+
+该 SDK 迄今只发布过预发布版本，因此 extra 的下限写成 `>=0.1.2a3`——PEP 440 要求约束里出现
+预发布标识，resolver 才会考虑预发布。它会连带装上同版本的 `deepseek-harness-runtime-bin`
+平台 wheel（覆盖 macOS arm64 / linux x86_64 / linux aarch64 / win amd64）。
+
+在 DSH 源码 checkout 中开发时改用可编辑安装：
 
 ```bash
 uv pip install -e /path/to/deepseek-harness/python/sdk
 ```
 
-缺少 SDK 时，start 会抛出 `ExternalHarnessError`，不会让公共 package import 失败。
+缺少 SDK 时，start 会抛出 `ExternalHarnessError`，不会让公共 package import 失败——单元测试
+因此不需要装 SDK，它们注入的是 fake `deepseek_harness` 模块。
 
 ## System prompt
 
