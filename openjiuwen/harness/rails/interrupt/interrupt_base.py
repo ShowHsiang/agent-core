@@ -128,7 +128,6 @@ class BaseInterruptRail(AgentRail):
             return
         try:
             import json
-            from pydantic import BaseModel
             from openjiuwen.extensions.observability.span_context import (
                 get_current_agent_span,
                 get_root_span,
@@ -191,8 +190,9 @@ class BaseInterruptRail(AgentRail):
                 event_kind=event_kind,
                 payload=payload,
             )
-        except Exception:
-            return
+        except Exception as e:
+            # Trajectory bookkeeping must never break the interrupt path.
+            logger.debug("failed to record ask_user trajectory event: {}", e)
 
     async def resolve_interrupt(
             self,

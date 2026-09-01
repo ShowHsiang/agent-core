@@ -51,9 +51,13 @@ class TeamContextAwareRuntime(Protocol):
     """Behavior used by coordination handlers to push roster announcements."""
 
     @property
-    def state(self) -> HarnessState: ...
+    def state(self) -> HarnessState:
+        """Return the current harness state."""
+        ...
 
-    async def announce_team_context(self) -> None: ...
+    async def announce_team_context(self) -> None:
+        """Push the pending team roster announcement to the member."""
+        ...
 
 
 class ExternalHarnessMemberRuntime:
@@ -160,8 +164,6 @@ class ExternalHarnessMemberRuntime:
         if task is not None and task is not asyncio.current_task():
             try:
                 await task
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 team_logger.exception("external harness event pump failed during stop")
         self._output_queue.put_nowait(_END)
@@ -297,7 +299,8 @@ class ExternalHarnessMemberRuntime:
             emitted = text
             self._output_text[output.output_id] = text
         elif text.startswith(previous):
-            emitted = text[len(previous) :]
+            overlap = len(previous)
+            emitted = text[overlap:]
             self._output_text[output.output_id] = text
         else:
             # Internal OutputSchema has append-only semantics.  The public
@@ -406,17 +409,21 @@ class ExternalHarnessMemberRuntime:
         await self._team_context_tracker.commit(self._member_session)
 
     # External harnesses own their own rails, memory, workspace, and tools.
-    def init_cwd_for_round(self) -> None:
+    @staticmethod
+    def init_cwd_for_round() -> None:
         return None
 
-    def has_pending_interrupt(self) -> bool:
+    @staticmethod
+    def has_pending_interrupt() -> bool:
         return False
 
-    def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+    @staticmethod
+    def is_pending_interrupt_resume_valid(user_input: Any) -> bool:
         _ = user_input
         return False
 
-    def find_rails(self, rail_type: type) -> list[Any]:
+    @staticmethod
+    def find_rails(rail_type: type) -> list[Any]:
         _ = rail_type
         return []
 
@@ -426,13 +433,15 @@ class ExternalHarnessMemberRuntime:
     async def unregister_rail(self, rail: Any) -> None:
         _ = rail
 
-    def register_member_tools(self, memory_manager: Any) -> None:
+    @staticmethod
+    def register_member_tools(memory_manager: Any) -> None:
         _ = memory_manager
 
     async def inject_member_memory(self, memory_manager: Any, query: str) -> None:
         _ = memory_manager, query
 
-    def set_background_task_controller(self, controller: Any) -> None:
+    @staticmethod
+    def set_background_task_controller(controller: Any) -> None:
         _ = controller
 
     @property

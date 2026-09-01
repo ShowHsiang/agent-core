@@ -42,6 +42,8 @@ from openjiuwen.extensions.observability.otlp_codec import encode_span_to_otlp_j
 # Cleanup runs at most every N export cycles to keep latency low.
 _CLEANUP_INTERVAL = 64
 _SECONDS_PER_DAY = 86400
+
+
 def _encode_span_line(span: ReadableSpan) -> str:
     """Encode a single ended span as one OTLP JSON line (hex ids, no indent)."""
     return encode_span_to_otlp_json(span).decode("utf-8")

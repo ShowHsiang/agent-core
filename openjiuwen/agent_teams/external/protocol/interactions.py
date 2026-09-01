@@ -300,19 +300,29 @@ class HarnessInteractionHandler(Protocol):
     """
 
     @overload
-    async def handle(self, request: ToolApprovalRequest) -> ToolApprovalResponse: ...
+    async def handle(self, request: ToolApprovalRequest) -> ToolApprovalResponse:
+        """Wait for and return the host tool approval decision."""
+        ...
 
     @overload
-    async def handle(self, request: UserInputRequest) -> UserInputResponse: ...
+    async def handle(self, request: UserInputRequest) -> UserInputResponse:
+        """Wait for and return the host user input."""
+        ...
 
     @overload
-    async def handle(self, request: McpElicitationRequest) -> McpElicitationResponse: ...
+    async def handle(self, request: McpElicitationRequest) -> McpElicitationResponse:
+        """Wait for and return the host MCP elicitation result."""
+        ...
 
     @overload
-    async def handle(self, request: DynamicToolCallRequest) -> DynamicToolCallResponse: ...
+    async def handle(self, request: DynamicToolCallRequest) -> DynamicToolCallResponse:
+        """Wait for and return the host dynamic tool call result."""
+        ...
 
     @overload
-    async def handle(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse: ...
+    async def handle(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse:
+        """Wait for and return the host provider-specific interaction result."""
+        ...
 
     async def handle(self, request: HarnessInteractionRequest) -> HarnessInteractionResponse:
         """Wait for and return the host response to ``request``."""

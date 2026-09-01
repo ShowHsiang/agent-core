@@ -15,7 +15,6 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
 
-from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -28,6 +27,7 @@ from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
+from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.context_compression_handler import (

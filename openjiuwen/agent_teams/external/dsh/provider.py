@@ -17,7 +17,8 @@ class DshHarnessProvider:
     def card(self) -> ExternalHarnessCard:
         return DshHarness.card
 
-    def create(self, config: JsonObject) -> DshHarness:
+    @staticmethod
+    def create(config: JsonObject) -> DshHarness:
         return DshHarness(DshHarnessConfig.from_mapping(config))
 
 

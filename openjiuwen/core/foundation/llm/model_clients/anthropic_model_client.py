@@ -1254,6 +1254,16 @@ class AnthropicModelClient(BaseModelClient):
             "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
         )
 
+        provider_metadata_candidates = (
+            ("stop_reason", getattr(response, "stop_reason", None)),
+            ("stop_sequence", getattr(response, "stop_sequence", None)),
+        )
+        provider_metadata = {
+            key: value
+            for key, value in provider_metadata_candidates
+            if isinstance(value, (str, int, float, bool)) and value != ""
+        }
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
@@ -1267,14 +1277,7 @@ class AnthropicModelClient(BaseModelClient):
             ),
             response_id=str(getattr(response, "id", "") or "") or None,
             response_model=str(getattr(response, "model", "") or "") or None,
-            provider_metadata={
-                key: value
-                for key, value in (
-                    ("stop_reason", getattr(response, "stop_reason", None)),
-                    ("stop_sequence", getattr(response, "stop_sequence", None)),
-                )
-                if isinstance(value, (str, int, float, bool)) and value != ""
-            },
+            provider_metadata=provider_metadata,
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:

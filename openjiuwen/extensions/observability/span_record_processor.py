@@ -114,6 +114,13 @@ class _ConsumerRegistration:
     lease_threads: dict[int, int] = field(default_factory=dict)
 
 
+def _accepts_snapshots(registration: _ConsumerRegistration) -> bool:
+    """Report whether a live registration can take in-flight span snapshots."""
+    if not registration.accepting:
+        return False
+    return callable(getattr(registration.consumer, "consume_snapshot", None))
+
+
 def _attribute_text(attributes: Any, *keys: str) -> str | None:
     for key in keys:
         try:
@@ -276,7 +283,8 @@ class SpanRecordProcessor(SpanProcessor):
         if not registrations:
             try:
                 identity = self._span_identity(span)
-            except Exception:
+            except Exception as exc:
+                logger.warning("span_record_processor: failed to identify ended span - {}", exc)
                 return
             with self._lock:
                 self._span_revisions.pop(identity, None)
@@ -384,8 +392,7 @@ class SpanRecordProcessor(SpanProcessor):
             registrations = tuple(
                 registration
                 for registration in self._registrations
-                if registration.accepting
-                and callable(getattr(registration.consumer, "consume_snapshot", None))
+                if _accepts_snapshots(registration)
             )
             for registration in registrations:
                 registration.in_flight += 1

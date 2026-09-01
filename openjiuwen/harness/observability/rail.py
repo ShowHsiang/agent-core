@@ -120,6 +120,28 @@ _TRACER_NAME = "openjiuwen.harness.observability.rail"
 _ORPHAN_AGENT_FORCED_CLOSE_REASON = "missing_agent_terminal_callback"
 
 
+def serialize_ability_value(value: Any) -> str:
+    """Render a tool argument or result as the text recorded on a span.
+
+    Args:
+        value: The ability payload to render.
+
+    Returns:
+        The value itself when it is already text, its JSON form when it is
+        serializable, and its ``str`` form otherwise.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(exclude_none=True)
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 @dataclass(frozen=True)
 class AgentSpanDecoration:
     """Extra attributes another rail contributes to the agent span.
@@ -306,7 +328,7 @@ class ToolSpanScope:
         recorded_output = (
             tool_result_for_exception(exception) if exception is not None else output
         )
-        raw_output = AgentObservabilityRail._serialize_ability_value(recorded_output)
+        raw_output = serialize_ability_value(recorded_output)
         raw_call_result = (
             "null" if recorded_output is None else raw_output
         )
@@ -738,13 +760,14 @@ class AgentObservabilityRail(DeepAgentRail):
             # Turn root, not of the outer harness task-loop bookkeeping span.
             # Nested/sub-agent scopes keep their structural parent.
             otel_parent = scope_parent
-            if (
+            scope_parent_is_turn_child = (
                 root_span is not None
                 and root_span.is_recording()
                 and root_span.attributes.get(OJ_TRACE_ROOT)
                 and scope_parent.parent is not None
                 and scope_parent.parent.span_id == root_span.context.span_id
-            ):
+            )
+            if scope_parent_is_turn_child:
                 otel_parent = root_span
 
             agent = ctx.agent
@@ -873,7 +896,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 span.set_attribute(GEN_AI_TOOL_TYPE, ability_type)
                 span.set_attribute(OJ_TOOL_TYPE, ability_type)
 
-            raw_arguments = self._serialize_ability_value(
+            raw_arguments = serialize_ability_value(
                 getattr(inputs, "tool_args", None)
             )
             config = self._config()
@@ -934,8 +957,9 @@ class AgentObservabilityRail(DeepAgentRail):
             try:
                 if mcp_resolver(tool_name) is not None:
                     return "mcp"
-            except Exception:
-                pass
+            except Exception as exc:
+                # Fall through to the card class name heuristic below.
+                logger.debug("otel: mcp scope resolution failed for {} - {}", tool_name, exc)
         class_name = type(card).__name__.lower() if card is not None else ""
         if "workflow" in class_name:
             return "workflow"
@@ -946,19 +970,6 @@ class AgentObservabilityRail(DeepAgentRail):
         if "tool" in class_name:
             return "tool"
         return None
-
-    @staticmethod
-    def _serialize_ability_value(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        try:
-            if hasattr(value, "model_dump"):
-                value = value.model_dump(exclude_none=True)
-            return json.dumps(value, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            return str(value)
 
     @staticmethod
     def _copy_parent_correlation(parent: Span, span: Span) -> None:

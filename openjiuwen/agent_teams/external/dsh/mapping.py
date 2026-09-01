@@ -419,7 +419,8 @@ class DshTurnAccumulator:
             item_id=call_id,
         )
 
-    def _map_iteration(self, event_type: str, data: Mapping[str, object]) -> MappedDshEvent:
+    @staticmethod
+    def _map_iteration(event_type: str, data: Mapping[str, object]) -> MappedDshEvent:
         native_turn = _int(data.get("turn")) or 0
         native_step = _int(data.get("step")) or 0
         kind = ItemEventKind.STARTED if event_type == "step/start" else ItemEventKind.COMPLETED
@@ -432,7 +433,8 @@ class DshTurnAccumulator:
             item_id=f"dsh-iteration:{native_turn}:{native_step}",
         )
 
-    def _map_subagent(self, method: str, payload: Mapping[str, object]) -> MappedDshEvent:
+    @staticmethod
+    def _map_subagent(method: str, payload: Mapping[str, object]) -> MappedDshEvent:
         child_id = _string(payload.get("childSessionId")) or _string(payload.get("sessionId")) or "unknown-subagent"
         kind = ItemEventKind.STARTED if method == "subagent.started" else ItemEventKind.COMPLETED
         return MappedDshEvent(
@@ -455,8 +457,8 @@ class DshTurnAccumulator:
         total = self.total_usage
         return [MappedDshEvent(UsageUpdatedEvent(total))] if total is not None else []
 
+    @staticmethod
     def _provider_event(
-        self,
         event_type: str,
         payload: Mapping[str, object],
         *,

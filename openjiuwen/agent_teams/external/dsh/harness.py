@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.external.protocol import (
     json_value_to_builtin,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.core.common.logging import team_logger
 
 ADAPTER_VERSION = "0.1.0"
 
@@ -133,23 +134,35 @@ class DshHarness:
             try:
                 sdk_harness = sdk.DeepSeekHarness(**options)
                 sdk_session = await asyncio.to_thread(sdk_harness.start_session, self._session_id)
-            except BaseException as exc:
-                if sdk_harness is not None:
-                    await _close_sdk_quietly(sdk_harness)
-                self._event_buffer = None
-                self._context = None
-                self._session_id = None
-                if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                    raise
+            except Exception:
+                await self._rollback_start(sdk_harness)
                 # SDK transport errors may include a subprocess stderr tail;
                 # do not retain it as an exception cause because context.env
                 # and provider credentials are explicitly sensitive.
                 raise ExternalHarnessError("failed to start the DeepSeek Harness SDK runtime") from None
+            except BaseException:
+                # Cancellation and interpreter shutdown must still roll the
+                # partially started runtime back before they propagate.
+                await self._rollback_start(sdk_harness)
+                raise
 
             self._sdk_harness = sdk_harness
             self._sdk_session = sdk_session
             self._cycle_started = True
             await self._transition(HarnessState.IDLE)
+
+    async def _rollback_start(self, sdk_harness: Any) -> None:
+        """Release a partially started runtime and clear its session state.
+
+        Args:
+            sdk_harness: The SDK runtime built before the failure, if any.
+        """
+
+        if sdk_harness is not None:
+            await _close_sdk_quietly(sdk_harness)
+        self._event_buffer = None
+        self._context = None
+        self._session_id = None
 
     async def stop(self) -> None:
         """Stop the DSH subprocess, terminate accepted Turns, and close events."""
@@ -315,9 +328,7 @@ class DshHarness:
                 _to_dsh_input(turn.content),
                 on_notification=on_notification,
             )
-        except BaseException as exc:
-            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                raise
+        except Exception as exc:
             if self._stopping:
                 return TurnEventKind.ABORTED, accumulator.build_stopped_result(
                     started_at=started_at,
@@ -360,12 +371,10 @@ class DshHarness:
         if supervisor is not None and supervisor is not asyncio.current_task():
             try:
                 await supervisor
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+            except Exception as exc:
                 # A turn failure is already normalized by the supervisor.  A
                 # teardown must still close the observation cycle.
-                pass
+                team_logger.debug("DSH supervisor task failed during stop: {}", exc)
 
         async with self._command_lock:
             queued = tuple(self._pending)
@@ -470,9 +479,8 @@ def _load_dsh_sdk() -> Any:
 async def _close_sdk_quietly(sdk_harness: Any) -> None:
     try:
         await asyncio.to_thread(sdk_harness.close)
-    except BaseException as exc:
-        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-            raise
+    except Exception as exc:
+        team_logger.debug("DSH SDK close failed during teardown: {}", exc)
 
 
 def _to_dsh_input(content: ExternalHarnessInput) -> str | list[dict[str, object]]:

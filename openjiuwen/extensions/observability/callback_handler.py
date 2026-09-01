@@ -171,6 +171,9 @@ from openjiuwen.core.foundation.llm.call_scope import (
 
 _TRACER_NAME = "openjiuwen.extensions.observability"
 _REQUEST_SEQUENCE_LOCK = threading.Lock()
+# Counter attached to the root span so it dies with the run. Namespaced because
+# the span object belongs to the OpenTelemetry SDK, not to this handler.
+_REQUEST_SEQUENCE_ATTR = "_otel_llm_request_sequence"
 # Fallback LLM request counters for calls made while no root span is
 # resolvable, keyed by session. Bounded because nothing signals when a session
 # is done; the counter for a live session is always among the most recent.
@@ -321,7 +324,9 @@ def _json_compatible(
             ):
                 try:
                     dumped = model_dump(**kwargs)
-                except Exception:
+                except Exception as exc:
+                    # Signature probing: older pydantic rejects newer kwargs.
+                    logger.debug("otel: model_dump({}) rejected - {}", kwargs, exc)
                     continue
                 return _json_compatible(dumped, depth=depth + 1, seen=active_ids)
             return _controlled_string(value)
@@ -924,7 +929,7 @@ class OtelCallbackHandler:
             return None
         parent_ctx = self._get_parent_context_for_llm_tool()
         if parent_ctx is None:
-            return
+            return None
 
         messages = kwargs.get("messages") or []
         model_name = str(kwargs.get("model") or self._derive_model_name(kwargs) or "").strip()
@@ -1389,12 +1394,12 @@ class OtelCallbackHandler:
                 state.span.set_attribute(dst_attr, value)
 
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        if (
-            raw_output_tokens > 1
-            and state.first_chunk_ns is not None
+        has_chunk_window = (
+            state.first_chunk_ns is not None
             and state.last_chunk_ns is not None
             and state.last_chunk_ns >= state.first_chunk_ns
-        ):
+        )
+        if raw_output_tokens > 1 and has_chunk_window:
             tpot_ms = (
                 (state.last_chunk_ns - state.first_chunk_ns)
                 / (raw_output_tokens - 1)
@@ -1928,9 +1933,9 @@ class OtelCallbackHandler:
             if root_span is not None:
                 # Held on the span itself, so the counter dies with the run.
                 request_number = int(
-                    getattr(root_span, "_otel_llm_request_sequence", 0) or 0
+                    getattr(root_span, _REQUEST_SEQUENCE_ATTR, 0) or 0
                 ) + 1
-                root_span._otel_llm_request_sequence = request_number
+                setattr(root_span, _REQUEST_SEQUENCE_ATTR, request_number)
                 return request_number
             key = str(get_current_session_id() or "unknown")
             request_number = _FALLBACK_REQUEST_SEQUENCES.get(key, 0) + 1
