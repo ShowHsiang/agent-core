@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-08-17 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md |
+| 最近一次修订日期 | 2026-09-01 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
 
 ## 范围 / 边界
 
@@ -192,7 +192,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     的两个形态各自独立，只共享模块级纯函数（`_task_node_schema` / `_validate_task_batch`），
     `invoke` / `map_result` 各写一遍；`send_message` 的两个形态共享 `_SendMessageBase`，
     因为共享的是真实投递行为（`_send` / `_multicast` / `_broadcast`），子类只有自己的
-    `to` schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
+    收件参数 schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
     无论哪种，形态子类里都**零形态分支**，因此不变量 12（schema 扁平、invoke 直线、
     无 role 分支）对每个形态仍成立。
     `send_message` 的形态是 `(dispatch_mode, leader|member)` 二维：scheduled 下
@@ -326,6 +326,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
     模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
     补救交给 leader round-idle 对账（`S_05` 不变量 1 的第五个触发点）。
+24. **`send_message` 的单播 / 广播与多播使用分离参数，schema 不使用 union**（F_109）。
+    `SendMessageTool` 的 `to` 固定为 `string`，只承载单个 member_name、`"user"` 或 `"*"`；
+    `targets` 固定为 `array<string>`，只承载多播成员列表。两者运行时必须二选一：同时提供、
+    同时省略、向 `to` 偷传数组或向 `targets` 偷传字符串都在写消息前拒绝，并返回可执行的字段
+    修正提示。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
+    这样宿主 LLM 不再需要在 `anyOf(string, array)` 中选择序列化分支，也不会把数组二次 JSON
+    编码后塞进字符串。`ReportToLeaderTool` 仍只有 `to: enum ["leader", "user"]`，
+    schema 不暴露 `targets`，invoke 对 MCP 偷传同样拒绝。多播的全员拒绝、去重、部分失败等
+    既有语义全部留在 `_multicast`，只改变入口字段，不改变消息落库和事件投递。
 
 ## 接口契约
 
