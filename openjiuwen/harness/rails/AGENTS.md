@@ -141,7 +141,7 @@ WARNING），只有 tool 事件才真中断。
 | 注入 prompt section | `heartbeat_rail.py`（64 行，可整读） | `init` 抓 builder 引用，`before_model_call` 里 add/remove，`uninit` 删干净 |
 | 注册工具 | `mcp_rail.py`（44 行）/ `sys_operation_rail.py` | 纯 init 型，不参与任何生命周期钩子 |
 | 改写模型输入 | `progressive_tool_rail.py` | `before_model_call` 里直接改写 `ctx.inputs.tools` |
-| 拦截执行 | `interrupt/ask_user_rail.py` | 首次 interrupt，resume 后**不执行工具**、把用户答复当 tool_result 返回 |
+| 拦截执行 | `interrupt/ask_user_rail.py` | 首次 interrupt 前写 `ask_user.requested` OTel event；resume 后写 `ask_user.resolved`，不跨中断持有 Span，且**不执行工具**、把用户答复当 tool_result 返回 |
 | 回灌指令 | `task_planning_rail.py` | 全包**唯一**一处 `ctx.push_steering(...)`，注释说明为何要延到 ToolMessage 写完之后 |
 
 另有 `ctx.request_retry(delay)`（`llm_retry_rail.py` / `tool_call_resilience_rail.py`）与
