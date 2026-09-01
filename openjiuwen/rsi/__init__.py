@@ -1,4 +1,3 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Recursive self-improvement for standalone Expert Harnesses."""
 
@@ -27,7 +26,6 @@ from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     load_auto_harness_config,
 )
 from openjiuwen.rsi.harness_rsi.auto_harness.stages.activate import ExtendActivateStage
-
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -60,8 +58,13 @@ from openjiuwen.rsi.harness_rsi.single_harness import (
 )
 
 __all__ = [
+    "EXTENDED_EVOLVE_PIPELINE",
+    "META_EVOLVE_PIPELINE",
     "ActionDefinition",
     "AutoCoordinatingHarnessConfig",
+    # Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).
+    "AutoHarnessConfig",
+    "AutoHarnessOrchestrator",
     "CaseMapping",
     "DataLoader",
     "DataLoaderConfig",
@@ -73,28 +76,23 @@ __all__ = [
     "EvaluationResultAnalyzer",
     "EvaluationResultAnalyzerConfig",
     "EvaluatorConfig",
-    "MemberOptimizer",
-    "MemberOptimizerConfig",
-    "ModelConfigs",
-    "OrchestratorSchedulingConfig",
-    "IterativeSingleHarnessRequest",
-    "IterativeSingleHarnessResult",
-    "SingleHarnessIterativeOptimizationOrchestrator",
-    "TeamEvaluator",
-    "TeamIssue",
-    # Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).
-    "AutoHarnessConfig",
-    "AutoHarnessOrchestrator",
-    "EXTENDED_EVOLVE_PIPELINE",
     "ExtendActivateStage",
     "ExtensionDesign",
     "ExtensionTaskPipeline",
-    "META_EVOLVE_PIPELINE",
+    "IterativeSingleHarnessRequest",
+    "IterativeSingleHarnessResult",
+    "MemberOptimizer",
+    "MemberOptimizerConfig",
+    "ModelConfigs",
     "OptimizationTask",
+    "OrchestratorSchedulingConfig",
     "RuntimeExtensionArtifact",
+    "SingleHarnessIterativeOptimizationOrchestrator",
     "StageResult",
     "TaskContext",
     "TaskRuntime",
+    "TeamEvaluator",
+    "TeamIssue",
     "build_git_auth_env",
     "create_auto_harness_orchestrator",
     "load_auto_harness_config",
