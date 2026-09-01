@@ -3008,3 +3008,108 @@ async def test_injected_system_turns_stay_in_the_chat_history(
         "kind": "prompt_attachment_history",
         "mode": "snapshot",
     }
+
+
+@pytest.mark.asyncio
+async def test_team_agent_execution_scope_binds_leader_subject(in_memory_exporter):
+    """The leader's invoke binds an ExecutionSubject stamped on its agent span."""
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.extensions.observability.semconv import (
+        OJ_AGENT_MODE,
+        OJ_EXECUTION_SUBJECT_ID,
+        OJ_EXECUTION_SUBJECT_KIND,
+        OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+        OJ_TEAM_ID,
+        OJ_TEAM_NAME,
+    )
+
+    _create_team_span("test_team")
+    session = SimpleNamespace(get_session_id=lambda: "session-1")
+
+    card = MagicMock()
+    card.name = "leader"
+    card.id = "leader"
+    agent = TeamAgent(card)
+    # Configure the member identity through the real runtime context so the
+    # read-only configurator properties resolve naturally.
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+    from openjiuwen.agent_teams.schema.team import TeamRuntimeContext, TeamSpec
+
+    ctx = TeamRuntimeContext(
+        role=TeamRole.LEADER,
+        member_name="leader",
+        display_name="Team Leader",
+    )
+    ctx.team_spec = TeamSpec(
+        team_name="test_team",
+        display_name="Test Team",
+    )
+    object.__setattr__(
+        agent._configurator,
+        "_blueprint",
+        TeamAgentBlueprint(card=card, spec=MagicMock(), ctx=ctx, language="en"),
+    )
+
+    subject = agent.observability_execution_subject("session-1")
+    assert subject.subject_id == "team-member:session-1:test_team:leader"
+    assert subject.display_name == "Team Leader"
+    assert subject.kind == "team_leader"
+
+    with agent._observability_execution_scope(session):
+        from openjiuwen.core.single_agent.rail.base import (
+            AgentCallbackContext,
+            TaskIterationInputs,
+        )
+        from openjiuwen.harness.observability.rail import AgentObservabilityRail
+
+        mock_agent = MagicMock()
+        mock_agent.team_name = "test_team"
+        mock_agent.member_name = "leader"
+        rail = AgentObservabilityRail()
+        ctx = AgentCallbackContext(
+            agent=mock_agent,
+            inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+        )
+        await rail.before_task_iteration(ctx)
+        await rail.after_task_iteration(ctx)
+
+    spans = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")
+    assert len(spans) == 1
+    attrs = dict(spans[0].attributes)
+    assert attrs.get(OJ_EXECUTION_SUBJECT_KIND) == "team_leader"
+    assert attrs.get(OJ_EXECUTION_SUBJECT_ID) == "team-member:session-1:test_team:leader"
+    assert attrs.get(OJ_EXECUTION_SUBJECT_DISPLAY_NAME) == "Team Leader"
+    # The member agent span carries the subject block; OJ_TEAM_* and the team
+    # mode stamp live on the team root span created by get_or_create_team_span.
+
+
+def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter):
+    """The team root span records agent mode and Team identity for routing."""
+    from openjiuwen.extensions.observability.semconv import (
+        OJ_AGENT_MODE,
+        OJ_TEAM_ID,
+        OJ_TEAM_NAME,
+        OJ_TEAM_SESSION_ID,
+        OJ_SESSION_ID,
+    )
+    from openjiuwen.agent_teams.context import set_session_id, reset_session_id
+
+    token = set_session_id("session-1")
+    try:
+        _create_team_span("test_team")
+    finally:
+        reset_session_id(token)
+
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    attrs = dict(spans[-1].attributes)
+    assert attrs.get(OJ_AGENT_MODE) == "team"
+    assert attrs.get(OJ_TEAM_ID) == "test_team"
+    assert attrs.get(OJ_TEAM_NAME) == "test_team"
+    assert attrs.get(OJ_TEAM_SESSION_ID) == "session-1"
+    assert attrs.get(OJ_SESSION_ID) == "session-1"
