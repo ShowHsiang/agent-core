@@ -550,6 +550,8 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
+            OBSERVABILITY,
+            TEAM_OBSERVABILITY,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
@@ -565,9 +567,15 @@ class AgentConfigurator:
 
         ensure_harness_elements_registered()
 
-        # Observability rail spec — shared by all agents (members + swarmflow workers).
-        # The provider checks is_initialized() — no-op when disabled.
-        observability_rail_spec = RailSpec(type="core.observability")
+        # Observability rail specs — shared by all agents (members + swarmflow
+        # workers). Two rails, always mounted as a pair: ``core.observability``
+        # owns the agent span itself (harness-level, team-agnostic) and
+        # ``core.team.observability`` layers the team identity onto it. Each
+        # provider checks is_initialized() — no-op when disabled.
+        observability_rail_specs = [
+            RailSpec(type=TEAM_OBSERVABILITY),
+            RailSpec(type=OBSERVABILITY),
+        ]
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
@@ -742,7 +750,7 @@ class AgentConfigurator:
             if swarmflow_worker_base_spec is not None:
                 swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
                     update={
-                        "rails": list(swarmflow_worker_base_spec.rails or []) + [observability_rail_spec],
+                        "rails": list(swarmflow_worker_base_spec.rails or []) + observability_rail_specs,
                     },
                 )
 
@@ -770,7 +778,6 @@ class AgentConfigurator:
             workspace_manager=self.workspace_manager,
             model_allocator=self.model_allocator,
             messager=self.messager,
-            on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
@@ -783,7 +790,7 @@ class AgentConfigurator:
 
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
-        team_rail_specs.append(observability_rail_spec)
+        team_rail_specs.extend(observability_rail_specs)
         base_rails = _apply_team_worktree_shell_guard(
             list(build_spec.rails or []),
             enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
@@ -982,6 +989,7 @@ class AgentConfigurator:
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
+            on_member_started=self._on_teammate_created,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 

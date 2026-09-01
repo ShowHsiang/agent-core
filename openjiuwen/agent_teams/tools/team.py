@@ -120,6 +120,7 @@ class TeamBackend:
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
+        on_member_started: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -192,6 +193,12 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            on_member_started: Optional async callback that launches the agent
+                process for one member name. Supplied by the hosting
+                ``TeamAgent`` (leader side only) and consumed by
+                ``autostart_unstarted``; leaving it None turns every
+                auto-start into a no-op, which is what an external
+                (out-of-process) backend wants — it has no process to spawn.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -267,6 +274,9 @@ class TeamBackend:
         self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
+        # Spawns one member's agent process. The single injection point for
+        # every auto-start path that goes through ``autostart_unstarted``.
+        self._on_member_started = on_member_started
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -762,6 +772,30 @@ class TeamBackend:
             await self.startup_member(member.member_name, on_created)
             started.append(member.member_name)
         return started
+
+    async def autostart_unstarted(self) -> list[str]:
+        """Start every UNSTARTED member using the injected spawn callback.
+
+        The shared entry point for the auto-start funnel: work that is about
+        to be handed to a member — a message, a freshly created task — must
+        not land on a member whose agent process was never launched. Callers
+        state the intent ("make sure the roster is up") without each carrying
+        its own spawn callback.
+
+        Leader-only and callback-gated, so a teammate backend or an external
+        out-of-process backend answers with an empty list instead of trying to
+        spawn something it cannot own. Concurrency is still settled one level
+        down by ``startup_member``'s UNSTARTED→STARTING CAS, which makes
+        repeated calls idempotent: whoever gets there second finds nothing in
+        UNSTARTED and does nothing.
+
+        Returns:
+            The member names started by this call; empty when there was
+            nothing to start or this backend does not own spawning.
+        """
+        if not self.is_leader or self._on_member_started is None:
+            return []
+        return await self.startup(on_created=self._on_member_started)
 
     async def startup_member(
         self,
@@ -2159,10 +2193,10 @@ class TeamBackend:
         confused about whether its team exists, which the refusal corrects.
 
         Both conditions are required. ``_history_restored`` alone is not
-        enough: a recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path in ``CoordinationKernel.start`` calls
-        ``clean_team``) has no team row left and genuinely does need to build
-        one. The team row is what says a team is there to be rejoined.
+        enough: a recovered leader whose team was disbanded (its own
+        ``clean_team``, or the operator's ``delete_agent_team``) has no team
+        row left and genuinely does need to build one. The team row is what
+        says a team is there to be rejoined.
 
         Returns:
             True when the leader is already attached, with history, to a team

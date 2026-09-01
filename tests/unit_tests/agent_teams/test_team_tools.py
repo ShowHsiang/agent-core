@@ -281,9 +281,9 @@ class TestBuildTeamTool:
     async def test_recovered_leader_may_rebuild_a_disbanded_team(self, agent_team_without_team, t, db, message_bus):
         """The refusal keys on the team row, not on the recovery alone.
 
-        A recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path calls clean_team) has no team left and
-        genuinely needs to build one.
+        A recovered leader whose team was disbanded (its own clean_team, or
+        the operator's delete_agent_team) has no team left and genuinely
+        needs to build one.
         """
         args = {
             "display_name": "My Team",
@@ -1737,8 +1737,13 @@ class TestSendMessageTool:
         assert tool.card.id == "team.send_message"
         props = tool.card.input_params["properties"]
         assert "to" in props
+        assert "targets" in props
+        assert props["to"]["type"] == "string"
+        assert props["targets"]["type"] == "array"
+        assert "anyOf" not in props["to"]
         assert "content" in props
         assert "summary" in props
+        assert tool.card.input_params["required"] == ["content"]
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1821,7 +1826,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hello"})
+        result = await tool.invoke({"targets": ["m1", "m2"], "content": "Hello"})
 
         assert result.success is True
         assert result.data["type"] == "multicast"
@@ -1844,7 +1849,7 @@ class TestSendMessageTool:
         )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "ghost"], "content": "Hello"})
+        result = await tool.invoke({"targets": ["m1", "ghost"], "content": "Hello"})
 
         assert result.success is False
         assert "Multicast partially failed" in result.error
@@ -1858,7 +1863,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_all_fail(self, agent_team, t):
         """All targets unknown -> success=False, delivered empty"""
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["ghost1", "ghost2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["ghost1", "ghost2"], "content": "Hi"})
 
         assert result.success is False
         assert result.data["delivered"] == []
@@ -1882,7 +1887,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m1", "m2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "m1", "m2"], "content": "Hi"})
 
         assert result.success is True
         assert result.data["delivered"] == ["m1", "m2"]
@@ -1892,7 +1897,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_rejects_wildcard(self, agent_team, t):
         """Mixing '*' inside a multicast list is rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": ["m1", "*"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "*"], "content": "Hi"})
 
         assert result.success is False
         assert "broadcast" in result.error
@@ -1902,7 +1907,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_rejects_user(self, agent_team, t):
         """Mixing 'user' inside a multicast list is rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": ["m1", "user"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "user"], "content": "Hi"})
 
         assert result.success is False
         assert "user" in result.error
@@ -1912,7 +1917,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_empty_list(self, agent_team, t):
         """Empty list rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": [], "content": "Hi"})
+        result = await tool.invoke({"targets": [], "content": "Hi"})
 
         assert result.success is False
         assert "at least one" in result.error
@@ -1936,7 +1941,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1"], "content": "Hi"})
 
         assert result.success is True
         assert result.data["type"] == "multicast"
@@ -1960,7 +1965,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "  ", ""], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "  ", ""], "content": "Hi"})
 
         assert result.success is True
         assert result.data["delivered"] == ["m1"]
@@ -1982,7 +1987,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "m2"], "content": "Hi"})
 
         assert result.success is False
         assert "broadcast" in result.error
@@ -1997,6 +2002,57 @@ class TestSendMessageTool:
 
         assert result.success is False
         assert "string" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_legacy_array_in_to(self, agent_team, t):
+        """Multicast arrays use the dedicated targets field."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": ["m1"], "content": "Hi"})
+
+        assert result.success is False
+        assert "targets" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_json_encoded_targets_in_to(self, agent_team, t):
+        """A JSON array string receives field-level correction instead of member lookup."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": '["m1","m2"]', "content": "Hi"})
+
+        assert result.success is False
+        assert "targets" in result.error
+        assert "not found" not in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_string_targets(self, agent_team, t):
+        """The multicast field accepts only a native string array."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"targets": '["m1"]', "content": "Hi"})
+
+        assert result.success is False
+        assert "array of strings" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_both_recipient_fields(self, agent_team, t):
+        """The separated recipient fields are mutually exclusive."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_requires_one_recipient_field(self, agent_team, t):
+        """One separated recipient field must be present."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"content": "Hi"})
+
+        assert result.success is False
+        assert "required" in result.error
 
     @pytest.mark.asyncio
     @pytest.mark.level1

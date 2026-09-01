@@ -82,6 +82,16 @@ if TYPE_CHECKING:
 
 _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY = "anthropic_content_blocks"
 _ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY = "__anthropic_content_blocks"
+# Model families that accept ``role: "system"`` inside ``messages``, GA and
+# with no beta header. Every other model answers 400 "role 'system' is not
+# supported on this model", so the entry is folded into top-level ``system``.
+_MID_CONVERSATION_SYSTEM_MODEL_FAMILIES = (
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
 _ANTHROPIC_CACHEABLE_BLOCK_TYPES = frozenset({
     "text", "image", "document", "tool_use", "tool_result",
 })
@@ -282,8 +292,100 @@ def _mark_cache_control(blocks: List[dict], ttl: str) -> None:
             return
 
 
+def _content_to_text(content: Any) -> str:
+    """Flatten message content down to the plain text a system turn allows.
+
+    A mid-conversation system message is text-only, so image and tool blocks
+    have nowhere to go; they never appear on one in practice, and dropping
+    them is better than sending a shape the API rejects.
+    """
+
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in _content_to_blocks(content)
+        if block.get("type") == "text"
+    )
+
+
+def _supports_mid_conversation_system(model: Optional[str]) -> bool:
+    """Report whether this model accepts ``role: "system"`` inside ``messages``.
+
+    Only some models do, with no beta header; the rest answer a 400. Gateways
+    prefix and suffix the id (``anthropic/``, ``us.anthropic.``, ``-v1:0``),
+    so match on the family substring rather than on equality, and stay
+    conservative: an unrecognized id keeps the always-valid behavior of
+    folding the message into the top-level ``system`` parameter.
+    """
+
+    name = str(model or "").strip().lower()
+    if not name:
+        return False
+    return any(family in name for family in _MID_CONVERSATION_SYSTEM_MODEL_FAMILIES)
+
+
+def _inline_system_is_placeable(converted: List[dict], index: int) -> bool:
+    """Report whether a system message may stay where it sits.
+
+    The API accepts one only after a ``user`` turn, and only when it is last
+    or followed by an ``assistant`` turn. It can never be ``messages[0]`` --
+    which is exactly what the leading system prompt is, so that one keeps
+    going to the top-level parameter it belongs in.
+
+    Neighbours are read from the pre-partition list on purpose: a system
+    message next to another one is judged against that neighbour and both fall
+    back, rather than each assuming the other will be moved away.
+    """
+
+    if index == 0:
+        return False
+    if converted[index - 1].get("role") != "user":
+        return False
+    if index == len(converted) - 1:
+        return True
+    return converted[index + 1].get("role") == "assistant"
+
+
+def _partition_system_messages(
+        converted: List[dict],
+        *,
+        allow_mid_conversation_system: bool,
+) -> tuple[List[dict], List[dict]]:
+    """Split system turns into top-level blocks and the ones that stay put.
+
+    Leaving a system message in place is the whole point of this pass. Folding
+    it into the top-level ``system`` parameter puts it ahead of the entire
+    conversation, so every cached turn after it is re-processed -- on a long
+    agent run one appended instruction costs a full cache rewrite. A message
+    that stays where it was written leaves the cached prefix intact, and keeps
+    the operator authority a user-turn block could not carry.
+
+    Args:
+        converted: Messages already in Anthropic shape, system turns included.
+        allow_mid_conversation_system: Whether the target model accepts them.
+
+    Returns:
+        The top-level system blocks, and the messages to send.
+    """
+
+    system_blocks: List[dict] = []
+    kept: List[dict] = []
+    for index, message in enumerate(converted):
+        if message.get("role") != "system":
+            kept.append(message)
+            continue
+        if allow_mid_conversation_system and _inline_system_is_placeable(converted, index):
+            kept.append(message)
+            continue
+        system_blocks.extend(_content_to_blocks(message.get("content")))
+    return system_blocks, kept
+
+
 def _convert_message_schemas(
         messages: List[dict],
+        *,
+        allow_mid_conversation_system: bool = False,
 ) -> tuple[Optional[List[dict]], List[dict]]:
     """Split an OpenAI-shape message list into (system_blocks, anthropic_messages).
 
@@ -292,8 +394,18 @@ def _convert_message_schemas(
     OpenAI-style ``tool_calls`` on an assistant message become ``tool_use``
     blocks; OpenAI-style ``role: "tool"`` messages become ``user`` messages
     carrying ``tool_result`` blocks.
+
+    System turns are laid out in place first and partitioned afterwards, since
+    whether one may stay depends on the neighbours it ends up with.
+
+    Args:
+        messages: OpenAI-shape messages.
+        allow_mid_conversation_system: Whether the target model accepts a
+            ``role: "system"`` entry inside ``messages``.
+
+    Returns:
+        The top-level system blocks (None when empty), and the messages.
     """
-    system_blocks: List[dict] = []
     out: List[dict] = []
     pending_tool_results: List[dict] = []
 
@@ -306,7 +418,13 @@ def _convert_message_schemas(
         role = msg.get("role")
 
         if role == "system":
-            system_blocks.extend(_content_to_blocks(msg.get("content", "")))
+            # Emit in place; _partition_system_messages decides afterwards
+            # whether this position is one the API accepts.
+            _flush_tool_results()
+            out.append({
+                "role": "system",
+                "content": _content_to_text(msg.get("content", "")),
+            })
             continue
 
         if role == "tool":
@@ -359,6 +477,10 @@ def _convert_message_schemas(
 
     _flush_tool_results()
 
+    system_blocks, out = _partition_system_messages(
+        out,
+        allow_mid_conversation_system=allow_mid_conversation_system,
+    )
     return (system_blocks or None), out
 
 
@@ -425,6 +547,13 @@ def _apply_messages_cache_breakpoint(
     idx = len(anthropic_messages) - 1
     if exclude_tail and idx >= 1:
         idx -= 1
+    # A mid-conversation system turn carries plain text, which has no block to
+    # hang the marker on. Walk back to the nearest message that does rather
+    # than dropping the breakpoint and leaving the turn uncached.
+    while idx >= 0 and not isinstance(anthropic_messages[idx].get("content"), list):
+        idx -= 1
+    if idx < 0:
+        return
     blocks = anthropic_messages[idx].get("content")
     if isinstance(blocks, list):
         _mark_cache_control(blocks, "5m")
@@ -681,7 +810,12 @@ class AnthropicModelClient(BaseModelClient):
         oai_tools: Optional[List[dict]] = openai_params.get("tools")
         _copy_preserved_blocks_to_converted_messages(messages, oai_messages)
 
-        system_blocks, anthropic_messages = _convert_message_schemas(oai_messages)
+        system_blocks, anthropic_messages = _convert_message_schemas(
+            oai_messages,
+            allow_mid_conversation_system=_supports_mid_conversation_system(
+                openai_params.get("model")
+            ),
+        )
         anthropic_tools = _convert_tool_schemas(oai_tools)
 
         _apply_static_cache_breakpoints(system_blocks, anthropic_tools)
@@ -969,6 +1103,7 @@ class AnthropicModelClient(BaseModelClient):
             tool_use_acc: dict[int, dict] = {}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
+            accumulated_for_parser = ""
 
             async with async_client.messages.stream(**params) as response_stream:
                 async for event in response_stream:
@@ -981,6 +1116,26 @@ class AnthropicModelClient(BaseModelClient):
                         final_stop_reason = chunk.finish_reason
                     if chunk.content:
                         current_text += chunk.content
+                        if output_parser:
+                            accumulated_for_parser += str(chunk.content)
+                            try:
+                                parsed = await output_parser.parse(
+                                    accumulated_for_parser
+                                )
+                                if parsed is not None:
+                                    chunk = chunk.model_copy(
+                                        update={"parser_content": parsed}
+                                    )
+                                    accumulated_for_parser = ""
+                            except Exception as exc:
+                                llm_logger.debug(
+                                    "Anthropic stream parser attempt error.",
+                                    event_type=LogEventType.LLM_CALL_ERROR,
+                                    model_name=params.get("model"),
+                                    model_provider=self.model_client_config.client_provider,
+                                    is_stream=True,
+                                    exception=str(exc),
+                                )
                     await trigger(
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
@@ -1099,6 +1254,16 @@ class AnthropicModelClient(BaseModelClient):
             "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
         )
 
+        provider_metadata_candidates = (
+            ("stop_reason", getattr(response, "stop_reason", None)),
+            ("stop_sequence", getattr(response, "stop_sequence", None)),
+        )
+        provider_metadata = {
+            key: value
+            for key, value in provider_metadata_candidates
+            if isinstance(value, (str, int, float, bool)) and value != ""
+        }
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
@@ -1110,6 +1275,9 @@ class AnthropicModelClient(BaseModelClient):
                 {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: replay_blocks}
                 if replay_blocks else {}
             ),
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=provider_metadata,
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
@@ -1124,7 +1292,8 @@ class AnthropicModelClient(BaseModelClient):
         u = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage.__dict__)
         uncached = int(u.get("input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_write = int(u.get("cache_creation_input_tokens") or 0)
+        cache_write_raw = u.get("cache_creation_input_tokens")
+        cache_write = int(cache_write_raw or 0)
         output = int(u.get("output_tokens") or 0)
         total_input = uncached + cache_read + cache_write
 
@@ -1150,6 +1319,9 @@ class AnthropicModelClient(BaseModelClient):
             cache_status="observed",
             cache_source="provider_usage",
             cache_authoritative=True,
+            cache_creation_input_tokens=(
+                cache_write if cache_write_raw is not None else None
+            ),
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
@@ -1183,6 +1355,8 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason="null",
+                response_id=str(getattr(msg, "id", "") or "") or None,
+                response_model=str(getattr(msg, "model", "") or "") or None,
             )
 
         if etype == "content_block_start":
@@ -1328,6 +1502,9 @@ class AnthropicModelClient(BaseModelClient):
                 metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
+                provider_metadata=(
+                    {"stop_reason": str(stop_reason)} if stop_reason else {}
+                ),
             )
 
         if etype == "message_stop":

@@ -101,7 +101,7 @@ async def test_oversize_content_rejected_on_every_route(db):
     unicast = await send.invoke({"to": DEV_1, "content": OVERSIZE})
     assert not unicast.success
 
-    multicast = await send.invoke({"to": [DEV_1], "content": OVERSIZE})
+    multicast = await send.invoke({"targets": [DEV_1], "content": OVERSIZE})
     assert not multicast.success
 
     broadcast = await send.invoke({"to": "*", "content": OVERSIZE})

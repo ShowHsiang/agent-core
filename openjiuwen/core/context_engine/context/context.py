@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.compression_scope import context_compression_operation
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateInput,
@@ -598,7 +599,8 @@ class SessionModelContext(ModelContext):
                             )
                         )
                         started_emitted = True
-                        event, window = await processor.on_get_context_window(self, window, **kwargs)
+                        with context_compression_operation(operation_id):
+                            event, window = await processor.on_get_context_window(self, window, **kwargs)
                         status = "completed" if event is not None else "noop"
                         await self._build_and_emit_compression_state(
                             ContextProcessorStateInput(
@@ -1151,12 +1153,13 @@ class SessionModelContext(ModelContext):
                         )
                     )
                     started_emitted = True
-                    event, messages_to_add = await processor.on_add_messages(
-                        self,
-                        messages_to_add,
-                        force=force,
-                        **kwargs,
-                    )
+                    with context_compression_operation(operation_id):
+                        event, messages_to_add = await processor.on_add_messages(
+                            self,
+                            messages_to_add,
+                            force=force,
+                            **kwargs,
+                        )
                     after_messages = self.get_messages() + messages_to_add
                     status = "completed" if event is not None else "noop"
                     await self._build_and_emit_compression_state(
@@ -1293,26 +1296,27 @@ class SessionModelContext(ModelContext):
                 )
                 started_emitted = True
 
-                if use_window_hook:
-                    event, window = await processor.on_get_context_window(
-                        self,
-                        window,
-                        force=True,
-                        **kwargs,
-                    )
-                    if event is not None:
-                        ContextUtils.validate_and_fix_context_window(window)
-                        self.set_messages(window.context_messages)
-                    after_messages = list(window.context_messages)
-                else:
-                    event, _ = await processor.on_add_messages(
-                        self,
-                        [],
-                        force=True,
-                        **kwargs,
-                    )
-                    after_messages = self.get_messages()
-                    window.context_messages = after_messages
+                with context_compression_operation(operation_id):
+                    if use_window_hook:
+                        event, window = await processor.on_get_context_window(
+                            self,
+                            window,
+                            force=True,
+                            **kwargs,
+                        )
+                        if event is not None:
+                            ContextUtils.validate_and_fix_context_window(window)
+                            self.set_messages(window.context_messages)
+                        after_messages = list(window.context_messages)
+                    else:
+                        event, _ = await processor.on_add_messages(
+                            self,
+                            [],
+                            force=True,
+                            **kwargs,
+                        )
+                        after_messages = self.get_messages()
+                        window.context_messages = after_messages
 
                 status = "completed" if event is not None else "noop"
                 await self._build_and_emit_compression_state(
