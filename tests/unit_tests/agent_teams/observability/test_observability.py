@@ -78,7 +78,7 @@ class _FakeUsage:
     input_tokens: int = 12
     output_tokens: int = 7
     total_tokens: int = 19
-    cache_tokens: int = 0
+    cache_read_tokens: int | None = None
     reasoning_tokens: int = 0
     model_name: str = "fake-llm-1"
 
@@ -386,7 +386,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         content="42",
         reasoning_content="Six times seven equals forty-two.",
         finish_reason="stop",
-        usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
+        usage=_FakeUsage(reasoning_tokens=5, cache_read_tokens=2),
     )
     # Mirror the real streaming trigger (openai_model_client): response is the
     # content string, usage is the metadata object, passed separately. The
@@ -417,12 +417,12 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert _attr(span, "gen_ai.usage.prompt_tokens") == 10
     assert _attr(span, "gen_ai.usage.completion_tokens") == 2
     assert _attr(span, "gen_ai.usage.total_tokens") == 19
-    assert _attr(span, "gen_ai.usage.cache_tokens") == 2
+    assert _attr(span, "gen_ai.usage.cache_read.input_tokens") == 2
     assert _attr(span, "gen_ai.usage.reasoning_tokens") == 5
     assert (
         _attr(span, "gen_ai.usage.prompt_tokens")
         + _attr(span, "gen_ai.usage.completion_tokens")
-        + _attr(span, "gen_ai.usage.cache_tokens")
+        + _attr(span, "gen_ai.usage.cache_read.input_tokens")
         + _attr(span, "gen_ai.usage.reasoning_tokens")
     ) == _attr(span, "gen_ai.usage.total_tokens")
 
@@ -2732,7 +2732,7 @@ def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
         input_tokens=1000,
         output_tokens=100,
         total_tokens=1100,
-        cache_tokens=900,
+        cache_read_tokens=900,
         reasoning_tokens=40,
     )
 
@@ -2752,12 +2752,12 @@ def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
     langfuse = _recorded("langfuse")
     assert langfuse["gen_ai.usage.prompt_tokens"] == 100  # 1000 - 900 cached
     assert langfuse["gen_ai.usage.completion_tokens"] == 60  # 100 - 40 reasoning
-    assert langfuse["gen_ai.usage.cache_tokens"] == 900
+    assert langfuse["gen_ai.usage.cache_read.input_tokens"] == 900
     assert langfuse["gen_ai.usage.reasoning_tokens"] == 40
     assert (
         langfuse["gen_ai.usage.prompt_tokens"]
         + langfuse["gen_ai.usage.completion_tokens"]
-        + langfuse["gen_ai.usage.cache_tokens"]
+        + langfuse["gen_ai.usage.cache_read.input_tokens"]
         + langfuse["gen_ai.usage.reasoning_tokens"]
     ) == langfuse["gen_ai.usage.total_tokens"] == 1100
 
@@ -2792,7 +2792,7 @@ def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
         LlmSpanState(span=span, start_ns=0),
         _FakeUsage(
             input_tokens=10, output_tokens=5, total_tokens=15,
-            cache_tokens=0, reasoning_tokens=9,  # > completion
+            cache_read_tokens=0, reasoning_tokens=9,  # > completion
         ),
     )
 

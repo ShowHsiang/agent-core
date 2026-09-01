@@ -23,13 +23,14 @@
 
 ```
 team.{team_name}                                         ROOT
-├── agent.{member}.task_iteration.{n}                    AGENT
-│   ├── llm.call                                         GENERATION
-│   │   └── llm.reasoning                                SPAN（条件创建：有 reasoning 文本时）
-│   ├── tool.{name}                                      TOOL
-│   └── agent.{subagent}.invoke                         AGENT（subagent 嵌套）
-│       ├── llm.call
-│       └── tool.{name}
+├── agent.{member}.task_iteration.{n}                    AGENT（Iteration：一次 Agent Loop 控制循环）
+│   └── agent.{member}.react_iteration.{n}               AGENT（Step：一次物理模型请求及其工具，条件创建）
+│       ├── llm.call                                     GENERATION
+│       │   └── llm.reasoning                            SPAN（条件创建：有 reasoning 文本时）
+│       ├── tool.{name}                                  TOOL
+│       └── agent.{subagent}.invoke                      AGENT（subagent 嵌套）
+│           ├── llm.call
+│           └── tool.{name}
 ├── agent.{member}.invoke                                AGENT（单轮 subagent standalone）
 │   └── llm.call
 ├── task.{task_id}                                       SPAN
@@ -45,6 +46,8 @@ team.{team_name}                                         ROOT
 
 所有 member（leader、teammate、swarmflow worker）的 span 结构一致，统一为 `agent.{member_name}.task_iteration.{n}`。
 
+**agent 层自身是嵌套的**：`react_iteration` Step 由 `before_model_call` 在 `ctx.inputs.react_iteration > 0` 时开启、`after_react_iteration` 关闭，代表一次物理模型请求连同它触发的工具，挂在同轮的 `task_iteration` 之下。因此"agent span 的父节点必然是 team span"不成立——成立的是「每条 agent 父链只经过 agent span，最终落到 team span」。`react_iteration` 缺席时（单轮 invoke 路径、iteration 未编号）`llm.call` / `tool.*` 直接挂在外层 agent span 下。
+
 **Swarmflow 并发 worker**：每个 worker 在自己的 asyncio task 中运行，共享同一个 trace。
 Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.call` / `tool.*` 子 span 通过 OTel parent span identity（而非 asyncio task id）与父 agent span 关联。
 多个 worker 的 LLM 回调可能 fire 在不同的 asyncio task 上（stream forwarding），
@@ -56,6 +59,7 @@ Worker 的 `agent.wf-worker-*` span 直接挂在 `team.{name}` 下，其 `llm.ca
 |-----------|------|----------|
 | `team.{name}` | SPAN | ROOT span |
 | `agent.{member}.task_iteration.{n}` | AGENT | `langfuse.observation.type = "agent"` |
+| `agent.{member}.react_iteration.{n}` | AGENT | `langfuse.observation.type = "agent"`；另带 `openjiuwen.trajectory.record.kind = "step"` + `openjiuwen.step.id` / `openjiuwen.step.number` |
 | `llm.call` | GENERATION | `gen_ai.operation.name = "chat"` → Langfuse 推断 |
 | `llm.reasoning` | SPAN | 挂在 `llm.call` 下，`gen_ai.completion.0.is_reasoning = True` |
 | `tool.{name}` | TOOL | `langfuse.observation.type = "tool"` |
@@ -186,11 +190,15 @@ LLM span state（`LlmSpanState`）附着在 OTel Span 对象上，不受 asyncio
 | `langfuse.observation.output` | 完整 choices JSON（含 usage） | langfuse UI 输出 |
 | `gen_ai.tool.definitions` | tools | 工具定义 JSON |
 | `gen_ai.tool_calls` | response.tool_calls | 工具调用 JSON |
-| `gen_ai.usage.prompt_tokens` | usage（`input_tokens`） | 输入 token |
-| `gen_ai.usage.completion_tokens` | usage（`output_tokens`） | 输出 token |
+| `gen_ai.usage.prompt_tokens` | usage（`input_tokens`） | 输入 token。**langfuse backend 下扣除缓存命中部分**，见下方 Usage 采集 |
+| `gen_ai.usage.completion_tokens` | usage（`output_tokens`） | 输出 token。**langfuse backend 下扣除推理部分** |
 | `gen_ai.usage.total_tokens` | usage（`total_tokens`） | 总 token |
-| `gen_ai.usage.cache_tokens` | usage（`cache_tokens`） | 缓存命中 token；provider 未返回则不设 |
 | `gen_ai.usage.reasoning_tokens` | usage（`reasoning_tokens`） | 推理 token，取业务层提取值，采集层不自行计算 |
+| `gen_ai.usage.input_tokens` | usage（`input_tokens`） | provider 原始输入计数，不参与 carve-out |
+| `gen_ai.usage.output_tokens` | usage（`output_tokens`） | provider 原始输出计数，不参与 carve-out |
+| `gen_ai.usage.reasoning.output_tokens` | usage（`reasoning_tokens`） | 推理 token 的标准 GenAI 键，不参与 carve-out |
+| `gen_ai.usage.cache_read.input_tokens` | usage（`cache_read_tokens`） | 缓存命中 token；provider 未返回（字段为 `None`）则不设 |
+| `gen_ai.usage.cache_creation.input_tokens` | usage（`cache_write_tokens`） | 缓存写入 token；provider 未返回（字段为 `None`）则不设 |
 | `gen_ai.response.time_to_first_token_ms` | `first_chunk_ns - start_ns` | 流式首 chunk 到达耗时（仅流式） |
 | `gen_ai.response.finish_reason` | response | 结束原因（每个 chunk 的 response 对象携带） |
 | `gen_ai.response.model` | usage（`model_name`） | 实际响应模型 |
@@ -221,13 +229,27 @@ OTel `BoundedAttributes` 使用 FIFO 驱逐（最先驱逐最早写入的 attrib
 - 标准 `gen_ai.prompt.{i}.*` 和 `gen_ai.completion.0.*` 属性**不写**（避免重复）
 - 仅写 `langfuse.gen_ai.prompt.{i}.*` 和 `langfuse.gen_ai.completion.0.*`
 - `langfuse.observation.input` / `langfuse.observation.output` 永远写
-- 其他 `gen_ai.usage.*` / `gen_ai.request.*` 不受影响
+- `gen_ai.request.*` 不受影响；`gen_ai.usage.*` 的键名不受影响，但 `prompt_tokens` / `completion_tokens` 的**取值**会按下方 carve-out 扣减
 
 ### Usage 采集
 
 - 直接从 `usage_metadata` 对象 dump 完整 usage 到 `langfuse.observation.output` 的 JSON 中
-- `model_dump()` 整个 usage 对象（不逐字段过滤），确保 `cache_tokens` / `reasoning_tokens` 及未来新字段自动流通
+- `model_dump()` 整个 usage 对象（不逐字段过滤），确保 `cache_read_tokens` / `reasoning_tokens` 及未来新字段自动流通
+- 缓存 token 只认标准字段 `cache_read_tokens` / `cache_write_tokens`（映射到 `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens`）。legacy 的 `usage.cache_tokens` 与 `gen_ai.usage.cache_tokens` 在 LLM 主路径**不再读也不再写**——`semconv.GEN_AI_USAGE_CACHE_TOKENS` 常量仅剩 codex bridge（`observability/codex/bridge.py`，数据源是 rollout 的 `cached_input_tokens`）使用
 - `_record_usage_attrs` 支持 `skip_existing=True`（流式回调中 usage 可能被 chunk 级别的 `_maybe_record_response_attrs` 先写入）
+
+#### Langfuse carve-out：token 子集扣减
+
+缓存命中与推理 token 是 provider 报的 prompt / completion 计数的**子集**，不是额外 token。Langfuse 把每个 `gen_ai.usage.*` 键当作独立的累加类别（按 observation 和 trace 分别求和），于是缓存前缀被重复计一次——长会话里大部分 prompt 都是缓存命中，trace 总量会虚高一半以上。
+
+因此 `backend = "langfuse"` 时，子集从各自的父计数中扣除，使这几个键互斥且加总等于 provider 报的 total：
+
+- `prompt_tokens = input_tokens - cache_read_tokens`（新处理的 prompt）
+- `completion_tokens = output_tokens - reasoning_tokens`（可见输出）
+
+子集大于父计数时（provider 把 reasoning 记在 completion 之外）**跳过扣减**，保留原始数字——扣出来的是编造的数，不是测量值。
+
+其余 backend 不做任何扣减：`gen_ai.usage.prompt_tokens` 保持 semconv 语义（全部输入 token）。`gen_ai.usage.input_tokens` / `output_tokens` / `reasoning.output_tokens` 这组 additive 键**永远**写 provider 原值，不继承 carve-out。
 
 ### Reasoning Span (`llm.reasoning`，条件创建)
 

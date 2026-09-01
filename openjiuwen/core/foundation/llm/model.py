@@ -263,11 +263,15 @@ class Model:
 
                 chunk_count += 1
                 last_chunk_at = time.monotonic()
-                accumulated_chunk = (
-                    accumulated_chunk + chunk
-                    if accumulated_chunk is not None
-                    else chunk
-                )
+                # A client (or an LLM_STREAM_OUTPUT transform callback ahead of
+                # this frame) may yield something other than a message chunk;
+                # only real chunks accumulate into the completed message.
+                if isinstance(chunk, AssistantMessageChunk):
+                    accumulated_chunk = (
+                        accumulated_chunk + chunk
+                        if accumulated_chunk is not None
+                        else chunk
+                    )
                 yield chunk
 
             completed_message = (
