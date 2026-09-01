@@ -42,6 +42,7 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.harness.observability import span_context as agent_span_context
 from openjiuwen.harness.observability import setup as agent_setup
+from openjiuwen.harness.execution_subject import ExecutionSubject
 from openjiuwen.harness.observability.run_span import (
     build_run_span_name,
     close_agent_run_span,
@@ -138,6 +139,28 @@ def test_root_routing_attributes_exist_during_processor_on_start(monkeypatch) ->
         close_agent_run_span(handle, session_id="sess-live")
         shared_span_context.reset_state()
         agent_span_context.reset_run_root_spans()
+
+
+def test_root_uses_explicit_execution_subject_for_out_of_turn_team_work(exporter) -> None:
+    subject = ExecutionSubject(
+        subject_id="team-member:sess-team:demo:leader",
+        display_name="Leader",
+        kind="team_leader",
+        session_id="sess-team",
+    )
+
+    handle = open_agent_run_span(
+        session_id="sess-team",
+        mode="team.work.normal",
+        execution_subject=subject,
+    )
+    close_agent_run_span(handle, session_id="sess-team")
+
+    root = exporter.get_finished_spans()[0]
+    assert root.attributes[OJ_EXECUTION_SUBJECT_ID] == subject.subject_id
+    assert root.attributes[OJ_EXECUTION_SUBJECT_DISPLAY_NAME] == "Leader"
+    assert root.attributes[OJ_EXECUTION_SUBJECT_KIND] == "team_leader"
+    assert root.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "sess-team"
 
 
 def test_close_ends_the_span_stamps_the_output_and_clears_the_root(exporter) -> None:

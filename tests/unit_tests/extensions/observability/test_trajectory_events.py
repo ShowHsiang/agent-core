@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
@@ -12,6 +13,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
@@ -44,7 +46,10 @@ from openjiuwen.extensions.observability.span_context import (
     queue_context_window_compaction,
     reset_state,
     set_root_span,
+    set_current_agent_span,
 )
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
+from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.extensions.observability.trajectory_events import (
     emit_context_window_commit,
     emit_native_trajectory_event,
@@ -57,6 +62,73 @@ def _attrs(span) -> dict:
 
 def _payload(span) -> dict:
     return json.loads(_attrs(span)[OJ_TRAJECTORY_PAYLOAD])
+
+
+@pytest.mark.asyncio
+async def test_ask_user_records_requested_and_resolved_events_across_closed_spans() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("ask-user-events-test")
+    rail = AskUserRail()
+    rail.tools = [AskUserTool()]
+    card = rail.tools[0].card
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(ability_manager=SimpleNamespace(get=lambda _name: card)),
+    )
+    tool_call = ToolCall(
+        id="call-ask-user",
+        type="function",
+        name="ask_user",
+        arguments=json.dumps({"query": "Choose", "questions": []}),
+        index=0,
+    )
+    attributes = {
+        OJ_SESSION_ID: "ask-session",
+        OJ_EXECUTION_SUBJECT_ID: "ask-subject",
+        OJ_EXECUTION_SUBJECT_KIND: "team_leader",
+        OJ_TURN_NUMBER: 2,
+        OJ_STEP_NUMBER: 3,
+    }
+    requested_parent = tracer.start_span("agent.requested", attributes=attributes)
+    set_current_agent_span(requested_parent)
+    try:
+        decision = await rail.resolve_interrupt(None, tool_call, None)
+        rail._record_ask_user_event(ctx, tool_call, None, decision)
+    finally:
+        requested_parent.end()
+
+    resolved_parent = tracer.start_span("agent.resolved", attributes=attributes)
+    set_current_agent_span(resolved_parent)
+    try:
+        user_input = AskUserPayload(answers={"Choose": "Option A"})
+        decision = await rail.resolve_interrupt(
+            None,
+            tool_call,
+            user_input,
+        )
+        rail._record_ask_user_event(ctx, tool_call, user_input, decision)
+    finally:
+        resolved_parent.end()
+        set_current_agent_span(None)
+        provider.shutdown()
+        reset_state()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 2
+    requested_event = spans[0].events[0]
+    resolved_event = spans[1].events[0]
+    assert requested_event.name == "ask_user.requested"
+    assert resolved_event.name == "ask_user.resolved"
+    requested_payload = json.loads(dict(requested_event.attributes)[OJ_TRAJECTORY_PAYLOAD])
+    resolved_payload = json.loads(dict(resolved_event.attributes)[OJ_TRAJECTORY_PAYLOAD])
+    assert requested_payload["interaction_id"] == "call-ask-user"
+    assert requested_payload["schema"]["name"] == "ask_user"
+    assert requested_payload["status"] == "pending"
+    assert resolved_payload["interaction_id"] == "call-ask-user"
+    assert resolved_payload["answers"] == {"Choose": "Option A"}
+    assert resolved_payload["outcome"] == "answered"
+    assert resolved_payload["status"] == "completed"
 
 
 @pytest.mark.asyncio
