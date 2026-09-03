@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
 
 
 if TYPE_CHECKING:
@@ -129,6 +129,7 @@ class TaskTool(Tool):
         card: ToolCard,
         parent_agent: "DeepAgent",
         language: str = "cn",
+        allowed_subagent_types: Collection[str] | None = None,
     ):
         """Initialize TaskTool.
 
@@ -141,6 +142,23 @@ class TaskTool(Tool):
         super().__init__(card)
         self.parent_agent = parent_agent
         self.language = language
+
+        self.set_allowed_subagent_types(allowed_subagent_types)
+
+    def set_allowed_subagent_types(
+        self,
+        allowed_subagent_types: Collection[str] | None,
+    ) -> None:
+        """Restrict which configured subagents may use synchronous delegation."""
+        self._allowed_subagent_types = (
+            None
+            if allowed_subagent_types is None
+            else frozenset(
+                str(name).strip()
+                for name in allowed_subagent_types
+                if str(name).strip()
+            )
+        )
 
     @staticmethod
     def _build_sub_session_id(
@@ -244,6 +262,19 @@ class TaskTool(Tool):
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason="Both 'subagent_type' and 'task' are required",
+            )
+
+        normalized_type = str(subagent_type).strip()
+        if (
+            self._allowed_subagent_types is not None
+            and normalized_type not in self._allowed_subagent_types
+        ):
+            raise build_error(
+                StatusCode.TOOL_TASK_TOOL_INVOKED,
+                reason=(
+                    f"Subagent type '{normalized_type}' is not available through "
+                    "task_tool"
+                ),
             )
 
         browser_capabilities: Optional[List[str]] = None
@@ -450,6 +481,7 @@ def create_task_tool(
     available_agents: str,
     language: str = "cn",
     agent_id: Optional[str] = None,
+    allowed_subagent_types: Collection[str] | None = None,
 ) -> List[Tool]:
     """Create TaskTool instance for the given parent agent.
 
@@ -474,7 +506,14 @@ def create_task_tool(
         "resilience": {"timeout_s": DEFAULT_SUBAGENT_TASK_TIMEOUT_S},
     }
 
-    return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
+    return [
+        TaskTool(
+            card=card,
+            parent_agent=parent_agent,
+            language=language,
+            allowed_subagent_types=allowed_subagent_types,
+        )
+    ]
 
 
 __all__ = [

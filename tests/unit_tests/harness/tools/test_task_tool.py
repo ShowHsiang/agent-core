@@ -337,6 +337,20 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "required"):
             await tool.invoke({"subagent_type": "code"}, session=session)
 
+    async def test_task_tool_rejects_type_reserved_for_runtime(self) -> None:
+        parent_agent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: None)
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+            allowed_subagent_types={"browser_agent"},
+        )
+
+        with self.assertRaisesRegex(Exception, "not available through task_tool"):
+            await tool.invoke(
+                {"subagent_type": "research_agent", "task_description": "research"},
+                session=Session(session_id="parent_session"),
+            )
+
     async def test_task_tool_creates_fresh_browser_model_session(self) -> None:
         called_inputs: dict[str, str] = {}
 
@@ -493,6 +507,19 @@ class TestTaskToolSync(unittest.TestCase):
         self.assertEqual(
             AbilityManager._resolve_call_timeout(tools[0].card),
             DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
+
+    def test_create_task_tool_propagates_allowed_subagent_types(self) -> None:
+        tools = create_task_tool(
+            parent_agent=SimpleNamespace(deep_config=None),
+            available_agents="browser_agent",
+            language="cn",
+            allowed_subagent_types={"browser_agent"},
+        )
+
+        self.assertEqual(
+            tools[0]._allowed_subagent_types,
+            frozenset({"browser_agent"}),
         )
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
