@@ -29,6 +29,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRa
 from openjiuwen.harness.rails._multimodal import (
     should_enable_read_image_multimodal,
 )
+
 from ..controllers import ActionController, BaseController, validate_batch_steps
 from ..utils.parsing import extract_json_object
 from .browser_capabilities import (
@@ -46,13 +47,13 @@ from .browser_working_context import (
     latest_browser_user_request,
 )
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget
+from .probe_semantics import normalize_card_probe_payload
 from .probes import (
     build_browser_state_metadata_js,
     build_card_probe_js,
     build_interactive_probe_js,
 )
-from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget
-from .probe_semantics import normalize_card_probe_payload
 from .semantic_state import SemanticStateTracker, price_interval_signature
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import (
@@ -61,7 +62,6 @@ from .site_profiles import (
     site_profiles_for_url,
 )
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
-
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
