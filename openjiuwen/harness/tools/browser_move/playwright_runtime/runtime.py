@@ -5039,20 +5039,18 @@ class BrowserRuntimeRail(AgentRail):
 
     @classmethod
     def _missing_evidence_slots(cls, state: Dict[str, Any]) -> list[Dict[str, str]]:
-        required_slots = {
-            cls._evidence_slot_key(slot)
-            for slot in state.get("required_evidence_slots") or []
-            if isinstance(slot, dict)
-        }
-        covered_slots = {
-            cls._evidence_slot_key(slot)
-            for slot in state.get("evidence_slots") or []
-            if isinstance(slot, dict)
-            and (
-                slot.get("value") not in (None, "")
-                or str(slot.get("status") or "").strip().lower() in {"missing", "unknown"}
-            )
-        }
+        required_slots = set()
+        for slot in state.get("required_evidence_slots") or []:
+            if isinstance(slot, dict):
+                required_slots.add(cls._evidence_slot_key(slot))
+
+        covered_slots = set()
+        for slot in state.get("evidence_slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            status = str(slot.get("status") or "").strip().lower()
+            if slot.get("value") not in (None, "") or status in {"missing", "unknown"}:
+                covered_slots.add(cls._evidence_slot_key(slot))
         return [
             {"entity": entity, "variant": variant, "field": field_name}
             for entity, variant, field_name in sorted(required_slots - covered_slots)
@@ -5060,24 +5058,28 @@ class BrowserRuntimeRail(AgentRail):
 
     @classmethod
     def _unavailable_evidence_slots(cls, state: Dict[str, Any]) -> list[Dict[str, str]]:
-        required_slots = {
-            cls._evidence_slot_key(slot)
-            for slot in state.get("required_evidence_slots") or []
-            if isinstance(slot, dict)
-        }
-        return [
-            {
-                "entity": key[0],
-                "variant": key[1],
-                "field": key[2],
-                "status": str(slot.get("status") or "unknown"),
-            }
-            for slot in state.get("evidence_slots") or []
-            if isinstance(slot, dict)
-            and cls._evidence_slot_key(slot) in required_slots
-            and str(slot.get("status") or "").strip().lower() in {"missing", "unknown"}
-            for key in [cls._evidence_slot_key(slot)]
-        ]
+        required_slots = set()
+        for slot in state.get("required_evidence_slots") or []:
+            if isinstance(slot, dict):
+                required_slots.add(cls._evidence_slot_key(slot))
+
+        unavailable = []
+        for slot in state.get("evidence_slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            key = cls._evidence_slot_key(slot)
+            status = str(slot.get("status") or "").strip().lower()
+            if key not in required_slots or status not in {"missing", "unknown"}:
+                continue
+            unavailable.append(
+                {
+                    "entity": key[0],
+                    "variant": key[1],
+                    "field": key[2],
+                    "status": status or "unknown",
+                }
+            )
+        return unavailable
 
     @staticmethod
     def _evidence_slot_key(slot: Dict[str, Any]) -> tuple[str, str, str]:
@@ -5965,19 +5967,19 @@ class BrowserRuntimeRail(AgentRail):
             compact = cls._compact_evidence_card(card, result)
             if compact is None:
                 continue
-            fields.update(
-                field_name
-                for field_name in compact
-                if field_name
-                not in {
-                    "generation_id",
-                    "result_index",
-                    "kind",
-                    "provenance",
-                    "field_status",
-                }
-                and compact.get("field_status", {}).get(field_name, "present") == "present"
-            )
+            metadata_fields = {
+                "generation_id",
+                "result_index",
+                "kind",
+                "provenance",
+                "field_status",
+            }
+            field_status = compact.get("field_status", {})
+            for field_name in compact:
+                if field_name in metadata_fields:
+                    continue
+                if field_status.get(field_name, "present") == "present":
+                    fields.add(field_name)
             compact_cards.append(compact)
             if len(compact_cards) >= 5:
                 break

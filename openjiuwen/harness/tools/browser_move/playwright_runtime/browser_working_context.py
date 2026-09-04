@@ -14,7 +14,6 @@ from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 
-
 BROWSER_WORKING_CONTEXT_STATE_KEY = "__browser_subagent_working_context__"
 BROWSER_TASK_STATE_KEY = "__browser_phase_budget_state__"
 BROWSER_TOOL_MEMORY_METADATA_KEY = "browser_working_context_retention"
@@ -623,15 +622,16 @@ class BrowserWorkingContextStore:
         selected_filters = semantic_state.get("selected_filters")
         selected_filters = selected_filters if isinstance(selected_filters, list) else []
         if "sort_state" in required_fields:
-            sort_candidates = [
-                item
-                for item in selected_filters
-                if isinstance(item, dict)
-                and any(
-                    token in f"{item.get('key', '')} {item.get('value', '')}".lower()
+            sort_candidates = []
+            for item in selected_filters:
+                if not isinstance(item, dict):
+                    continue
+                filter_text = f"{item.get('key', '')} {item.get('value', '')}".lower()
+                if any(
+                    token in filter_text
                     for token in ("sort", "order", "sales", "销量", "排序", "价格", "最新", "综合")
-                )
-            ]
+                ):
+                    sort_candidates.append(item)
             if sort_candidates:
                 selected = sort_candidates[-1]
                 value = str(selected.get("value") or selected.get("key") or "")[:500]
@@ -775,15 +775,15 @@ class BrowserWorkingContextStore:
 
         slots = state.get("evidence_slots")
         if state.get("required_evidence_slots") and isinstance(slots, list):
-            state["field_coverage"] = sorted(
-                {
-                    str(slot.get("field") or "")
-                    for slot in slots
-                    if isinstance(slot, dict)
-                    and str(slot.get("status") or "present").strip().lower() == "present"
-                    and str(slot.get("field") or "").strip()
-                }
-            )
+            coverage = set()
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    continue
+                field_name = str(slot.get("field") or "").strip()
+                status = str(slot.get("status") or "present").strip().lower()
+                if field_name and status == "present":
+                    coverage.add(field_name)
+            state["field_coverage"] = sorted(coverage)
             return
 
         evidence = state.get("structured_evidence")
@@ -793,11 +793,10 @@ class BrowserWorkingContextStore:
                 continue
             statuses = record.get("field_status")
             statuses = statuses if isinstance(statuses, dict) else {}
-            coverage.update(
-                str(field_name)
-                for field_name in record.get("fields") or []
-                if str(field_name).strip() and statuses.get(field_name, "present") == "present"
-            )
+            for field_name in record.get("fields") or []:
+                normalized_field = str(field_name).strip()
+                if normalized_field and statuses.get(field_name, "present") == "present":
+                    coverage.add(normalized_field)
         state["field_coverage"] = sorted(coverage)
 
     @staticmethod
@@ -897,17 +896,15 @@ class BrowserWorkingContextStore:
                 details["completion_evidence"] = "post-action semantic observation"
                 phase_names = list(phases)
                 try:
-                    remaining = phase_names[phase_names.index(phase) + 1 :]
+                    remaining = phase_names[phase_names.index(phase) + 1:]
                 except ValueError:
                     remaining = []
-                next_phase = next(
-                    (
-                        name
-                        for name in remaining
-                        if isinstance(phases.get(name), dict) and phases[name].get("status") != "completed"
-                    ),
-                    phase,
-                )
+                next_phase = phase
+                for name in remaining:
+                    phase_details = phases.get(name)
+                    if isinstance(phase_details, dict) and phase_details.get("status") != "completed":
+                        next_phase = name
+                        break
                 state["current_phase"] = next_phase
                 state["next_action_class"] = next_phase
         return outcome_status == "ambiguous" or bool(state.get("replan_trial_pending"))

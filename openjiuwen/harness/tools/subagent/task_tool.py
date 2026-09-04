@@ -135,6 +135,17 @@ class _BrowserQueryContext:
     early_output: ToolOutput | None = None
 
 
+@dataclass(frozen=True)
+class _SubagentInputContext:
+    """Related invocation metadata used to build one subagent request."""
+
+    sub_session_id: str
+    parent_session_id: str
+    parent_invocation_id: str | None
+    affinity_enabled: bool
+    browser_query: _BrowserQueryContext | None
+
+
 class TaskTool(Tool):
     """Tool for delegating tasks to ephemeral subagents with isolated context.
 
@@ -476,26 +487,25 @@ class TaskTool(Tool):
             }
             return _BrowserQueryContext(records, record, key, task_description, "")
 
-        return self._prepare_existing_browser_query(
-            parent_session,
-            records,
-            existing_query,
-            key,
-            task_description,
-            requested_resume_id,
+        query = _BrowserQueryContext(
+            records=records,
+            record=existing_query,
+            key=key,
+            task_description=task_description,
+            resume_task_id=requested_resume_id,
         )
+        return self._prepare_existing_browser_query(parent_session, query)
 
     def _prepare_existing_browser_query(
         self,
         parent_session: Session,
-        records: dict[str, dict[str, Any]],
-        existing_query: dict[str, Any],
-        key: tuple[str, str],
-        task_description: Any,
-        requested_resume_id: str,
+        query: _BrowserQueryContext,
     ) -> _BrowserQueryContext:
         """Validate and focus the only permitted continuation for a browser query."""
 
+        records = query.records
+        existing_query = query.record
+        requested_resume_id = query.resume_task_id
         stored_resume_id = str(existing_query.get("sub_session_id") or "").strip()
         if requested_resume_id and requested_resume_id != stored_resume_id:
             raise build_error(
@@ -517,8 +527,8 @@ class TaskTool(Tool):
             return _BrowserQueryContext(
                 records,
                 existing_query,
-                key,
-                task_description,
+                query.key,
+                query.task_description,
                 stored_resume_id,
                 self._existing_browser_query_output(existing_query, code=code),
             )
@@ -530,8 +540,8 @@ class TaskTool(Tool):
             return _BrowserQueryContext(
                 records,
                 existing_query,
-                key,
-                task_description,
+                query.key,
+                query.task_description,
                 stored_resume_id,
                 self._existing_browser_query_output(
                     existing_query,
@@ -548,7 +558,7 @@ class TaskTool(Tool):
         return _BrowserQueryContext(
             records,
             existing_query,
-            key,
+            query.key,
             self._focused_browser_resume_task(existing_query),
             stored_resume_id,
         )
@@ -636,28 +646,24 @@ class TaskTool(Tool):
     @staticmethod
     def _build_subagent_inputs(
         task_description: Any,
-        sub_session_id: str,
-        parent_session_id: str,
-        parent_invocation_id: str | None,
-        affinity_enabled: bool,
-        browser_query: _BrowserQueryContext | None,
+        context: _SubagentInputContext,
     ) -> dict[str, Any]:
         subagent_inputs: dict[str, Any] = {
             "query": task_description,
-            "conversation_id": sub_session_id,
+            "conversation_id": context.sub_session_id,
         }
-        if browser_query is not None:
-            subagent_inputs["run_context"] = TaskTool._browser_run_context(browser_query)
-        if not affinity_enabled:
+        if context.browser_query is not None:
+            subagent_inputs["run_context"] = TaskTool._browser_run_context(context.browser_query)
+        if not context.affinity_enabled:
             return subagent_inputs
         subagent_inputs.update(
             {
-                "parent_session_id": parent_session_id,
-                "delegation_id": sub_session_id,
+                "parent_session_id": context.parent_session_id,
+                "delegation_id": context.sub_session_id,
             }
         )
-        if parent_invocation_id:
-            subagent_inputs["parent_invocation_id"] = parent_invocation_id
+        if context.parent_invocation_id:
+            subagent_inputs["parent_invocation_id"] = context.parent_invocation_id
         return subagent_inputs
 
     async def _invoke_subagent(
@@ -812,11 +818,13 @@ class TaskTool(Tool):
                     )
                 subagent_inputs = self._build_subagent_inputs(
                     task_description,
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_cache_id,
-                    parent_invocation_id=parent_invocation_id,
-                    affinity_enabled=affinity_enabled,
-                    browser_query=browser_query,
+                    _SubagentInputContext(
+                        sub_session_id=sub_session_id,
+                        parent_session_id=parent_cache_id,
+                        parent_invocation_id=parent_invocation_id,
+                        affinity_enabled=affinity_enabled,
+                        browser_query=browser_query,
+                    ),
                 )
                 if child_session is not None:
                     await child_session.pre_run(inputs=subagent_inputs)

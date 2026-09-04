@@ -555,17 +555,17 @@ class BrowserStateContextProcessor(ContextProcessor):
 
         semantic_state = payload.get("semantic_state")
         if isinstance(semantic_state, dict):
-            compact_semantic = {
-                key: semantic_state.get(key)
-                for key in (
-                    "url",
-                    "form_values",
-                    "selected_filters",
-                    "result_count",
-                    "first_result_text",
-                )
-                if semantic_state.get(key) not in (None, "", [], {})
-            }
+            compact_semantic = {}
+            for key in (
+                "url",
+                "form_values",
+                "selected_filters",
+                "result_count",
+                "first_result_text",
+            ):
+                value = semantic_state.get(key)
+                if value not in (None, "", [], {}):
+                    compact_semantic[key] = value
             for key in ("form_values", "selected_filters"):
                 values = compact_semantic.get(key)
                 if isinstance(values, dict):
