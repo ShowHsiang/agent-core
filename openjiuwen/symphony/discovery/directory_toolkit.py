@@ -8,24 +8,24 @@ import hashlib
 import json
 import re
 import secrets
-import weakref
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard, ToolExposure
-from openjiuwen.symphony.retrieval.search.runtime.lexical import compile_matcher
-from .models import SkillRecord, sanitize_model_text
-from .skillfs import DirectoryEntry, SkillFS, SkillDirectoryView
-from .toolkit import IncrementalNoticeSession, SKILL_INDEX_TOOL_NAME, SkillDCICommandResult
+from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument, LexicalIndex, compile_matcher
 
+from .models import SkillRecord, sanitize_model_text
+from .skillfs import DirectoryEntry, SkillDirectoryView, SkillFS
+from .toolkit import SKILL_INDEX_TOOL_NAME, IncrementalNoticeSession, SkillDCICommandResult
 
 _MIN_OUTPUT_CHARS = 512
 _MAX_OUTPUT_CHARS = 48_000
 _MAX_LINES = 5_000
-_SKILL_DESCRIPTION_CHARS = 60
+_SKILL_DESCRIPTION_CHARS = 180
+_DEFAULT_SEARCH_PAGE_SIZE = 10
 _MAX_CURSORS = 32
-_CURSOR_FOOTER_CHARS = 48
+_CURSOR_FOOTER_CHARS = 96
 _OPERATIONS = ("list", "search", "read")
 _MODEL_OPERATIONS = ("list", "search")
 _LIST_VIEWS = ("names", "details", "tree")
@@ -88,16 +88,11 @@ def _tool_card(tool_id: str) -> ToolCard:
         id=tool_id,
         name=SKILL_INDEX_TOOL_NAME,
         description=(
-            "Discover installed Skills for nontrivial tasks that may have reusable procedures; skip simple "
-            "tasks that need none. Categories are folders: list opens one level; search finds Skills within "
-            "`category` and its descendants, or all Skills when category is omitted. For each missing capability, "
-            "choose one useful next lookup: open a clear category directly, or search distinctive terms "
-            "in a known `category`. Inspect the result before trying alternatives; avoid browsing and searching "
-            "the same need in parallel. Relevant candidates already shown need no further discovery. "
-            "If no fit, change query/category or browse; `[next]` means entries remain unseen. "
-            "Stop when relevant candidates cover the task, without adding loosely related Skills. "
-            "Load selected `[skill]` names with `skill_tool` "
-            "to confirm applicability; copy shown paths exactly, not from categories."
+            "Read-only Skill catalogue, not a filesystem tool. [category] is a virtual group, "
+            "not a disk directory or Skill; counts include descendants. [skill] names a Skill; "
+            "path is its real SKILL.md for file tools, not an input here. "
+            "Calls do not change a working directory. Search returns ranked text matches, not verified capabilities. "
+            "No query translation."
         ),
         input_params={
             "type": "object",
@@ -105,36 +100,36 @@ def _tool_card(tool_id: str) -> ToolCard:
                 "operation": {
                     "type": "string",
                     "enum": list(_MODEL_OPERATIONS),
-                    "description": "list: direct entries (no query); search: ranked Skills (requires query).",
+                    "description": (
+                        "list: direct subcategories and Skills. search: names, aliases, descriptions "
+                        "and SKILL.md including descendants; not other package files."
+                    ),
                 },
                 "category": {
                     "type": "string",
+                    "minLength": 1,
                     "description": (
-                        "Returned category name, or full A > B chain if ambiguous; omit for root or all Skills."
+                        "Scope: returned category name or A > B chain, never a disk path. "
+                        "Omit for root/global on each call."
                     ),
                 },
                 "query": {
-                    "anyOf": [
-                        {
-                            "type": "array",
-                            "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                            "minItems": 1,
-                            "maxItems": 8,
-                            "uniqueItems": True,
-                        },
-                        {"type": "string", "minLength": 1, "maxLength": 512},
-                    ],
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "minItems": 1,
+                    "maxItems": 8,
                     "description": (
-                        "Distinctive terms; preserve names, formats, APIs and techniques. "
-                        "One query per capability; combine its related terms. "
-                        "Use an array for independent capabilities, not paraphrases. Search only."
+                        'Search only. Array even for one query: ["PDF OCR"]. '
+                        "Keep task-specific terms; use the language of Skill descriptions (often English). "
+                        "Independent queries, interleaved and deduplicated. "
+                        "Terms need not all match; no Skill matches yields category hints."
                     ),
                 },
                 "cursor": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Continue [next]; omit category/query or repeat their original values.",
+                    "description": "Copy [next] unchanged. To change query/category, omit cursor.",
                 },
             },
             "required": ["operation"],
@@ -144,6 +139,33 @@ def _tool_card(tool_id: str) -> ToolCard:
         parallel_safe=False,
         stateless=False,
     )
+
+
+class _DirectoryFunction(LocalFunction):
+    """Explain unsupported inputs and normalize unambiguous legacy queries."""
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> Any:
+        if isinstance(inputs, dict):
+            unexpected = inputs.keys() - self.card.input_params["properties"].keys()
+            if unexpected:
+                raise ValueError(
+                    f"Unknown skill_index arguments: {', '.join(sorted(unexpected))}. "
+                    "Only operation, category, query, cursor are accepted. "
+                    'Use {"operation":"list","category":"A > B"} or '
+                    '{"operation":"search","query":["keywords"],"category":"A > B"}; '
+                    "omit category for root/global. Disk paths and globs belong to file tools. "
+                    "For the next page, copy [next] unchanged."
+                )
+            inputs = dict(inputs)
+            category = inputs.get("category")
+            if isinstance(category, str) and not category.strip():
+                inputs.pop("category")
+            query = inputs.get("query")
+            if inputs.get("operation") == "search" and isinstance(query, str):
+                inputs["query"] = [query]
+            elif inputs.get("operation") == "list" and query == []:
+                inputs.pop("query")
+        return await super().invoke(inputs, **kwargs)
 
 
 class InstalledSkillsDirectoryToolkit:
@@ -232,11 +254,10 @@ class InstalledSkillsDirectoryToolkit:
             return await asyncio.to_thread(self._execute, arguments)
 
     def get_tools(self) -> list[Tool]:
-        tool = LocalFunction(
+        tool = _DirectoryFunction(
             card=_tool_card(self._tool_id),
             func=self.skill_index,
         )
-        weakref.finalize(tool, self.close)
         return [tool]
 
     async def aclose(self) -> None:
@@ -249,7 +270,11 @@ class InstalledSkillsDirectoryToolkit:
         self._cursors.clear()
 
     def _continue(
-        self, operation: str, cursor: str, category: str | None, query: str | list[str] | None,
+        self,
+        operation: str,
+        cursor: str,
+        category: str | None,
+        query: str | list[str] | None,
     ) -> SkillDCICommandResult:
         operation = _enum(operation, _MODEL_OPERATIONS, "operation")
         token = _nonempty(cursor, "cursor")
@@ -261,10 +286,10 @@ class InstalledSkillsDirectoryToolkit:
         if operation != state.operation:
             raise ValueError(f"cursor belongs to operation={state.operation}")
         if category is not None and category != state.category:
-            raise ValueError("cursor category differs from the original request")
+            raise ValueError("cursor category differs from the original request; omit cursor to change category")
         original_queries = state.query if isinstance(state.query, tuple) else (state.query,)
         if query is not None and _queries(query, None) != original_queries:
-            raise ValueError("cursor query differs from the original request")
+            raise ValueError("cursor query differs from the original request; omit cursor to start a new search")
         self._cursors.pop(token)
         arguments = {
             "operation": state.operation,
@@ -339,6 +364,11 @@ class InstalledSkillsDirectoryToolkit:
             "operation": operation,
             "returned_skill_count": len({row.worker_id for row in rows if row.worker_id}),
             "returned_category_count": sum(row.text.lstrip().startswith("- [category]") for row in rows),
+            "previously_shown": (
+                operation == "search"
+                and page_size is not None
+                and {row.worker_id for row in rows if row.worker_id}.issubset(self._observed_meta_paths.values())
+            ),
         }
         reserve = 0
         if page_size is not None and rows:
@@ -374,7 +404,7 @@ class InstalledSkillsDirectoryToolkit:
                     fingerprint=artifact.fingerprint,
                 )
             )
-            footer = f"[next] {next_cursor}"
+            footer = "[next] " + json.dumps({"operation": operation, "cursor": next_cursor}, separators=(",", ":"))
             fitted = _append_note(fitted, footer, budget)
             model_content = _append_note(model_content, footer, budget)
         elif page_size is not None and shortened:
@@ -479,6 +509,8 @@ class InstalledSkillsDirectoryToolkit:
                     fixed_strings=fixed_strings,
                     term_mode=simple_page,
                 )
+                if simple_page and not matches:
+                    matches = self._search_categories(view, paths, current_query, max_depth=max_depth)
             else:
                 matches = self._search_entry_one(
                     view,
@@ -515,7 +547,7 @@ class InstalledSkillsDirectoryToolkit:
             indexes = query_indexes_by_id[identity]
             if isinstance(item, DirectoryEntry):
                 if item.kind == "dir":
-                    rows.append(_search_directory_row(item, view, indexes))
+                    rows.append(_search_directory_row(item, view, () if simple_page else indexes))
                 else:
                     record = view.record_by_id[item.worker_id]
                     rows.append(_search_row(record, view, indexes))
@@ -542,6 +574,27 @@ class InstalledSkillsDirectoryToolkit:
         complete = limit is None or all(count < limit for count in query_counts)
         total_count = len(rows) if result == "matches" else len(all_matches)
         return _Execution(tuple(rows), total_count, complete)
+
+    @staticmethod
+    def _search_categories(
+        view: SkillDirectoryView,
+        paths: tuple[str, ...],
+        query: str,
+        *,
+        max_depth: int | None,
+    ) -> tuple[DirectoryEntry, ...]:
+        entries = {
+            entry.path: entry
+            for entry in view.tree_entries(paths, max_depth=max_depth, directories_only=True)
+            if entry.path != "/"
+        }
+        index = LexicalIndex(
+            tuple(
+                LexicalDocument(path, entry.label, _directory_description(entry.description, 300))
+                for path, entry in entries.items()
+            )
+        )
+        return tuple(entries[hit.key] for hit in index.search_terms(query))
 
     def _search_content_one(
         self,
@@ -706,7 +759,10 @@ def _list_row(entry: DirectoryEntry, *, view: str, directory: SkillDirectoryView
     indent = "  " * entry.depth if view == "tree" else ""
     if entry.kind == "dir":
         description = _directory_description(entry.description, 240)
-        detail = f"  desc: {description}" if view != "names" and description else ""
+        count = directory.skill_count(entry.path)
+        detail = f"  desc: Contains {count} skill{'s' if count != 1 else ''}. {description}".rstrip()
+        if view == "names":
+            detail = ""
         return _Row(f"{indent}- [category] {_category_from_path(directory, entry.path)}{detail}")
     record = directory.record_by_id[entry.worker_id]
     category = _skill_category(directory, entry.worker_id)
@@ -750,7 +806,8 @@ def _search_directory_row(
 ) -> _Row:
     mapping = f"  matches: {', '.join(map(str, indexes))}" if indexes else ""
     description = _directory_description(entry.description, 300)
-    detail = f"  desc: {description}" if description else ""
+    count = directory.skill_count(entry.path)
+    detail = f"  desc: Contains {count} skill{'s' if count != 1 else ''}. {description}".rstrip()
     return _Row(f"- [category] {_category_from_path(directory, entry.path)}{mapping}{detail}")
 
 
@@ -914,6 +971,7 @@ def _fit_rows(
     while True:
         shown_count = count_value if count_value is not None and selected else len(selected)
         final_summary = {
+            **summary,
             "operation": summary.get("operation"),
             "returned_skill_count": len({row.worker_id for row in selected if row.worker_id}),
             "returned_category_count": sum(row.text.lstrip().startswith("- [category]") for row in selected),
@@ -928,6 +986,7 @@ def _fit_rows(
     if shortened and not selected:
         if rows and budget is not None:
             fallback_summary = {
+                **summary,
                 "operation": summary.get("operation"),
                 "returned_skill_count": int(bool(rows[0].worker_id)),
                 "returned_category_count": int(rows[0].text.lstrip().startswith("- [category]")),
@@ -952,12 +1011,18 @@ def _row_count(rows: Sequence[_Row]) -> int:
 
 
 def _summary_line(summary: Mapping[str, Any]) -> str:
+    if summary.get("returned_skill_count") and not summary.get("returned_category_count"):
+        return "## Skills — all names previously shown" if summary.get("previously_shown") else "## Skills"
+    if summary.get("returned_category_count") and not summary.get("returned_skill_count"):
+        return (
+            "## Category hints — matching groups, not Skills"
+            if summary.get("operation") == "search"
+            else "## Categories"
+        )
+    if summary.get("returned_category_count"):
+        return "## Skills and category hints" if summary.get("operation") == "search" else "## Entries"
     if summary.get("operation") == "search":
         return "## Skills"
-    if summary.get("returned_skill_count") and not summary.get("returned_category_count"):
-        return "## Skills"
-    if summary.get("returned_category_count") and not summary.get("returned_skill_count"):
-        return "## Categories"
     return "## Results"
 
 
@@ -1013,8 +1078,10 @@ def _apply_simple_defaults(arguments: dict[str, Any], limit: Any) -> None:
     elif operation == "search":
         if arguments.get("skills") is not None:
             raise ValueError("skills are valid only for read")
-        _queries(arguments.get("query"), None)
-        arguments["_page_size"] = result_limit
+        queries = _queries(arguments.get("query"), None)
+        arguments["_page_size"] = (
+            result_limit if limit is not None else min(20, _DEFAULT_SEARCH_PAGE_SIZE * len(queries))
+        )
         arguments["_page_offset"] = 0
     else:
         if arguments.get("query") is not None:
