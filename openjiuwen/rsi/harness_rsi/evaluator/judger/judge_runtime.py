@@ -3,24 +3,43 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.foundation.llm import Model, SystemMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
+from openjiuwen.harness.image_modality_probe import get_cached_image_support
 from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.tools.filesystem import GlobTool, GrepTool, ListDirTool, ReadFileTool
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import inline_evidence
+from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
+    GuardedJudgeModel,
+    JudgeEvidenceTool,
+    bound_tool_content,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
+from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, is_retryable_model_call_failure
+
+
+class JudgeIterationLimitError(EvaluationInfrastructureError):
+    """Reading exhausted its budget without returning a verdict."""
 
 
 class JudgeReadOnlyRail(SysOperationRail):
     """Do not expose shell, write, skill execution or subagent tools to the judge."""
+
+    def __init__(self, workspace: Path | None = None) -> None:
+        super().__init__()
+        self.evidence_workspace = workspace
 
     def init(self, agent: Any) -> None:
         language = agent.system_prompt_builder.language
@@ -36,28 +55,45 @@ class JudgeReadOnlyRail(SysOperationRail):
             GlobTool(self.sys_operation, language, agent_id),
             GrepTool(self.sys_operation, language, agent_id),
         ]
+        if self.evidence_workspace is not None:
+            self.tools.append(JudgeEvidenceTool(self.evidence_workspace, agent_id))
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
 
 class JudgeBudgetRail(AgentRail):
-    """Reserve the final existing turn for structured output and record tool use."""
+    """Bound evidence reading and record tool use without disabling read tools."""
 
     def __init__(self, iterations: int, log_path: Path) -> None:
         self.iterations = iterations
         self.log_path = log_path
+        self.continuation: Callable[[], Awaitable[str]] | None = None
+        self._closed = False
+
+    async def closeout(self, _raw: str) -> str:
+        """Finalize once from complete frozen evidence, never partial read history."""
+        if self._closed or self.continuation is None:
+            raise EvaluationInfrastructureError("Judge closeout context is unavailable or already consumed")
+        self._closed = True
+        try:
+            result = await self.continuation()
+            if not str(result or "").strip():
+                raise RetryableModelOutputError("Judge closeout returned an empty response")
+            return result
+        except Exception as exc:
+            if is_retryable_model_call_failure(exc):
+                self._closed = False
+            raise
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         turn = int(ctx.extra.get("judge_turn", 0)) + 1
         ctx.extra["judge_turn"] = turn
         if turn >= self.iterations:
-            ctx.inputs.tools = None
             await ctx.context.add_messages(
                 UserMessage(
                     content=(
-                        "Final evaluation turn. Return the complete grading JSON now. "
-                        "No more tools are available: do not emit tool calls or tool-call markup. "
-                        "Use the evidence already read; return only the grading JSON object. "
+                        "Final evaluation turn. Finish with the grading JSON when evidence is sufficient. "
+                        "If evidence is still needed, use native read tools, not tool-call markup. "
                         "Missing/deleted deliverables or a summary-only answer are task failures: "
                         "return status=completed, scoring unmet requirements 0. "
                         "Assess criteria independently: missing code does not erase supported "
@@ -71,6 +107,17 @@ class JudgeBudgetRail(AgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         result = ctx.inputs.tool_result
+        data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
+        content = data.get("content") if isinstance(data, dict) else None
+        bounded = bound_tool_content(content)
+        if bounded != content:
+            from openjiuwen.harness.tools.base_tool import ToolOutput
+            original_success = result.get("success", False) if isinstance(result, dict) else result.success
+            original_error = result.get("error") if isinstance(result, dict) else result.error
+            result = ToolOutput(success=original_success, data={**data, "content": bounded}, error=original_error)
+            ctx.inputs.tool_result = result
+            if ctx.inputs.tool_msg is not None:
+                ctx.inputs.tool_msg.content = bounded
         success = result.get("success") if isinstance(result, dict) else getattr(result, "success", None)
         data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
         error = result.get("error") if isinstance(result, dict) else getattr(result, "error", None)
@@ -87,7 +134,7 @@ class JudgeBudgetRail(AgentRail):
             )
 
 
-def build_judge_agent(config: EvaluatorConfig, workspace: Path, log_path: Path) -> Any:
+def _judge_model(config: EvaluatorConfig) -> Model:
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
     ref = config.judge_model_config_ref or config.model_config_ref
@@ -96,8 +143,28 @@ def build_judge_agent(config: EvaluatorConfig, workspace: Path, log_path: Path) 
     request = dict(data.get("model_request_config") or {})
     request.update(temperature=0.0)
     data["model_request_config"] = request
+    spec = TeamModelConfig.model_validate(data)
+    return GuardedJudgeModel(spec.model_client_config, spec.model_request_config)
+
+
+def build_judge_agent(
+    config: EvaluatorConfig, workspace: Path, log_path: Path, *, budget: JudgeBudgetRail | None = None,
+) -> Any:
+    budget = budget or JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
+    model = _judge_model(config)
+
+    async def complete_evidence_verdict() -> str:
+        payload = await asyncio.to_thread(
+            inline_evidence, workspace, max_bytes=model.context_budget(), required=True,
+            include_images=True,
+        )
+        if payload is None:
+            raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
+        return await _invoke_complete_evidence(model, payload)
+
+    budget.continuation = complete_evidence_verdict
     return create_deep_agent(
-        model=TeamModelConfig.model_validate(data).build(),
+        model=model,
         card=AgentCard(name="evaluator_agent", description="Independent reference-based evaluator"),
         system_prompt=Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8"),
         workspace=str(workspace),
@@ -106,20 +173,33 @@ def build_judge_agent(config: EvaluatorConfig, workspace: Path, log_path: Path) 
         enable_task_loop=False,
         enable_task_planning=False,
         enable_skill_discovery=False,
-        max_iterations=config.judge_agent_max_iterations,
+        max_iterations=budget.iterations,
         language="en",
-        rails=[JudgeReadOnlyRail(), JudgeBudgetRail(config.judge_agent_max_iterations, log_path)],
+        rails=[JudgeReadOnlyRail(workspace), budget],
     )
 
 
-async def run_judge_agent(config: EvaluatorConfig, workspace: Path, prompt: str, log_path: Path) -> str:
+async def run_judge_agent(
+    config: EvaluatorConfig, workspace: Path, prompt: str, log_path: Path, *, budget: JudgeBudgetRail | None = None,
+) -> str:
     from openjiuwen.core.runner import Runner
 
-    agent = build_judge_agent(config, workspace, log_path)
+    payload = await asyncio.to_thread(inline_evidence, workspace) if budget is not None else None
+    if payload is not None:
+        model = _judge_model(config)
+
+        async def invoke_direct() -> str:
+            return await _invoke_complete_evidence(model, payload)
+
+        budget.continuation = invoke_direct
+        return await invoke_direct()
+    agent = build_judge_agent(config, workspace, log_path, budget=budget)
     try:
         result = await Runner.run_agent(agent=agent, inputs={"query": prompt}, session=f"judge_{agent.card.id}")
         if isinstance(result, dict):
             if result.get("result_type") == "error":
+                if budget is not None and result.get("output") == "Max iterations reached without completion":
+                    raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
         return json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
@@ -129,3 +209,20 @@ async def run_judge_agent(config: EvaluatorConfig, workspace: Path, prompt: str,
                 rail.uninit(agent)
         await agent.cleanup_task_resources()
         Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
+
+
+async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
+    if isinstance(payload, list):
+        declared = getattr(model.model_client_config, "supports_vision", None)
+        supported = declared if isinstance(declared, bool) else get_cached_image_support(model)
+        if supported is not True:
+            raise EvaluationInfrastructureError(
+                "Judge image evidence requires a vision-capable model with confirmed image support; "
+                "no evidence omitted and no score produced"
+            )
+    policy = await asyncio.to_thread(Path(__file__).with_name("judge_prompt.md").read_text, encoding="utf-8")
+    policy = "All grading evidence is supplied inline. Evaluate it directly.\nEvaluation policy:" + policy.split(
+        "Evaluation policy:", 1,
+    )[1]
+    response = await model.invoke(messages=[SystemMessage(content=policy), UserMessage(content=payload)], tools=None)
+    return response.content or ""
