@@ -151,7 +151,7 @@ def merge_evidence_slot(
                 ):
                     retained.append(item)
             slots[:] = retained
-        elif anchor.get("entity_source") and anchor["entity_source"] != entity:
+        elif anchor.get("entity_source") and anchor.get("entity_source") != entity:
             return
     key = (*logical, slot.get("field"))
     for index, previous in enumerate(slots):
