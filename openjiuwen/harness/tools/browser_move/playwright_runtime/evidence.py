@@ -127,21 +127,30 @@ def merge_evidence_slot(
     slots[:] = [item for item in slots if item.get("query_id", slot["query_id"]) == slot["query_id"]]
     entity = slot.get("entity_source", "")
     logical = (slot.get("entity"), slot.get("variant"))
-    title = next((item for item in reversed(slots) if (
-        (item.get("entity"), item.get("variant")) == logical and item.get("field") == "title"
-    )), {})
-    anchor = title or next((item for item in slots if (
-        (item.get("entity"), item.get("variant")) == logical
-        and item.get("field") not in _PAGE_FIELDS and item.get("entity_source")
-    )), {})
+    anchor = {}
+    for item in reversed(slots):
+        if (item.get("entity"), item.get("variant")) == logical and item.get("field") == "title":
+            anchor = item
+            break
+    if not anchor:
+        for item in slots:
+            if (item.get("entity"), item.get("variant")) != logical:
+                continue
+            if item.get("field") not in _PAGE_FIELDS and item.get("entity_source"):
+                anchor = item
+                break
     if entity and slot.get("field") not in _PAGE_FIELDS:
         if selected_entity or (slot.get("field") == "title" and slot.get("status") == "present"):
             # A corrected first-card/title selection invalidates fields of the old card.
-            slots[:] = [item for item in slots if (
-                (item.get("entity"), item.get("variant")) != logical
-                or item.get("field") in _PAGE_FIELDS
-                or item.get("entity_source") == entity
-            )]
+            retained = []
+            for item in slots:
+                if (
+                    (item.get("entity"), item.get("variant")) != logical
+                    or item.get("field") in _PAGE_FIELDS
+                    or item.get("entity_source") == entity
+                ):
+                    retained.append(item)
+            slots[:] = retained
         elif anchor.get("entity_source") and anchor["entity_source"] != entity:
             return
     key = (*logical, slot.get("field"))
@@ -158,7 +167,8 @@ def merge_evidence_slot(
             return
         same_scope = all(previous.get(name, "") == slot.get(name, "") for name in ("qualifier", "date"))
         same_source = previous.get("source") == slot.get("source")
-        if previous.get("entity_source", "") == entity and same_scope and (same_source or detail_correction):
+        replace_source = same_source or detail_correction
+        if previous.get("entity_source", "") == entity and same_scope and replace_source:
             if previous.get("alternatives"):
                 slot["alternatives"] = previous["alternatives"]
             slots[index] = slot

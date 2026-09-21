@@ -460,6 +460,7 @@ class BrowserAgentRuntime:
         self._selector_primary_links = self._page_state.selector_primary_links
         self._last_observed_url = ""
         self._semantic_state_tracker = SemanticStateTracker()
+        self._task_turn = None
         _ACTIVE_BROWSER_RUNTIMES.add(self)
 
     @property
@@ -604,7 +605,8 @@ class BrowserAgentRuntime:
         return ""
 
     @classmethod
-    def _extract_result_title(cls, value: Any) -> str:
+    def extract_result_title(cls, value: Any) -> str:
+        """Extract the current page title from structured or native MCP results."""
         if isinstance(value, dict):
             direct = value.get("title")
             if direct:
@@ -614,12 +616,12 @@ class BrowserAgentRuntime:
                 return str(page["title"])
             for key in ("page", "page_state", "result", "content", "text"):
                 nested = value.get(key)
-                resolved = cls._extract_result_title(nested)
+                resolved = cls.extract_result_title(nested)
                 if resolved:
                     return resolved
         elif isinstance(value, (list, tuple)):
             for nested in value:
-                resolved = cls._extract_result_title(nested)
+                resolved = cls.extract_result_title(nested)
                 if resolved:
                     return resolved
         elif isinstance(value, str):
@@ -767,7 +769,7 @@ class BrowserAgentRuntime:
             if isinstance(tool_result.get("result"), str):
                 metadata["result"] = tool_result["result"]
         result_url = self.extract_result_url(metadata)
-        result_title = self._extract_result_title(metadata)
+        result_title = self.extract_result_title(metadata)
         navigation_like = _contains_any_token(
             normalized_name,
             ("browser_navigate", "browser_navigate_back", "browser_tabs"),
@@ -1214,9 +1216,10 @@ class BrowserAgentRuntime:
             logger.warning("Browser native observation recall unavailable: %s", exc)
             return text
         lines = text.splitlines()
-        controls = [index for index, line in enumerate(lines) if re.search(
-            r"- (?:textbox|searchbox|combobox|button|tab|radio|checkbox)\b", line,
-        )]
+        controls = []
+        for index, line in enumerate(lines):
+            if re.search(r"- (?:textbox|searchbox|combobox|button|tab|radio|checkbox)\b", line):
+                controls.append(index)
         headings = [index for index, line in enumerate(lines) if re.search(r"- heading\b", line)]
         priority = controls + list(range(min(8, len(lines)))) + headings
         for index in controls + headings:
@@ -1864,7 +1867,7 @@ class BrowserAgentRuntime:
         runtime_url = self.extract_result_url(payload)
         if tool_name == "browser_navigate" and success:
             runtime_url = runtime_url or str(tool_args.get("url") or "")
-        runtime_title = self._extract_result_title(payload)
+        runtime_title = self.extract_result_title(payload)
         step_result = {
             "index": 0,
             "op": op,
@@ -5551,7 +5554,7 @@ class BrowserRuntimeRail(AgentRail):
             return {}
         if destination and cls._is_search_page(source):
             return {}
-        title = page.get("title") or (BrowserAgentRuntime._extract_result_title(result) if navigation else "")
+        title = page.get("title") or (BrowserAgentRuntime.extract_result_title(result) if navigation else "")
         values = {"url": source}
         if title and (navigation or destination):
             values["title"] = str(title)
@@ -5716,9 +5719,13 @@ class BrowserRuntimeRail(AgentRail):
         if not isinstance(cards, list):
             return {}, str(evidence.get("generation_id") or ""), {}, {}
         first = next((card for card in cards if isinstance(card, dict)), {})
-        weather_card = next((card for card in cards if isinstance(card, dict) and (
-            card.get("high_temperature") not in (None, "") and card.get("low_temperature") not in (None, "")
-        )), None)
+        weather_card = None
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            if card.get("high_temperature") not in (None, "") and card.get("low_temperature") not in (None, ""):
+                weather_card = card
+                break
         if weather_card is not None and {"high_temperature", "low_temperature"}.intersection(required_fields):
             first = weather_card
         if not first:

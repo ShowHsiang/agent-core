@@ -893,6 +893,7 @@ class BrowserPageState:
     def _export_targets(self, target_ids: Iterable[str], limit: int) -> list[Dict[str, Any]]:
         exported: list[Dict[str, Any]] = []
         seen: set[str] = set()
+
         def priority(target_id: str) -> int:
             target = self._targets.get(target_id)
             if target is None:

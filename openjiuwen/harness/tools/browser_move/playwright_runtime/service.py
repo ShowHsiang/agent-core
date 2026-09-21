@@ -996,10 +996,11 @@ class BrowserService:
         """Drop observers and task/session state without touching the profile."""
         self._browser_agent = None
         current = asyncio.current_task()
-        pending = {
-            task for tasks in self._inflight_tasks.values() for task in tuple(tasks)
-            if task is not current and not task.done()
-        }
+        pending = set()
+        for tasks in self._inflight_tasks.values():
+            for task in tuple(tasks):
+                if task is not current and not task.done():
+                    pending.add(task)
         for task in pending:
             task.cancel()
         if pending:
