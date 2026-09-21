@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
+from .evidence import author_is_action_label, today_temperature_fields
 from .page_state import CARD_EVIDENCE_FIELDS
 from .site_profiles import (
     apply_site_card_semantics,
@@ -112,6 +113,16 @@ def _attach_field_contract(card: Dict[str, Any], generation_id: str) -> None:
     card["field_provenance"] = field_provenance
 
 
+def _normalize_today_temperatures(card: Dict[str, Any]) -> None:
+    text = " ".join(str(card.get(key) or "") for key in ("title", "summary", "text_preview"))
+    values, raw_text = today_temperature_fields(text)
+    for field_name, value in values.items():
+        if card.get(field_name) in (None, ""):
+            card[field_name] = value
+            card[f"{field_name}_raw_text"] = raw_text
+            card[f"{field_name}_selector_hint"] = card.get("summary_selector_hint") or card.get("selector_hint") or ""
+
+
 def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Make card semantics, missing fields, and provenance deterministic."""
     cards = payload.get("cards")
@@ -138,10 +149,15 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         card["kind"] = kind
         card["is_ad"] = is_ad
         normalize_site_card_fields(card, host=host)
+        if author_is_action_label(card.get("author")):
+            card["author_raw_text"] = card["author"]
+            card["author"] = ""
+            card.setdefault("field_status", {})["author"] = "unknown"
+        _normalize_today_temperatures(card)
         _attach_field_contract(card, generation_id)
 
         is_natural_result = region == "main_result" and kind in {"result", "product", "hotel"} and not is_ad
-        if is_natural_result:
+        if is_natural_result and card.get("order_known") is not False:
             result_index += 1
             card["result_index"] = result_index
         else:

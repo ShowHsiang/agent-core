@@ -6,10 +6,34 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+
+def navigation_destination(href: Any, page_url: str = "", *, role: str = "", kind: str = "") -> str:
+    """A state control or same-document anchor is not a navigation shortcut."""
+    if role in {"button", "tab", "radio", "checkbox", "option", "switch"}:
+        return ""
+    if kind in {"sort_tab", "filter", "filter_option", "date", "calendar_date", "rating_filter"}:
+        return ""
+    raw = str(href or "").strip()
+    if not raw or raw.startswith("#"):
+        return ""
+    try:
+        resolved = urljoin(page_url, raw)
+        target = urlsplit(resolved)
+        current = urlsplit(page_url)
+    except ValueError:
+        return ""
+    if target.scheme not in {"http", "https"} or not target.netloc:
+        return ""
+    target_page = urlunsplit((*target[:4], ""))
+    current_page = urlunsplit((*current[:4], ""))
+    return resolved if target_page != current_page else ""
 
 
 _AX_REF_LINE_RE = re.compile(
@@ -34,6 +58,9 @@ _CARD_SEMANTIC_FIELD_NAMES = (
     "kind",
     "result_index",
     "is_ad",
+    "region_id",
+    "order_known",
+    "order_source",
 )
 CARD_EVIDENCE_FIELDS = (
     "title",
@@ -81,6 +108,26 @@ _MAX_PUBLIC_CARDS = 8
 _MAX_TARGET_HISTORY = 1024
 
 
+def decode_ax_text(value: Any) -> str:
+    """Decode native MCP envelopes without escaping AX line boundaries."""
+    if isinstance(value, str):
+        if value.lstrip().startswith(("{", "[", '"')):
+            try:
+                decoded = json.loads(value)
+            except (ValueError, TypeError):
+                return value
+            if decoded != value:
+                return decode_ax_text(decoded)
+        return value
+    if isinstance(value, Mapping):
+        for key in ("result", "content", "text", "data"):
+            if key in value:
+                return decode_ax_text(value[key])
+    if isinstance(value, list):
+        return "\n".join(decode_ax_text(item) for item in value if isinstance(item, (str, Mapping)))
+    return ""
+
+
 def _compact_text(value: Any, limit: int = 120) -> str:
     return " ".join(str(value or "").split())[:limit]
 
@@ -104,6 +151,7 @@ class BrowserTarget:
     ref: str = ""
     selector: str = ""
     href: str = ""
+    navigation_url: str = ""
     role: str = ""
     name: str = ""
     text: str = ""
@@ -131,6 +179,7 @@ class BrowserTarget:
         }
         if self.href:
             result["href"] = self.href
+            result["recommended_action"] = "navigate_primary_link" if self.navigation_url else "click"
         if self.role:
             result["role"] = self.role
         if self.text:
@@ -182,6 +231,7 @@ class BrowserPageState:
         self._interactive_target_ids: list[str] = []
         self._cards: list[Dict[str, Any]] = []
         self._target_counter = 0
+        self.listing_stale = False
 
     @property
     def generation_id(self) -> str:
@@ -197,6 +247,7 @@ class BrowserPageState:
         self.blockers.clear()
         self._interactive_target_ids.clear()
         self._cards.clear()
+        self.listing_stale = False
         self._trim_target_history()
 
     def observe(self, *, url: Any = "", title: Any = "") -> None:
@@ -223,7 +274,10 @@ class BrowserPageState:
         elements = payload.get("elements")
         if not isinstance(elements, list):
             elements = []
-        self._interactive_target_ids = []
+        self._interactive_target_ids = [
+            key for key in self._interactive_target_ids
+            if self._targets.get(key) is not None and self._targets[key].source == "ax"
+        ]
         for item in elements:
             if not isinstance(item, dict):
                 continue
@@ -241,6 +295,7 @@ class BrowserPageState:
         if not isinstance(cards, list):
             cards = []
         self._cards = []
+        self.listing_stale = False
         for card in cards:
             if not isinstance(card, dict):
                 continue
@@ -300,9 +355,12 @@ class BrowserPageState:
                 continue
             if field_name in CARD_EVIDENCE_FIELDS and statuses.get(field_name, "present") == "present":
                 self.field_coverage.add(field_name)
-            compact[field_name] = (
-                field_value if isinstance(field_value, (bool, int, float)) else _compact_text(field_value)
-            )
+            if field_name in {"href", "primary_link"}:
+                compact[field_name] = str(field_value).strip()
+            else:
+                compact[field_name] = (
+                    field_value if isinstance(field_value, (bool, int, float)) else _compact_text(field_value)
+                )
         missing_fields = sorted(
             field_name
             for field_name in CARD_EVIDENCE_FIELDS
@@ -325,7 +383,7 @@ class BrowserPageState:
                 if not isinstance(item, Mapping):
                     continue
                 projected = {
-                    key: (_compact_text(value, 240) if isinstance(value, str) else value)
+                    key: (_compact_text(value, 240) if key == "raw_text" else value)
                     for key, value in item.items()
                     if key in {"selector", "raw_text", "generation_id", "source"} and value not in (None, "", [], {})
                 }
@@ -339,17 +397,20 @@ class BrowserPageState:
 
     def register_ax_snapshot(self, value: Any) -> tuple[str, ...]:
         """Register native Playwright refs without translating them in the model."""
-        text = value if isinstance(value, str) else str(value)
+        text = decode_ax_text(value)
         registered: list[str] = []
         for match in _AX_REF_LINE_RE.finditer(text):
             ref_value = match.group("ref")
             role = str(match.group("role") or "").strip()
             name = str(match.group("name") or "").strip()
+            end = text.find("\n", match.end())
+            line = text[match.start():end if end >= 0 else len(text)]
             self.reference_generations[ref_value] = self.generation
             existing_id = self._ref_targets.get(ref_value)
             existing_target = self._targets.get(existing_id or "")
             if existing_target is not None and existing_target.generation == self.generation:
                 target = existing_target
+                target.role, target.name, target.text = role, name, name
             else:
                 target = self._new_target(
                     source="ax",
@@ -360,6 +421,13 @@ class BrowserPageState:
                     text=name,
                 )
                 self._ref_targets[ref_value] = target.target_id
+            target.enabled = "[disabled]" not in line
+            target.selected = "[selected]" in line or "[checked]" in line
+            target.selected_source = "ax" if target.selected else ""
+            target.actionable = target.enabled and role in {
+                "textbox", "searchbox", "combobox", "button", "link", "checkbox", "radio", "tab", "option", "slider",
+            }
+            target.clickable = target.actionable and role not in {"textbox", "searchbox"}
             if target.target_id not in self._interactive_target_ids:
                 self._interactive_target_ids.append(target.target_id)
             registered.append(ref_value)
@@ -382,7 +450,7 @@ class BrowserPageState:
 
     def replace_ax_snapshot(self, value: Any) -> tuple[str, ...]:
         """Replace current-generation AX refs with refs from one complete snapshot."""
-        text = value if isinstance(value, str) else str(value)
+        text = decode_ax_text(value)
         snapshot_refs = set(_ANY_REF_RE.findall(text))
         missing_refs = [
             ref_value
@@ -525,6 +593,7 @@ class BrowserPageState:
             locator=dict(stale.locator),
             selector=stale.selector,
             href=stale.href,
+            navigation_url=stale.navigation_url,
             role=stale.role,
             name=stale.name,
             text=stale.text,
@@ -610,9 +679,23 @@ class BrowserPageState:
             "title": self.title,
             "interactives": interactives,
             "cards": self._cards[:_MAX_PUBLIC_CARDS],
+            **({"listing_stale": True} if self.listing_stale else {}),
             "field_coverage": sorted(self.field_coverage),
             "blockers": sorted(self.blockers),
         }
+
+    def invalidate_listing(self) -> None:
+        """A changed sort/filter invalidates result identities, not stable controls."""
+        self._cards.clear()
+        self.listing_stale = True
+        for target_id, target in list(self._targets.items()):
+            if target.generation != self.generation or not target.source.startswith("card"):
+                continue
+            self._targets.pop(target_id)
+            if self._selector_targets.get((self.generation, target.selector)) == target_id:
+                self._selector_targets.pop((self.generation, target.selector), None)
+                self.selector_generations.pop(target.selector, None)
+                self.selector_primary_links.pop(target.selector, None)
 
     def export_summary(self) -> Dict[str, Any]:
         """Return PageState identity without duplicating cards or interactives."""
@@ -623,6 +706,7 @@ class BrowserPageState:
             "url": self.url,
             "title": self.title,
             "field_coverage": sorted(self.field_coverage),
+            **({"listing_stale": True} if self.listing_stale else {}),
             "blockers": sorted(self.blockers),
         }
 
@@ -643,6 +727,11 @@ class BrowserPageState:
         locator: Dict[str, str] = {"selector": selector} if selector else {}
 
         href = str(item.get("primary_link") or item.get("href") or "").strip()
+        navigation_url = navigation_destination(
+            href, self.url, role=str(item.get("role") or ""), kind=str(item.get("kind") or ""),
+        )
+        if item.get("recommended_action") == "click":
+            navigation_url = ""
         if not locator and not href:
             return None
 
@@ -656,6 +745,9 @@ class BrowserPageState:
                 existing.clickable = bool(item.get("clickable", False))
                 existing.selected = bool(item.get("selected", False))
                 existing.selected_source = str(item.get("selected_source") or "")[:40]
+                if href:
+                    existing.href = href
+                    existing.navigation_url = navigation_url
                 return existing
 
         target = self._new_target(
@@ -663,6 +755,7 @@ class BrowserPageState:
             locator=locator,
             selector=selector,
             href=href,
+            navigation_url=navigation_url,
             role=str(item.get("role") or "").strip(),
             name=str(item.get("accessible_name") or item.get("name") or "").strip(),
             text=str(item.get("text") or item.get("title") or "").strip(),
@@ -702,6 +795,7 @@ class BrowserPageState:
                 "text": card.get("title") or "",
                 "region": card.get("region") or "",
                 "kind": card.get("kind") or "",
+                "recommended_action": card.get("recommended_action"),
                 "visible": True,
                 "enabled": True,
                 "actionable": True,
@@ -709,8 +803,8 @@ class BrowserPageState:
             },
             source="card_primary_link",
         )
-        if selector:
-            self.selector_primary_links[selector] = (self.generation, href)
+        if selector and target is not None and target.navigation_url:
+            self.selector_primary_links[selector] = (self.generation, target.navigation_url)
         return target
 
     def _register_card_field_targets(self, card: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -799,7 +893,22 @@ class BrowserPageState:
     def _export_targets(self, target_ids: Iterable[str], limit: int) -> list[Dict[str, Any]]:
         exported: list[Dict[str, Any]] = []
         seen: set[str] = set()
-        for target_id in target_ids:
+
+        def priority(target_id: str) -> int:
+            target = self._targets.get(target_id)
+            if target is None:
+                return 9
+            if target.role in {"textbox", "searchbox", "combobox"}:
+                return 0
+            if target.kind in {"sort_tab", "filter", "date", "rating_filter"} or target.selected:
+                return 1
+            if target.actionable and target.role != "link":
+                return 2
+            if target.source != "ax" or target.role in {"heading", "link"}:
+                return 3
+            return 4
+
+        for target_id in sorted(target_ids, key=priority):
             if target_id in seen:
                 continue
             seen.add(target_id)

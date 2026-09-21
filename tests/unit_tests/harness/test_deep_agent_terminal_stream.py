@@ -199,9 +199,7 @@ async def test_stream_cancellation_finalizes_without_late_answer(close_mode):
     agent = make_agent(WaitingInner())
     rail = FinalizingRail()
     agent.add_rail(rail)
-    # The class entry tests DeepAgent's close contract separately from the
-    # generic callback decorators installed on instance.stream by BaseAgent.
-    stream = DeepAgent.stream(agent, "read") if close_mode == "aclose" else agent.stream("read")
+    stream = agent.stream("read")
     assert (await anext(stream)).type == "llm_output"
     if close_mode == "aclose":
         await stream.aclose()

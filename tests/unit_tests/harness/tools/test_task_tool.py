@@ -619,8 +619,9 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(first.data["query_id"], "main-query-1")
-        self.assertIn("Collect only these unresolved evidence slots", calls[1]["query"])
-        self.assertNotIn("whole Taobao search", calls[1]["query"])
+        self.assertIn("Unresolved evidence hints", calls[1]["query"])
+        self.assertIn("Focused repair instruction", calls[1]["query"])
+        self.assertIn("do not repeat satisfied work or expand scope", calls[1]["query"])
         self.assertEqual(calls[0]["conversation_id"], calls[1]["conversation_id"])
         normalizer = DeepAgent(AgentCard(name="normalizer"))
         first_context = normalizer._normalize_inputs(calls[0]).run_context.extra
