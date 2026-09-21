@@ -377,6 +377,7 @@ def test_before_tool_call_rewrites_card_primary_link_click_to_navigation() -> No
 
 def test_before_tool_call_rejects_batch_screenshot_without_image_support() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.normalize_model_batch_steps.side_effect = lambda steps: steps
     rail = BrowserRuntimeRail(runtime)
     agent = MagicMock()
     agent.deep_config = SimpleNamespace(enable_read_image_multimodal=False)
@@ -423,7 +424,7 @@ def test_navigation_invalidates_snapshot_refs_from_older_generation() -> None:
         runtime.validate_reference_values(("f1e2",))
 
 
-def test_after_snapshot_attaches_compact_page_state_to_tool_message() -> None:
+def test_after_snapshot_preserves_native_text_and_attaches_page_summary() -> None:
     runtime = _make_bare_runtime()
     rail = BrowserRuntimeRail(runtime)
     tool_message = ToolMessage(
@@ -442,10 +443,10 @@ def test_after_snapshot_attaches_compact_page_state_to_tool_message() -> None:
 
     _run(rail.after_tool_call(ctx))
 
-    assert '"observation":"compact_page_state"' in tool_message.content
+    assert '"observation":"compact_page_state"' not in tool_message.content
     assert '"generation_id":"g0"' in tool_message.content
-    assert '"target_id":"t_g0_1"' in tool_message.content
-    assert "[ref=f1e2]" not in tool_message.content
+    assert "[ref=f1e2]" in tool_message.content
+    runtime.validate_reference_values(("f1e2",))
     assert '"ref":"f1e2"' not in tool_message.content
 
 
@@ -978,7 +979,10 @@ def test_comparison_evidence_requires_distinct_bilibili_sort_slots() -> None:
     assert {slot["variant"] for slot in state["evidence_slots"]} == {"comprehensive", "latest"}
     latest_slot = next(slot for slot in state["evidence_slots"] if slot["variant"] == "latest")
     assert latest_slot == {
+        "query_id": state["task_id"],
+        "entity_source": "https://search.bilibili.com/all?keyword=Python&order=pubdate",
         "entity": "bilibili_search_result",
+        "evidence_scope": "listing",
         "variant": "latest",
         "field": "title",
         "value": "Latest result",
@@ -1418,7 +1422,8 @@ def test_extraction_phase_waits_for_all_inferred_required_fields() -> None:
     )
     completed = session.get_state("__browser_phase_budget_state__")
     assert completed["phases"]["extraction"]["status"] == "completed"
-    assert completed["status"] == "completed"
+    assert completed["status"] == "in_progress"
+    assert completed["next_action_class"] == "may_finish"
 
 
 def test_known_url_gate_allows_extraction_when_browser_is_already_on_target() -> None:
@@ -1783,6 +1788,7 @@ def test_required_fields_use_requested_output_clause_not_operation_preconditions
 
 def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
     state = BrowserRuntimeRail._build_phase_state("打开淘宝把蓝牙耳机加入购物车")
+    state["recent_actions"] = [{"action_class": "form", "outcome": "success"}]
     BrowserWorkingContextStore._merge_semantic_evidence(
         state,
         {
@@ -1813,6 +1819,7 @@ def test_large_evaluate_observation_is_bounded() -> None:
     tool_message = ToolMessage(
         content=json.dumps({"value": "x" * 20_000}),
         tool_call_id="evaluate-1",
+        metadata={"browser_raw_handle": "a" * 32},
     )
     inputs = SimpleNamespace(tool_msg=tool_message)
     tool_result = {"ok": True, "value": "x" * 20_000}
@@ -1827,6 +1834,7 @@ def test_large_evaluate_observation_is_bounded() -> None:
     assert len(tool_message.content) <= 12_000
     assert payload["observation"] == "bounded_browser_tool_result"
     assert payload["original_chars"] > 20_000
+    assert payload["recall_handle"] == "a" * 32
 
 
 def test_comprehensive_and_latest_create_distinct_title_slots_without_compare_word() -> None:
