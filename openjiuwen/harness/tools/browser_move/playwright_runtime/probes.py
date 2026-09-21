@@ -449,7 +449,7 @@ async (page) => {{
       let node = el;
       let depth = 0;
 
-      while (node && node.nodeType === Node.ELEMENT_NODE && depth < 4) {{
+      while (node && node.nodeType === Node.ELEMENT_NODE && depth < 12) {{
         const nodeTag = node.tagName.toLowerCase();
         let index = 1;
         let prev = node.previousElementSibling;
@@ -458,6 +458,8 @@ async (page) => {{
           prev = prev.previousElementSibling;
         }}
         path.unshift(`${{nodeTag}}:nth-of-type(${{index}})`);
+        const validated = validateSelectorHint(el, path.join(' > '));
+        if (validated) return validated;
         node = node.parentElement;
         depth += 1;
       }}
@@ -791,7 +793,7 @@ async (page) => {{
         el.getAttribute('aria-checked') === 'true' ? 'aria-checked' :
         el.getAttribute('aria-current') === 'true' ? 'aria-current' :
         ['active', 'selected', 'checked'].includes(String(el.getAttribute('data-state') || '').toLowerCase()) ? 'data-state' :
-        /(^|\\s)(active|selected|checked)(\\s|$)/i.test(className) ? 'class' :
+        /(^|[\\s_-])(active|selected|checked)([\\s_-]|$)/i.test(className) ? 'class' :
         selectionSourceFromUrl(el, kind);
 
       const candidate = {{
@@ -807,7 +809,7 @@ async (page) => {{
         input_type: normalize(type),
         name: normalize(nameAttr),
         placeholder: normalize(placeholder),
-        href: normalize(el.getAttribute('href') || '', 180),
+        href: String(el.href || el.getAttribute('href') || '').trim(),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
         selected: Boolean(selectedSource),
         selected_source: selectedSource,
@@ -1476,9 +1478,21 @@ async (page) => {
 
     const linkResult = (link) => {
       if (!link) return { text: '', href: '', selector_hint: '' };
+      const href = String(link.href || link.getAttribute('href') || '').trim();
+      const role = String(link.getAttribute('role') || '').toLowerCase();
+      let navigation = false;
+      try {
+        const destination = new URL(href, window.location.href);
+        const current = new URL(window.location.href);
+        destination.hash = '';
+        current.hash = '';
+        navigation = /^https?:$/.test(destination.protocol) && destination.href !== current.href;
+      } catch (_) {}
+      if (['button', 'tab', 'radio', 'checkbox', 'option', 'switch'].includes(role)) navigation = false;
       return {
         text: textOf(link, 180),
-        href: normalize(link.href || link.getAttribute('href') || '', 260),
+        href,
+        navigation,
         selector_hint: buildSelectorHint(link)
       };
     };
@@ -1655,7 +1669,7 @@ async (page) => {
     };
 
     const extractAuthor = (rootText, root) => {
-      const authorEl = findFirst(root, mergeSelectors(
+      const authorSelectors = mergeSelectors(
         profileSelectors('author_selectors'),
         [
           '[rel="author"]',
@@ -1675,13 +1689,22 @@ async (page) => {
           'a[href*="/people"]',
           'a[href*="/u/"]'
         ]
-      ));
-
+      );
+      const isAuthor = (value) => value &&
+        !/^(?:查看(?:个人)?主页|个人主页|关注|已关注|作者主页|view\s+profile|follow|subscribe)$/i.test(value);
+      let authorEl = null;
+      for (const selector of authorSelectors) {
+        try {
+          authorEl = Array.from(root.querySelectorAll(selector)).find((el) => isAuthor(textOf(el, 120)));
+        } catch (_) { continue; }
+        if (authorEl) break;
+      }
       const fromElement = textOf(authorEl, 120);
-      const fromLabel = labeledText(rootText, ['author', 'by', 'writer', 'posted by', '作者', '博主', '发布者', '發布者'], 120);
+      const fromLabel = labeledText(
+        rootText, ['author', 'by', 'writer', 'posted by', '作者', '博主', '发布者', '發布者'], 120);
 
       return {
-        value: fromElement || fromLabel,
+        value: fromElement || (isAuthor(fromLabel) ? fromLabel : ''),
         selector_hint: authorEl ? buildSelectorHint(authorEl) : ''
       };
     };
@@ -1697,20 +1720,35 @@ async (page) => {
     ) => {
       const fieldEl = findFirst(root, selectors);
       const elementText = textOf(fieldEl, limit);
+      if (requirePattern) {
+        // Never join a count label to a date or another field elsewhere in the card.
+        const nodes = fieldEl ? [fieldEl] : [];
+        nodes.push(...Array.from(root.querySelectorAll('span,button,a,time,p,div'))
+          .filter((el) => el.children.length === 0).slice(0, 250));
+        for (const el of nodes) {
+          const raw = normalize(el.innerText || el.textContent || '', limit);
+          if (!raw || /\b(?:19|20)\d{2}[-/.年]\d/.test(raw)) continue;
+          const label = el.getAttribute('aria-label') || '';
+          const match = `${label} ${raw}`.match(pattern);
+          const numeric = el === fieldEl && /^[\d,.]+\s*[万亿kKmM]?$/.test(raw);
+          const emptyComments = labels.includes('评论') && /^(?:还没有评论|暂无评论|没有评论|no comments\b)/i.test(raw);
+          if (!match && !numeric && !emptyComments) continue;
+          return {
+            value: emptyComments ? '0' : normalize(match ? match[0] : raw, limit),
+            raw_text: normalize(`${label} ${raw}`, 240),
+            selector_hint: buildSelectorHint(el)
+          };
+        }
+        return {value: '', raw_text: '', selector_hint: ''};
+      }
       const labeled = labeledText(rootText, labels, limit);
       const searchable = `${elementText} ${labeled} ${rootText}`;
       const match = searchable.match(pattern);
-      const value = requirePattern
-        ? (match ? normalize(match[0], limit) : '')
-        : (elementText || labeled || (match ? normalize(match[0], limit) : ''));
+      const value = elementText || labeled || (match ? normalize(match[0], limit) : '');
       return {
         value,
-        raw_text: value
-          ? normalize(requirePattern ? (match?.[0] || '') : (elementText || labeled || match?.[0] || ''), 240)
-          : '',
-        selector_hint: fieldEl && (!requirePattern || pattern.test(elementText))
-          ? buildSelectorHint(fieldEl)
-          : ''
+        raw_text: value ? normalize(elementText || labeled || match?.[0] || '', 240) : '',
+        selector_hint: fieldEl ? buildSelectorHint(fieldEl) : ''
       };
     };
 
@@ -1833,7 +1871,7 @@ async (page) => {
       ];
       const semanticLabel = /(?:sales?|volume|price|latest|newest|relevance|comprehensive|销量|价格|最新|综合|评分)/i;
       for (const candidate of Array.from(document.querySelectorAll(selectors.join(','))).slice(0, 40)) {
-        if (!visible(candidate)) continue;
+        if (!isElementVisible(candidate, candidate.getBoundingClientRect())) continue;
         const value = textOf(candidate, 120) || normalize(candidate.getAttribute('aria-label') || '', 120);
         const context = normalize([
           candidate.getAttribute('class') || '',
@@ -1939,7 +1977,7 @@ async (page) => {
       /(?:S\$|US\$|A\$|HK\$|\$|£|€|¥|￥|Rp|RM|SGD|USD|IDR|MYR)\s?\d[\d,.]*(?:\.\d+)?|\d[\d,.]*(?:\.\d+)?\s?(?:SGD|USD|IDR|MYR|円)/i;
 
     const normalizePriceValue = (value) => {
-      const cleaned = normalize(value, 120);
+      const cleaned = normalize(value, 120).replace(/(\d)\s*\.\s*(\d{1,2})(?!\d)/g, '$1.$2');
       const match = cleaned.match(PRICE_RE);
       return match ? normalize(match[0], 80) : '';
     };
@@ -2120,7 +2158,7 @@ async (page) => {
           const selectorHint = buildSelectorHint(el);
           const selectorMeta = selectorMetadata(selectorHint);
           const actionable = isActionable(el, rect);
-          const href = normalize(el.href || el.getAttribute('href') || '', 260);
+          const href = String(el.href || el.getAttribute('href') || '').trim();
           const semanticText = `${text} ${href}`.toLowerCase();
           let kind = 'control';
           if (siteDetailLink(href)?.kind === 'product') kind = 'product';
@@ -2667,7 +2705,7 @@ async (page) => {
             primary_link: selectorDescriptor(primaryLinkSelectorHint)
           },
           recommended_action: primaryLink.href
-            ? 'navigate_primary_link'
+            ? (primaryLink.navigation ? 'navigate_primary_link' : 'click')
             : (cardClickable ? 'use_validated_selector' : 'use_actionable_child_control'),
           has_image: imagePresent,
           buttons,
@@ -2934,7 +2972,6 @@ async (page) => {
       }
 
       selected.push(item);
-      if (selected.length >= maxCards) break;
     }
 
     const deduplicated = [];
@@ -2948,15 +2985,51 @@ async (page) => {
       deduplicated.push(item);
     }
 
+    // Quality selects containers, not result rank. Identify a repeated list before
+    // ordering its entries; equally plausible regions must not invent a global #1.
+    const naturalItems = deduplicated.filter((item) =>
+      item.data.region === 'main_result' && !item.data.is_ad &&
+      ['result', 'product', 'hotel'].includes(item.data.kind));
+    const regions = new Map();
+    const itemRegions = new Map();
+    for (const item of naturalItems) {
+      let parent = item.el.parentElement;
+      // Cards may each sit inside their own wrapper. Find the nearest shared list.
+      while (parent && parent.parentElement && parent !== document.body &&
+             !naturalItems.some((other) => other !== item && parent.contains(other.el))) {
+        parent = parent.parentElement;
+      }
+      itemRegions.set(item, parent);
+      if (!regions.has(parent)) regions.set(parent, []);
+      regions.get(parent).push(item);
+    }
+    const candidateRegions = Array.from(regions.keys());
+    const semanticMain = candidateRegions.filter((region) => region?.closest('main, [role="main"]'));
+    const plausibleRegions = semanticMain.length ? semanticMain : candidateRegions;
+    const primaryRegion = plausibleRegions.length === 1 ? plausibleRegions[0] : null;
+    const regionIds = new Map(Array.from(regions.keys()).map((el, index) => [el, `list_${index + 1}`]));
+    deduplicated.sort((a, b) => {
+      const primary = Number(itemRegions.get(b) === primaryRegion) - Number(itemRegions.get(a) === primaryRegion);
+      if (primary) return primary;
+      if (Math.abs(a.top - b.top) > 3) return a.top - b.top;
+      if (Math.abs(a.left - b.left) > 3) return a.left - b.left;
+      return a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
     let resultIndex = 0;
-    const cards = deduplicated.map((item, index) => {
+    const completeListOrder = !query && !(viewportOnly && window.scrollY > 0);
+    const cards = deduplicated.slice(0, maxCards).map((item, index) => {
       const isMainResult = item.data.region === 'main_result' &&
-        ['result', 'product', 'hotel'].includes(item.data.kind) && !item.data.is_ad;
+        ['result', 'product', 'hotel'].includes(item.data.kind) && !item.data.is_ad &&
+        itemRegions.get(item) === primaryRegion && completeListOrder;
       if (isMainResult) resultIndex += 1;
       return {
         id: `card_${index + 1}`,
         group_count: item.groupCount,
         ...item.data,
+        region_id: regionIds.get(itemRegions.get(item)) || '',
+        order_known: isMainResult,
+        order_source: isMainResult ? 'rendered_list' :
+          (completeListOrder ? 'ambiguous_or_secondary_region' : 'filtered_or_partial_list'),
         result_index: isMainResult ? resultIndex : null
       };
     });

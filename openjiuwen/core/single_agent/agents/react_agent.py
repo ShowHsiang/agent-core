@@ -16,6 +16,7 @@ import inspect
 import json
 import time
 import uuid
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -2982,8 +2983,9 @@ class ReActAgent(BaseAgent):
                 inputs=inputs if isinstance(inputs, dict) else None
             )
 
-        async for chunk in self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup):
-            yield chunk
+        async with aclosing(self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup)) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     @with_session()
     async def _inner_stream(self, session, inputs, need_cleanup):
@@ -3035,10 +3037,15 @@ class ReActAgent(BaseAgent):
             # Agent sessions use stream_iterator for consuming output
             task = asyncio.create_task(stream_process())
 
-            async for result in session.stream_iterator():
-                yield result
-
-            await task
+            try:
+                async for result in session.stream_iterator():
+                    yield result
+                await task
+            finally:
+                # The consumer owns the producer, including early aclose/cancellation.
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         else:
             # Workflow sessions: just run stream_process, output goes to session.write_stream()
             # The workflow graph consumes from session.write_stream() via StreamWriterManager
