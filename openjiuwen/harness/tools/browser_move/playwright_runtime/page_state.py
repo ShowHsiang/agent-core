@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from .evidence import same_page_url
+
 
 def navigation_destination(href: Any, page_url: str = "", *, role: str = "", kind: str = "") -> str:
     """A state control or same-document anchor is not a navigation shortcut."""
@@ -58,14 +60,18 @@ _CARD_SEMANTIC_FIELD_NAMES = (
     "kind",
     "result_index",
     "is_ad",
+    "ad_status",
     "region_id",
     "order_known",
     "order_source",
+    "classification_reason",
+    "duration_scope",
 )
 CARD_EVIDENCE_FIELDS = (
     "title",
     "price",
     "rating",
+    "hotel_stars",
     "product_rating",
     "shop_rating",
     "review_count",
@@ -87,6 +93,7 @@ CARD_EVIDENCE_FIELDS = (
 _READ_ONLY_CARD_TARGET_FIELDS = frozenset(
     {
         "rating",
+        "hotel_stars",
         "product_rating",
         "shop_rating",
         "author",
@@ -255,6 +262,8 @@ class BrowserPageState:
         normalized_url = str(url or "").strip()
         normalized_title = _compact_text(title, 300)
         if normalized_url:
+            if not same_page_url(normalized_url, self.url):
+                self.title = ""
             self.url = normalized_url
         if normalized_title:
             self.title = normalized_title
@@ -268,8 +277,8 @@ class BrowserPageState:
                 f"{self.generation_id}. Probe or snapshot the current page again."
             )
 
-    def register_interactives(self, payload: Dict[str, Any]) -> None:
-        """Attach safe target IDs to a Probe result and refresh its compact index."""
+    def register_interactives(self, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """Register matches once; return this observation's targets in match order."""
         self.observe(url=payload.get("url"), title=payload.get("title"))
         elements = payload.get("elements")
         if not isinstance(elements, list):
@@ -278,6 +287,7 @@ class BrowserPageState:
             key for key in self._interactive_target_ids
             if self._targets.get(key) is not None and self._targets[key].source == "ax"
         ]
+        matches = []
         for item in elements:
             if not isinstance(item, dict):
                 continue
@@ -286,9 +296,14 @@ class BrowserPageState:
                 item["target_id"] = target.target_id
                 item["generation_id"] = self.generation_id
                 self._interactive_target_ids.append(target.target_id)
+                entry = target.compact_index()
+                if item.get("requires_scroll"):
+                    entry["requires_scroll"] = True
+                matches.append(entry)
         self._update_blockers(payload, elements)
+        return matches
 
-    def register_cards(self, payload: Dict[str, Any]) -> None:
+    def register_cards(self, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
         """Attach target IDs and build compact card records for PageState."""
         self.observe(url=payload.get("url"), title=payload.get("title"))
         cards = payload.get("cards")
@@ -341,6 +356,7 @@ class BrowserPageState:
             if len(compact_card) > 1:
                 self._cards.append(compact_card)
         self._update_blockers(payload, cards)
+        return list(self._cards)
 
     def _compact_card_fields(self, card: Mapping[str, Any]) -> Dict[str, Any]:
         statuses_value = card.get("field_status")
@@ -385,7 +401,8 @@ class BrowserPageState:
                 projected = {
                     key: (_compact_text(value, 240) if key == "raw_text" else value)
                     for key, value in item.items()
-                    if key in {"selector", "raw_text", "generation_id", "source"} and value not in (None, "", [], {})
+                    if key in {"selector", "raw_text", "generation_id", "source", "scope"}
+                    and value not in (None, "", [], {})
                 }
                 if projected:
                     compact_provenance[field_name] = projected

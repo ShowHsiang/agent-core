@@ -359,7 +359,7 @@ class TaskTool(Tool):
             "Resume the same browser task from its current page and retained evidence. "
             f"Original user goal and constraints: {original_goal}. "
             f"Focused repair instruction: {repair_instruction}. "
-            f"Unresolved evidence hints: {json.dumps(missing_slots, ensure_ascii=False)}. "
+            f"Optional extraction hints (not a completion checklist): {json.dumps(missing_slots, ensure_ascii=False)}. "
             f"Recovery hint: {recovery or 'collect_missing_evidence_from_current_page'}. "
             "Repair only what is needed for the original goal; inferred slots are not extra requirements. "
             "Keep valid evidence, correct contradicted evidence, and do not repeat satisfied work or expand scope."
