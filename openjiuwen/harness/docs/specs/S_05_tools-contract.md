@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-21 |
+| 最近一次修订日期 | 2026-09-22 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md` |
 
 ## 范围 / 边界
@@ -248,14 +248,36 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 
 ## Browser 页面与动作协作
 
+- 定向 Interactive Probe 从同一个 registry 返回本次匹配的有效 target，保持匹配顺序；
+  不能拿全页前 20 个控件替代。全页摘要继续优先搜索框；无有效命中返回诊断并允许原生局部 AX 回退。
+- Browser Rail 的 snapshot 请求始终返回可读内容（忽略 filename 落盘选项）；大结果沿用任务内
+  recall，不添加任意文件读取能力。非 Browser Rail 的 MCP 调用不受此归一化影响。
+- 当前 tab 的 URL/title 成对解析，URL 变化而 title 未知时清空旧 title。目的页证据必须关联本次
+  结果选择/导航，不因“不是搜索页”就认证首页为目标详情，也不把目的页推荐卡标题当页面标题。
+- MCP Result 区先统一解码，再投影字段；支持数组/字符串和嵌套包装，不从执行脚本中挖 JSON。
+  成功导航记录 requested/landed 关系；同页 URL 规范化不清标题，路由参数与 fragment 仍保留。
+- Batch URL 等待限定动作来源页或动作后新开的关联页，不扫描任意旧 tab。切换后同步 MCP 活动页；
+  歧义不猜选，不重放成功动作。保留 Chrome/Profile/Cookie。
 - Card 质量分只用于挑选容器；主区域确定后按渲染/列表顺序输出。区域歧义、关键词过滤或
   滚动视口不确认全局序号时返回 `order_known=false`，不伪造 `result_index`。
 - 作者排除操作按钮，计数只读取局部字段，日期不填入评论数；分段整数/小数价格需拼接。
   可执行 URL、selector 不按展示文本截断；同实体详情纠错沿用现有 evidence/provenance。
+- 离屏可滚动控件与禁用/遮挡分别诊断；不使用强制点击绕过真实不可操作状态。无有效 target 时返回
+  有限局部片段。价格读取保留 DOM 文本节点边界，折扣不并入金额。导航/筛选组不占结果卡片窗口。
+- `observed_count` 是本次 Probe 观察到的自然条目数，不以排名是否已知归零；诊断的 ranked_count
+  单独表达可排序条目。工具返回本次注册卡片，PageState 仍保持原有小窗口，投影原文进入任务内 recall。
 - 原生 Playwright 负责单动作与 AX；Probe 补充结构化区域/字段；Batch 负责确定多步骤。
   有明确前置排序 target 的缺参等待可一次修复；不猜歧义目标，不重放已成功点击。
 - 定向 evaluate 可用简短 `fields: {author: {value, selector, raw_text}}`，不强制每轮进度 JSON。
   简单问答可直接搜索 URL 并读顶部答案卡，标注来源，不把 AI 答案伪装成自然结果排名。
+- 导航、广告、AI 答案与主结果分开分类；分类原因保留在紧凑卡片中，站点规则在 site profile。
+  `is_ad=true/ad_status=ad` 表示有广告标记；未识别到时 `ad_status=unknown`，不是非广告证明。
+  时长 scope 区分 current_part/collection/unknown，酒店星级不填住客评分，既有报价口径仍保留。
+- Cards/native/evaluate 共用已有 sourced observation 路径。evaluate 的有序列表按实际有效记录计数，
+  不采信单独 count 值。空查找标记 observation_status=not_observed，不等于证明字段不存在；
+  带依据的 missing/unknown 保留，后续同实体正证据可纠正早先空结果。
+  `value=null`、空数组和仅有 selector 的字段包装也属于未命中，字典的字符串表示不是缺失依据。
+  未命中的详情查找不能覆盖已有值，也不能阻止后续真实观察修正；短的非空原生文本不以长度判无效。
 
 ## 与其它 spec 的关系
 

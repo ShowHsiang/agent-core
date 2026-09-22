@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-21 |
+| 最近一次修订日期 | 2026-09-22 |
 | 关联 feature | F_05_browser-task-integrity |
 
 ## 范围 / 边界
@@ -64,8 +64,9 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
    同步构造，`S_01` 不变量 3）；`enable_subagent_runtime` 时才进 `S_10` 的异步控制面。
 8. **manifest 侧预设与 `subagents/` 预设同源**：`S_12` 的 `build_*_subagent` 是
    `subagents/` 预设的 catalog 注册形态；二者共享 `SubAgentSpec` 装配语义，不新造预设。
-9. **browser 上下文权威边界**：runtime 以 requested evidence slots、已解析 evidence 和
-   blockers 计算任务状态；模型负责策略与自然语言结果，不负责维护第二套进度 JSON。模型可见
+9. **browser 上下文权威边界**：runtime 负责执行真值、来源归属、明确 blocker 与统一结果传输；
+   模型按原始目标和本任务观察判断业务完成。自动推断的字段/数量/比较槽仅是提取提示，不能因
+   适配器未入账就制造 partial；明确的缺失、反证和显式结构化契约仍参与校验。模型可见
    PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。推断字段齐全仅提示
    `may_finish_if_user_goal_met`，不自动完成或清空工具；明确终态仍由 runtime 统一传输。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
@@ -98,6 +99,12 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     仅作提取提示。导航首页不要求商品字段，搜索卡标题不证明已进入详情页，页面按钮枚举不创建比较槽。
     未执行的 DSML 工具意图不能认证完成，同 run 至多纠正一次。定向恢复保留原始约束和修复指令，
     不重置共享期限，也不因推断字段适配不完整而强迫普通信息任务重复读取。
+    “地点不限”“评分若有”等局部否定/可选条件不生成硬性字段；星级与住客评分分开。
+    replan_required 是执行指导，收尾时不能单独制造网页 blocker。原生读取、Card 和 evaluate
+    的带来源观察采用同一完成判断，保留 typed evidence 与未结构化观察的区别，不虚构字段覆盖。
+    `unverified_fields` 仅是未映射诊断，不能触发填表式续跑。确有未完成用户目标时，可在收尾一次使用
+    现有 browser_progress 文本标注 partial/next_action，不要求逐轮进度或另一个验证模型。
+    支付/登录接管必须有当前页正证据；取消、截止期限和已有明确终态仍保持不变。
 
 ## 接口契约
 

@@ -11,6 +11,7 @@ the complete tool and lifecycle reference.
 | Item | Value |
 | --- | --- |
 | Date | 2026-09-16 |
+| Last revised | 2026-09-22 |
 | Scope | Browser evidence, targets, cancellation and shared-browser task ownership |
 | Specs | S_05 tools contract, S_18 subagents and lifecycle |
 | Refs | openJiuwen-ai/jiuwenswarm#6006; local September 16 browser traces |
@@ -72,6 +73,53 @@ passing deterministic tests is not a claim of live-site completion rate.
   artifacts / 64 MiB. A failed write preserves the native result, not a lost preview.
 - Native primitives handle single actions; Batch handles deliberate sequences.
   Answer panels are valid sources for answer tasks, not natural-result ranks.
+
+## September 22 Query-Scoped Observation Repairs
+
+- A targeted Interactive Probe projects only that query's registered targets, in
+  match order. The full-page index remains available separately; its search-box
+  priority must not replace query matches. Native regional snapshots remain
+  readable even when a caller requests a filename; no filesystem capability is added.
+- Page URL and title are one observation. Current-tab metadata may update them,
+  but links inside search results are not current-page metadata. A destination
+  must be reached through a result selection or explicit target URL, not merely
+  be any non-search page. Correct destination evidence supersedes old page anchors.
+- Keep navigation, ads, AI answer panels and natural results distinct. Preserve
+  labelled field scope (including current video part versus collection), source
+  and generation instead of turning adjacent or unrelated text into facts.
+- Replan is execution guidance, not a webpage blocker. At finalization, use the
+  same source-bearing observation path for Cards, native AX and evaluate. Optional
+  or negated requests are not mandatory slots; hotel stars are not guest ratings.
+- Positive local evidence can correct an earlier absent/unloaded field. List
+  counts come from actual ordered records, not an asserted count. Payment/login
+  handoff requires page evidence and must not be described as semantic failure.
+
+Verification uses sanitized September 21 trace shapes and generated-script DOM
+tests. No extra planner, state manager, model judge, stricter retry gate, reduced
+context budget, or live booking/payment test is part of these repairs.
+
+## September 22 Execution and Completion Boundaries
+
+- Scope URL/popup waits to the action's source page and newly opened child pages,
+  never arbitrary retained tabs. Preserve the shared browser and profile.
+- Decode MCP result envelopes once before evidence projection. Executable relative
+  URLs resolve against their observed page; successful navigation records its
+  requested and landed URLs without borrowing another tab's metadata.
+- Probe supplements native observations. Result-region selection and local price
+  boundaries must not manufacture facts; offscreen controls differ from disabled
+  or obscured controls. Keep a bounded local fallback when no target is exported.
+- Inferred business slots are advisory indexes, not a second task judge. The
+  worker decides whether its sourced answer satisfies the goal; runtime preserves
+  execution errors, explicit blockers, cancellation, deadlines and contradictions.
+  Unmapped observations do not automatically become missing user requirements.
+- Focused resume addresses an explicit unfinished goal or correction, not merely
+  filling inferred slots. No extra judge, state store or model round is added.
+
+Verification must include raw MCP arrays, redirects, retained tabs, local DOM
+boundaries and false-completion cases as well as false-partial cases. Live-site
+latency and semantic accuracy are not guaranteed by these deterministic tests.
+
+See [F_06](F_06_browser-execution-and-completion.md) for the narrowed completion contract.
 
 ## Rejected Alternatives (Observation Repairs)
 
