@@ -372,7 +372,9 @@ def test_batch_live_target_validation(mode):
         async click() {{if (onNavigation) onNavigation(frame);}}
       }}
       const page = {{locator: s => new Locator(s), url: () => 'https://example.test', title: async () => 'Test',
-        mainFrame: () => frame, on: (_event, fn) => {{onNavigation = fn;}}, off: () => {{onNavigation = null;}}}};
+        mainFrame: () => frame,
+        on: (event, fn) => {{if (event === 'framenavigated') onNavigation = fn;}},
+        off: (event) => {{if (event === 'framenavigated') onNavigation = null;}}}};
       fn(page).then(value => {{
         if (onNavigation !== null) throw new Error('navigation observer leaked');
         console.log(JSON.stringify(value));
@@ -405,6 +407,7 @@ def test_dynamic_sort_probe_emits_only_unique_actionable_targets(mode):
         constructor(parent = null) {this.parentElement = parent; this.tagName = 'DIV'; this.nodeType = 1;}
         getAttribute(name) {return ({role:'tab', class:'next-tabs-tab-active'})[name] || null;}
         hasAttribute() {return false;}
+        matches() {return false;}
         closest() {return null;}
         contains(node) {return node === this;}
         getBoundingClientRect() {return {x:0,y:0,left:0,right:100,top:0,bottom:20,width:100,height:20};}

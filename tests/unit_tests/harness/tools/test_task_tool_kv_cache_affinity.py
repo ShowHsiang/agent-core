@@ -168,7 +168,7 @@ async def test_runtime_failures_do_not_override_success_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_affinity_disabled_preserves_baseline_invoke() -> None:
+async def test_browser_affinity_disabled_keeps_session_for_deadline_evidence() -> None:
     subagent = _FakeSubAgent("browser")
     subagent.invoke = AsyncMock(wraps=subagent.invoke)
     tool = _make_tool(enabled=False, subagent=subagent)
@@ -179,8 +179,10 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     )
 
     assert result.success is True
-    assert "session" not in subagent.invoke.await_args.kwargs
-    assert subagent.sessions == [None]
+    child = subagent.invoke.await_args.kwargs["session"]
+    assert isinstance(child, Session)
+    assert subagent.sessions == [child]
+    assert child.get_session_id() == subagent.inputs[0]["conversation_id"]
     assert len(subagent.inputs) == 1
     assert subagent.inputs[0]["query"] == "run task"
     normalized = DeepAgent(AgentCard(name="normalizer"))._normalize_inputs(subagent.inputs[0])
@@ -190,3 +192,17 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
         r"parent_session_sub_browser_agent_[0-9a-f]{8}",
         subagent.inputs[0]["conversation_id"],
     )
+
+
+@pytest.mark.asyncio
+async def test_nonbrowser_affinity_disabled_preserves_baseline_invoke() -> None:
+    subagent = _FakeSubAgent("verification")
+    subagent.invoke = AsyncMock(wraps=subagent.invoke)
+    tool = _make_tool(enabled=False, subagent=subagent)
+    result = await tool.invoke(
+        {"subagent_type": "verification_agent", "task_description": "run task"},
+        session=Session(session_id="parent_session"),
+    )
+    assert result.success is True
+    assert "session" not in subagent.invoke.await_args.kwargs
+    assert subagent.sessions == [None]
