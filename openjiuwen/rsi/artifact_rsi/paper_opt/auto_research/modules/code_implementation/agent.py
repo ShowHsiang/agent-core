@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     validate_metrics_contract,
@@ -150,6 +151,7 @@ class CandidateValidation:
     stderr_tail: str = ""
     variants: list[ImplementedVariant] = field(default_factory=list)
     failures: dict[str, str] = field(default_factory=dict)
+    error_trees: dict[str, str] = field(default_factory=dict)
     candidate_hash: str = ""
     cycle: int = 1
     skipped_redundant_smoke: bool = False
@@ -686,6 +688,7 @@ class CodeImplementationAgent:
 
     @staticmethod
     def _render_design_report(plan: ExperimentPlan) -> str:
+        observations = [f"- {item}" for item in plan.observations] or ["- (none)"]
         lines = [
             f"# Experiment design report — {plan.run_id}",
             "",
@@ -700,6 +703,12 @@ class CodeImplementationAgent:
             "",
             "## Metrics",
             *(f"- {m}" for m in plan.metrics),
+            "",
+            "## Primary metric",
+            f"{plan.primary_metric or '(unspecified)'} ({plan.primary_direction or 'unspecified'})",
+            "",
+            "## Observations to log (advisory)",
+            *observations,
             "",
             "## Expected outcomes",
             plan.expected_outcomes,
@@ -1085,19 +1094,39 @@ class CodeImplementationAgent:
             "so the host can recover the result even if the file above did not end up "
             "where it asked. If you print this line more than once, only the last one "
             "is read.\n\n"
-            f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n"
-            "Write every declared plan metric under a top-level `metrics` object keyed by "
+            f"Declared plan metrics, identically across all variants: {', '.join(plan.metrics) or '(none)'}.\n"
+            + (
+                f"Primary metric (must always be present as a finite number): "
+                f"`{plan.primary_metric}` ({plan.primary_direction or 'unspecified'}).\n"
+                if plan.primary_metric
+                else ""
+            )
+            + (
+                "Requested observations (best effort, under `metrics.observations.<name>`; "
+                "missing ones are noted by reflection, never rejected by the host): "
+                + ", ".join(plan.observations)
+                + ".\n"
+                if plan.observations
+                else ""
+            )
+            + "Write every declared plan metric under a top-level `metrics` object keyed by "
             "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
             "metadata (`method`, `status`, `n_questions`, `model_call_count`, item records) "
             "stays at the root. You may also duplicate scalars at the root, but "
-            "`metrics.<name>` is the canonical location the host reads.\n\n"
+            "`metrics.<name>` is the canonical location the host reads.\n"
+            "Unknown extra keys are never rejected. Log anything else that would help a "
+            "later judge: per-item records, parse-failure counts (`parsed_count`), latency, "
+            "token/call counts. An unparseable model reply is a number to record, not a "
+            "fatal error — do not raise and exit non-zero for a bad completion; exit "
+            "non-zero only for infrastructure faults (dataset download, agent init, "
+            "metrics write, runtime setup).\n\n"
             "If the non-smoke path fails, still write `--output` as JSON so the host can "
             "diagnose it, and print one stderr line: "
             "`Harness failed at {failure_stage}/{failure_substage}: {detail}`. "
             "The JSON must include:\n"
             "  - `status`: `failed`\n"
-            "  - `failure_stage`: one of `dataset_download`, `agent_init`, `tool_call`, "
-            "`metrics_write`, `runtime_setup`\n"
+            "  - `failure_stage`: short snake_case stage (for example `dataset_download`, "
+            "`agent_init`, `tool_call`, `metrics_write`, `runtime_setup`)\n"
             "  - `failure_substage`: short snake_case name of the step that actually failed\n"
             "  - `error_type`: exception class name\n"
             "  - `error_code`: stable token derived from that same cause\n"
@@ -1293,6 +1322,7 @@ class CodeImplementationAgent:
         stderr_tail: str = "",
         variants: list[ImplementedVariant] | None = None,
         failures: dict[str, str] | None = None,
+        error_trees: dict[str, str] | None = None,
         candidate_hash: str = "",
     ) -> CandidateValidation:
         return CandidateValidation(
@@ -1306,6 +1336,7 @@ class CodeImplementationAgent:
             stderr_tail=stderr_tail,
             variants=list(variants or []),
             failures=dict(failures or {}),
+            error_trees=dict(error_trees or {}),
             candidate_hash=candidate_hash,
             cycle=cycle,
             log_dir=str(log_dir),
@@ -1443,6 +1474,7 @@ class CodeImplementationAgent:
         module_cfg = self.config.get("code_implementation", {}) or {}
         timeout = module_cfg.get("smoke_test_timeout_seconds")
         failures: dict[str, str] = {}
+        error_trees: dict[str, str] = {}
         first_stage = "smoke"
         first_variant = ""
         first_command: list[str] = []
@@ -1470,11 +1502,21 @@ class CodeImplementationAgent:
                     encoding="utf-8",
                 )
             except (subprocess.TimeoutExpired, OSError) as exc:
+                stdout = getattr(exc, "stdout", "") or ""
+                stderr = getattr(exc, "stderr", "") or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
                 log_path.write_text(
                     f"$ {' '.join(command)}\n\n--- execution failed ---\n{exc}",
                     encoding="utf-8",
                 )
+                tree = python_error_tree(stderr) or python_error_tree(stdout)
                 detail = f"execution failed: {exc}"
+                if tree:
+                    detail = f"{detail}\n{tree}"
+                    error_trees[variant.name] = tree
                 failures[variant.name] = detail
                 errors.append(f"{variant.name}: {detail}")
                 if not first_variant:
@@ -1484,10 +1526,13 @@ class CodeImplementationAgent:
                     first_stderr = detail
                 continue
 
-            diagnostic = self._tail(proc.stderr) or self._tail(proc.stdout)
+            tree = python_error_tree(proc.stderr) or python_error_tree(proc.stdout)
+            diagnostic = tree or self._tail(proc.stderr) or self._tail(proc.stdout)
             if proc.returncode != 0:
                 detail = f"exit_code={proc.returncode}\n{diagnostic or '(no output captured)'}"
                 failures[variant.name] = detail
+                if tree:
+                    error_trees[variant.name] = tree
                 errors.append(f"{variant.name}: exit_code={proc.returncode}")
                 if not first_variant:
                     first_stage = "smoke"
@@ -1533,6 +1578,7 @@ class CodeImplementationAgent:
                 stderr_tail=first_stderr,
                 variants=variants,
                 failures=failures,
+                error_trees=error_trees,
                 candidate_hash=candidate_hash,
             )
         return CandidateValidation(
@@ -1636,6 +1682,7 @@ class CodeImplementationAgent:
                 status="failed",
                 readiness="promotion_failed",
                 smoke_failures={"promotion": f"{type(exc).__name__}: {exc}"},
+                error_trees=dict(validation.error_trees),
                 notes=notes,
             )
         )
@@ -1696,6 +1743,7 @@ class CodeImplementationAgent:
             status=status,
             readiness="smoke_ready" if status == "ready" else "failed",
             smoke_failures=failures,
+            error_trees=dict(validation.error_trees),
             notes=notes.strip(),
             code_commit=current_commit(code_dir) if smoke_test_passed else "",
         )

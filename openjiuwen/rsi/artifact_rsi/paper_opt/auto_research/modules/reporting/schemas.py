@@ -32,8 +32,8 @@ class ReportingInput(BaseModel):
     survey: ResearchBrief
     plan: ExperimentPlan
     result: ExperimentResult
-    # Optional: a failed/timed-out reflection must never block reaching this
-    # module — same rule docs/reflection_design.md §9 established for reporting.
+    # Optional at the module boundary so a standalone reporting call still
+    # works. The manager requires a fresh reflection before dispatching here.
     reflection: Reflection | None = None
     # Previous paper's derived state, if this run is extending/updating a
     # prior paper rather than writing from scratch — see
@@ -57,6 +57,9 @@ class ReportingInput(BaseModel):
     # a manager slip-up in populating that field must not silently turn a
     # retry into an accidental full wipe or vice versa.
     attempt: int = 1
+    # Manager SubtaskContract inlined by the host (goal, acceptance
+    # criteria, constraints). Empty when the caller is not the manager.
+    contract_brief: str = ""
 
 
 class ReportingOutput(BaseModel):
@@ -73,6 +76,9 @@ class ReportingOutput(BaseModel):
     # never silently ship a partial or non-compiling artifact without saying
     # so here.
     notes: str | None = None
+    # Same issues as ``notes``, kept as a list so the manager handoff can
+    # show lint/compile problems without parsing the joined string.
+    lint_issues: list[str] = Field(default_factory=list)
 
 
 class FigureNode(BaseModel):
