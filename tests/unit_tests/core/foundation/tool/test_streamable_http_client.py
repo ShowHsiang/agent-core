@@ -9,11 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
-from openjiuwen.core.foundation.tool.mcp.base import extract_mcp_tool_result_content
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
     StreamableHttpClient,
 )
@@ -228,10 +227,9 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
 class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.resource_mgr = ResourceMgr()
-        self.client_class = type(get_client_registry().get_client(
-            name="streamable-http",
-            client_type="mcp",
-            config=McpServerConfig(
+        # Browser extensions may replace the factory without changing the registry.
+        self.client_class = type(ToolMgr._create_client(  # pylint: disable=protected-access
+            McpServerConfig(
                 server_name="streamable-server",
                 server_path="http://127.0.0.1:8930/mcp",
                 client_type="streamable-http",
@@ -393,6 +391,22 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
                 tool_name="browser_snapshot",
                 arguments={},
             )
+
+
+class _FactorySelectedStreamableHttpClient(StreamableHttpClient):
+    __client_name__ = None
+
+    async def list_tools(self, *, timeout=NO_TIMEOUT):  # noqa: ASYNC109 -- matches the MCP client interface
+        raise AssertionError("The factory-selected client's list_tools must be mocked")
+
+
+class TestStreamableHttpCustomClientResourceManagerIntegration(TestStreamableHttpResourceManagerIntegration):
+    async def asyncSetUp(self):
+        self.enterContext(patch.object(
+            ToolMgr, "_create_client", staticmethod(_FactorySelectedStreamableHttpClient),
+        ))
+        await super().asyncSetUp()
+        self.assertIs(self.client_class, _FactorySelectedStreamableHttpClient)
 
 
 class TestMcpToolResultExtraction(unittest.TestCase):
