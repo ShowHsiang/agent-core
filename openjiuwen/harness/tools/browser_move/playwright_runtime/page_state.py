@@ -398,12 +398,15 @@ class BrowserPageState:
                 item = provenance_value.get(field_name)
                 if not isinstance(item, Mapping):
                     continue
-                projected = {
-                    key: (_compact_text(value, 240) if key == "raw_text" else value)
-                    for key, value in item.items()
-                    if key in {"selector", "raw_text", "generation_id", "source", "scope"}
-                    and value not in (None, "", [], {})
-                }
+                projected = {}
+                for key, value in item.items():
+                    if key not in {"selector", "raw_text", "generation_id", "source", "scope"}:
+                        continue
+                    if value in (None, "", [], {}):
+                        continue
+                    if key == "raw_text":
+                        value = _compact_text(value, 240)
+                    projected[key] = value
                 if projected:
                     compact_provenance[field_name] = projected
             if compact_provenance:

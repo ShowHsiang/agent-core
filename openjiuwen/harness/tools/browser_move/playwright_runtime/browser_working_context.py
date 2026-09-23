@@ -1042,10 +1042,12 @@ class BrowserWorkingContextStore:
             for slot in required_slots
             if BrowserWorkingContextStore._evidence_slot_key(slot) not in covered_keys
         ]
-        unavailable_slots = [
-            slot for slot in evidence_slots if slot.get("status") in {"missing", "unknown"}
-            and slot.get("observation_status") != "not_observed"
-        ]
+        unavailable_slots = []
+        for slot in evidence_slots:
+            if slot.get("status") not in {"missing", "unknown"}:
+                continue
+            if slot.get("observation_status") != "not_observed":
+                unavailable_slots.append(slot)
         return {
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),

@@ -5746,20 +5746,23 @@ class BrowserRuntimeRail(AgentRail):
         """Retain source text without inventing field coverage or another memory store."""
         if not BrowserAgentRuntime.tool_result_succeeded(result):
             return {}
-        if not any(token in tool_name for token in (
+        if not _contains_any_token(tool_name, (
             "browser_evaluate", "browser_find", "browser_snapshot", "browser_probe_cards",
         )):
             return {}
         if not cls._is_read_only_recovery(tool_name, tool_args):
             return {}
         if "browser_probe_cards" in tool_name:
-            value = [
-                {key: card.get(key) for key in ("title", "summary", "text_preview", "primary_link", "kind")
-                 if key in card}
-                for card in result.get("cards") or [] if isinstance(card, dict) and (
-                    cls._is_natural_evidence_card(card) or card.get("kind") in {"ai_answer", "ai_overview", "answer"}
-                )
-            ]
+            value = []
+            observation_fields = ("title", "summary", "text_preview", "primary_link", "kind")
+            for card in result.get("cards") or []:
+                if not isinstance(card, dict):
+                    continue
+                if not cls._is_natural_evidence_card(card) and card.get("kind") not in {
+                    "ai_answer", "ai_overview", "answer",
+                }:
+                    continue
+                value.append({key: card.get(key) for key in observation_fields if key in card})
         else:
             value = cls._evaluate_result_value(result)
         if value in (None, "", [], {}) or isinstance(value, bool):
