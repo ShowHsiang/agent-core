@@ -62,6 +62,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      `/chat/completions` 的 `input_audio`。SiliconFlow 的 `base_url` 应为
      `https://api.siliconflow.cn/v1`，不含接口后缀。本路由不改变 `audio_question_answering`，
      不代表 SenseVoice 支持音频问答。
+     Chat 音频编码将 `audio/wav`、`audio/wave` 和 `audio/x-wav` 统一为 `wav`，
+     避免不同平台的 MIME 数据库把同一 WAV 文件误标为 `mp3`。
    - todo：`create_todos_tool()`（`TodoCreateTool` / `TodoListTool` / `TodoGetTool` /
      `TodoModifyTool`）+ `TodoLockManager`（session 级锁）。
    - goal：`SubmitGoalReportTool` / `GetCurrentGoalTool` + `GoalReportSink`（接 `S_11`）。
