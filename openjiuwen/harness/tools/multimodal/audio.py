@@ -204,6 +204,7 @@ def _encode_audio_file(audio_path: str) -> tuple[str, str]:
             "mpeg": "mp3",
             "wav": "wav",
             "wave": "wav",
+            "x-wav": "wav",
         }
         file_format = format_mapping.get(mime_format, "mp3")
     else:
