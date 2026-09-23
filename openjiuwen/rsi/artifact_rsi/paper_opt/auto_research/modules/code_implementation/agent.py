@@ -723,8 +723,15 @@ class CodeImplementationAgent:
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
         from openjiuwen.harness.subagents import create_code_agent
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.python_runtime import (
+            discover_python_runtime,
+            ensure_on_path,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.exploration_budget_rail import (
+            ExplorationBudgetRail,
         )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.guarded_sys_operation_rail import (
             GuardedSysOperationRail,
@@ -742,6 +749,17 @@ class CodeImplementationAgent:
         # explicit override (e.g. OPENJIUWEN_BASH_STRICT=0 for local debugging)
         # is respected.
         os.environ.setdefault("OPENJIUWEN_BASH_STRICT", "1")
+
+        # On the packaged desktop host, a bare `python`/`py` typed in this
+        # agent's bash tool can resolve to Windows' own App Execution Alias
+        # placeholder instead of a real interpreter (prints a "go install
+        # from the Microsoft Store" message rather than running anything) —
+        # observed directly burning an attempt's entire retry budget on the
+        # agent re-locating a real interpreter from scratch instead of ever
+        # writing `output/run.py`. Prepend a verified real interpreter's
+        # directory to PATH once so every bash call in this process resolves
+        # correctly without the agent having to rediscover it each attempt.
+        ensure_on_path(discover_python_runtime())
 
         model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
@@ -768,6 +786,12 @@ class CodeImplementationAgent:
                 GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
                 OpenJiuwenReferenceRail(),
                 DesignReferenceRail(design_root=design_root),
+                # Nudges toward attempting an implementation once too many
+                # tool calls have passed with no write under output/ — see
+                # module docstring for the repeated failure pattern this
+                # addresses (environment/SDK exploration burning the whole
+                # attempt's budget before run.py ever gets written).
+                ExplorationBudgetRail(),
                 # Inner ReAct stays unbounded when max_iterations is omitted.
                 # The pipeline's configured cap is applied to the outer loop
                 # via TaskCompletionRail, otherwise a stuck tool/model session
