@@ -117,6 +117,7 @@ def test_audio_transcription_tool_uses_chat_audio_for_non_endpoint_model(
     assert result.data["model"] == "gemini-2.5-flash"
 
 
+@pytest.mark.parametrize("audio_mime_type", ["audio/wav", "audio/x-wav", "audio/wave"])
 @pytest.mark.parametrize(
     ("model_name", "endpoint"),
     [
@@ -137,10 +138,15 @@ def test_audio_transcription_routes_exact_model_with_correct_payload(
     monkeypatch,
     model_name: str,
     endpoint: str,
+    audio_mime_type: str,
 ):
     audio_path = tmp_path / "sample.wav"
     _write_test_wav(audio_path)
     audio_bytes = audio_path.read_bytes()
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.multimodal.audio.mimetypes.guess_type",
+        lambda _path: (audio_mime_type, None),
+    )
     config = AudioModelConfig(
         api_key="test-key",
         base_url="https://audio.example/v1",
@@ -151,29 +157,9 @@ def test_audio_transcription_routes_exact_model_with_correct_payload(
 
     def handle_request(request: httpx.Request) -> httpx.Response:
         requests_seen.append(request)
-        assert request.method == "POST"
-        assert request.url.path == endpoint
         if endpoint == "/v1/audio/transcriptions":
-            content_type = request.headers["content-type"]
-            assert content_type.startswith("multipart/form-data;")
-            message = BytesParser(policy=default).parsebytes(
-                f"Content-Type: {content_type}\r\n\r\n".encode("ascii") + request.read()
-            )
-            parts = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
-            assert set(parts) == {"model", "file"}
-            assert parts["model"].get_payload(decode=True).decode("utf-8") == model_name
-            assert parts["file"].get_filename() == "sample.wav"
-            assert parts["file"].get_payload(decode=True) == audio_bytes
             return httpx.Response(200, json={"text": "test transcript"})
 
-        assert request.headers["content-type"] == "application/json"
-        payload = json.loads(request.read())
-        assert payload["model"] == model_name
-        content = payload["messages"][-1]["content"]
-        assert "Transcribe all speech" in content[0]["text"]
-        assert content[1]["type"] == "input_audio"
-        assert content[1]["input_audio"]["format"] == "wav"
-        assert base64.b64decode(content[1]["input_audio"]["data"]) == audio_bytes
         return httpx.Response(
             200,
             json={
@@ -200,6 +186,28 @@ def test_audio_transcription_routes_exact_model_with_correct_payload(
         result = asyncio.run(tool.invoke({"audio_path_or_url": str(audio_path)}))
 
     assert [request.url.path for request in requests_seen] == [endpoint]
+    request = requests_seen[0]
+    assert request.method == "POST"
+    if endpoint == "/v1/audio/transcriptions":
+        content_type = request.headers["content-type"]
+        assert content_type.startswith("multipart/form-data;")
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii") + request.read()
+        )
+        parts = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
+        assert set(parts) == {"model", "file"}
+        assert parts["model"].get_payload(decode=True).decode("utf-8") == model_name
+        assert parts["file"].get_filename() == "sample.wav"
+        assert parts["file"].get_payload(decode=True) == audio_bytes
+    else:
+        assert request.headers["content-type"] == "application/json"
+        payload = json.loads(request.read())
+        assert payload["model"] == model_name
+        content = payload["messages"][-1]["content"]
+        assert "Transcribe all speech" in content[0]["text"]
+        assert content[1]["type"] == "input_audio"
+        assert content[1]["input_audio"]["format"] == "wav"
+        assert base64.b64decode(content[1]["input_audio"]["data"]) == audio_bytes
     assert result.success is True, result.error
     assert result.data == {"text": "test transcript", "model": model_name}
 
