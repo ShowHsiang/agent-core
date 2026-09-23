@@ -4,8 +4,36 @@
 
 - Providing `Model` as the unified entry; `client_provider` selects the OpenAI-compatible or Anthropic protocol;
 - Defining `BaseModelClient` plus `OpenAIModelClient` and `AnthropicModelClient`; legacy vendor names are aliases, see [LLM Protocol Consolidation](../../../Basic%20Functions/LLM%20Protocol%20Consolidation.md);
+- Providing `JevSystemOneClient` as a standalone lightweight client for System One typed evaluations;
 - Providing model request/client configuration (`ModelRequestConfig`, `ModelClientConfig`) and schemas for messages, streaming chunks, tool calls, etc.;
 - Providing output parser abstraction (`BaseOutputParser`) and `JsonOutputParser` implementation.
+
+---
+
+## Jev System One typed evaluations
+
+`JevSystemOneClient` calls `POST /v1/systemone` directly. System One accepts a shared `state` plus typed `NoulQuestion`, `ChoiceQuestion`, or `ScoreQuestion` objects and returns typed answers. Because this is not the messages-in/assistant-message-out chat protocol, the client is instantiated directly and is not selected through `Model`, `ModelClientConfig`, or the model-client registry.
+
+```python
+import os
+
+from openjiuwen.core.foundation.llm.system_one import JevSystemOneClient, NoulQuestion
+
+
+async def evaluate_request():
+    async with JevSystemOneClient(api_key=os.environ["TYPESAFE_API_KEY"]) as client:
+        response = await client.system_one(
+            state="I was charged twice. Please help.",
+            questions={
+                "needs_refund": NoulQuestion(
+                    instructions="Is the customer asking for a refund?",
+                )
+            },
+        )
+        return response.answers["needs_refund"]
+```
+
+The default endpoint is TypeSafe (`https://api.typesafe.ai`) and the default model alias is `jev-latest`. To use OpenRouter's TypeSafe-compatible route, set `api_base="https://openrouter.ai/api"` and provide the corresponding API key. The client retries documented `429` and `529` responses with backoff.
 
 ---
 
