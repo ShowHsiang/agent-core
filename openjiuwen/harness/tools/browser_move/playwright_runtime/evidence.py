@@ -98,6 +98,22 @@ def evidence_subject(value: Any) -> str:
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, urlencode(sorted(query)), ""))
 
 
+def same_page_url(first: Any, second: Any) -> bool:
+    """Ignore tracking/order differences, but preserve routing, filters and fragments."""
+    def identity(value: Any) -> tuple:
+        try:
+            parsed = urlsplit(str(value or ""))
+        except ValueError:
+            return ()
+        if not parsed.netloc:
+            return ()
+        query = tuple(sorted((key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+                             if not key.lower().startswith("utm_") and key.lower() not in {"spm", "scm"}))
+        return parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", query, parsed.fragment
+    left = identity(first)
+    return bool(left) and left == identity(second)
+
+
 def task_observation_allowed(state: dict[str, Any], source: str) -> bool:
     """A reused tab is environment, not task evidence until it is relevant/used."""
     task = str(state.get("goal") or state.get("task") or "").lower()
@@ -157,6 +173,13 @@ def merge_evidence_slot(
     for index, previous in enumerate(slots):
         if (previous.get("entity"), previous.get("variant"), previous.get("field")) != key:
             continue
+        previous_unobserved = previous.get("observation_status") == "not_observed"
+        incoming_unobserved = slot.get("observation_status") == "not_observed"
+        if incoming_unobserved and not previous_unobserved:
+            return
+        if previous_unobserved and not incoming_unobserved:
+            slots[index] = slot
+            return
         detail_correction = (
             previous.get("entity_source", "") == entity and bool(entity)
             and previous.get("evidence_scope") == "listing" and slot.get("evidence_scope") == "detail"
@@ -167,6 +190,14 @@ def merge_evidence_slot(
             return
         same_scope = all(previous.get(name, "") == slot.get(name, "") for name in ("qualifier", "date"))
         same_source = previous.get("source") == slot.get("source")
+        current_part = slot.get("field") == "duration" and slot.get("qualifier") == "current_part"
+        if current_part and not same_scope and previous.get("entity_source", "") == entity:
+            slot["alternatives"] = [
+                *previous.get("alternatives", []),
+                {name: item for name, item in previous.items() if name != "alternatives"},
+            ][-3:]
+            slots[index] = slot
+            return
         replace_source = same_source or detail_correction
         if previous.get("entity_source", "") == entity and same_scope and replace_source:
             if previous.get("alternatives"):

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
-from .evidence import merge_evidence_slot, task_observation_allowed
+from .evidence import merge_evidence_slot, same_page_url, task_observation_allowed
 
 BROWSER_WORKING_CONTEXT_STATE_KEY = "__browser_subagent_working_context__"
 BROWSER_TASK_STATE_KEY = "__browser_phase_budget_state__"
@@ -615,6 +615,8 @@ class BrowserWorkingContextStore:
             url = str(semantic_state.get("url") or "").strip()
             if url:
                 last_page = state.setdefault("last_page", {})
+                if not same_page_url(url, last_page.get("url")):
+                    last_page["title"] = ""
                 last_page["url"] = url
 
         progress_name = str(progress.get("progress") or "unknown")
@@ -1033,15 +1035,19 @@ class BrowserWorkingContextStore:
         covered_keys = {
             BrowserWorkingContextStore._evidence_slot_key(slot)
             for slot in evidence_slots
+            if slot.get("observation_status") != "not_observed"
         }
         missing_slots = [
             slot
             for slot in required_slots
             if BrowserWorkingContextStore._evidence_slot_key(slot) not in covered_keys
         ]
-        unavailable_slots = [
-            slot for slot in evidence_slots if slot.get("status") in {"missing", "unknown"}
-        ]
+        unavailable_slots = []
+        for slot in evidence_slots:
+            if slot.get("status") not in {"missing", "unknown"}:
+                continue
+            if slot.get("observation_status") != "not_observed":
+                unavailable_slots.append(slot)
         return {
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
@@ -1089,6 +1095,8 @@ class BrowserWorkingContextStore:
         if not include_value:
             return projected
         projected["status"] = str(slot.get("status") or "present")[:20]
+        if slot.get("observation_status"):
+            projected["observation_status"] = str(slot.get("observation_status"))[:40]
         if slot.get("value") not in (None, ""):
             projected["value"] = (
                 str(slot["value"]) if slot.get("field") in {"url", "source"}
