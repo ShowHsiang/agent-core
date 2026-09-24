@@ -33,7 +33,11 @@ async def evaluate_request():
         return response.answers["needs_refund"]
 ```
 
-The default endpoint is TypeSafe (`https://api.typesafe.ai`) and the default model alias is `jev-latest`. To use OpenRouter's TypeSafe-compatible route, set `api_base="https://openrouter.ai/api"` and provide the corresponding API key. The client retries documented `429` and `529` responses with backoff.
+The default endpoint is TypeSafe (`https://api.typesafe.ai`) and the default model alias is `jev-latest`. To use OpenRouter's TypeSafe-compatible route, set `api_base="https://openrouter.ai/api"`, `model_name="typesafe/jev-1.13"`, and provide your OpenRouter API key. The client retries documented `429` and `529` responses with backoff.
+
+`endpoint_path` defaults to `/v1/systemone` and is appended to `api_base` without rewriting its prefix. The same typed client also supports OpenRouter Decisions with `api_base="https://openrouter.ai/api/alpha"` and `endpoint_path="/decisions"`. For an existing TypeSafe base ending in `/v1`, set `endpoint_path="/systemone"`. Endpoint overrides must be absolute paths, not origins, query strings or fragments.
+
+Responses are parsed with strict types: boolean or string probabilities are rejected, rather than coerced to numbers. Callers still enforce candidate membership, distribution validity and confidence thresholds. Applications with a shared task deadline can set `max_retries=0` and apply their bounded retry/deadline policy around `system_one`; this avoids nesting the standalone retry loop. Injected HTTP clients remain caller-owned.
 
 ---
 

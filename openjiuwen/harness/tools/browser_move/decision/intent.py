@@ -1,0 +1,78 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Trusted goal projection and literal bindings; never infer values from page text."""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+from urllib.parse import urlsplit
+
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
+
+_ENVELOPE_PREFIX = "你收到一条消息："
+_QUOTES = re.compile(r'"([^"\n]*)"|“([^”\n]*)”|「([^」\n]*)」|『([^』\n]*)』')
+
+
+def normalize_goal(value: Any) -> str:
+    """Unwrap only the host's recognized user-message envelope, never arbitrary JSON."""
+    for _ in range(3):
+        if isinstance(value, dict):
+            if (
+                isinstance(value.get("content"), str)
+                and "source" in value
+                and (value.get("type") == "user input" or value.get("origin_kind") == "external_user_authored")
+            ):
+                value = value["content"]
+                continue
+            return ""
+        text = clean_unicode(str(value or "")).strip()
+        wrapped = text.startswith(_ENVELOPE_PREFIX)
+        candidate = text[len(_ENVELOPE_PREFIX) :].strip() if wrapped else text
+        if candidate.startswith("{"):
+            try:
+                parsed = json.loads(candidate)
+            except ValueError:
+                # A truncated host envelope must not produce metadata fill values.
+                return "" if wrapped else text
+            if (
+                isinstance(parsed, dict)
+                and "source" in parsed
+                and (parsed.get("type") == "user input" or parsed.get("origin_kind") == "external_user_authored")
+            ):
+                value = parsed
+                continue
+        return text
+    return clean_unicode(value).strip() if isinstance(value, str) else ""
+
+
+def goal_values(goal: str) -> list[str]:
+    goal = normalize_goal(goal)
+    values = [next(part for part in match.groups() if part is not None) for match in _QUOTES.finditer(goal)]
+    values = [value for value in values if 0 < len(value) <= 200]
+    for pattern in (r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", r"\b\d{4}-\d{2}-\d{2}\b"):
+        values.extend(match.group() for match in re.finditer(pattern, goal))
+    for match in re.finditer(r"(?:搜索|查询|search for)\s*[:：]?\s*([^，。；;\n]+)", goal, re.I):
+        value = match.group(1).strip()
+        if value.startswith(('"', "“", "「", "『")):
+            continue  # Balanced pairs above already remove both delimiters.
+        value = re.split(
+            r"(?:然后|并返回|并点击|并按|,|\s+and\s+(?:then\s+)?(?:return|click|open|press|summari[sz]e)\b)",
+            value, maxsplit=1, flags=re.I,
+        )[0].strip()
+        if 0 < len(value) <= 200:
+            values.append(value)
+    return list(dict.fromkeys(value for value in values if value and value in goal))[:20]
+
+
+def explicit_urls(goal: str) -> list[str]:
+    urls = []
+    for match in re.finditer(r'https?://[^\s<>"“”「」，。；]+', normalize_goal(goal)):
+        url = match.group().rstrip(".,;)")
+        try:
+            parsed = urlsplit(url)
+            if parsed.hostname and not parsed.username and not parsed.password:
+                urls.append(url)
+        except ValueError:
+            continue
+    return list(dict.fromkeys(urls))[:4]

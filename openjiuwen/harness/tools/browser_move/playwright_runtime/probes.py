@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from ..decision.guard import NODE_STATE_JS, PAGE_STATE_JS
+
 
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
@@ -15,10 +17,10 @@ def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def build_browser_state_metadata_js() -> str:
+def build_browser_state_metadata_js(*, decision_probe: str = "") -> str:
     """Build Playwright code for fresh page, tab, and position state."""
 
-    return r"""
+    script = r"""
 async (page) => {
   const pages = page.context().pages();
 
@@ -241,6 +243,13 @@ async (page) => {
   };
 }
 """.strip()
+    if decision_probe:
+        return (
+            "async (page) => { const metadata = await (" + script + ")(page);"
+            "try { metadata.decision_probe = await (" + decision_probe + ")(page); }"
+            "catch (_) { metadata.decision_probe = {ok:false}; } return metadata; }"
+        )
+    return script
 
 
 def build_interactive_probe_js(
@@ -250,6 +259,8 @@ def build_interactive_probe_js(
     query: str = "",
     site_profiles: Optional[List[Dict[str, Any]]] = None,
     generation_id: str = "g0",
+    decision_mode: bool = False,
+    intent: str = "",
 ) -> str:
     """Build browser_run_code JavaScript for compact interactive-element probing."""
 
@@ -259,6 +270,8 @@ def build_interactive_probe_js(
         "query": str(query or "").strip().lower(),
         "site_profiles": site_profiles or [],
         "generation_id": str(generation_id or "g0"),
+        "decision_mode": bool(decision_mode),
+        "intent": str(intent or "").lower(),
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
@@ -490,8 +503,14 @@ async (page) => {{
     }};
 
     const accessibleName = (el) => {{
+      const labelledBy = String(el.getAttribute('aria-labelledby') || '').split(/\\s+/)
+        .filter(Boolean).map(id => document.getElementById(id)?.textContent || '').join(' ');
+      const labels = Array.from(el.labels || []).map(label => label.textContent || '').join(' ');
       return normalize(
+        labelledBy ||
         el.getAttribute('aria-label') ||
+        labels ||
+        el.closest('label')?.textContent ||
         el.getAttribute('title') ||
         el.getAttribute('placeholder') ||
         el.getAttribute('alt') ||
@@ -733,6 +752,7 @@ async (page) => {{
       if (query && queryMatches(`${{actionLikelihood}} ${{tag}} ${{role}}`)) score += 20;
       if (text) score += Math.min(20, text.length / 4);
       if (name) score += Math.min(15, name.length / 5);
+      if (params.decision_mode && name && String(params.intent).includes(name.toLowerCase())) score += 100;
 
       if (rect.top >= 0 && rect.top <= window.innerHeight) score += 15;
       if (rect.left >= 0 && rect.left <= window.innerWidth) score += 5;
@@ -742,10 +762,37 @@ async (page) => {{
       return score;
     }};
 
+    const decisionStateFor = (el, full = true) => {{
+      if (!params.decision_mode) return {{}};
+      const tag = el.tagName.toLowerCase();
+      const type = el.getAttribute('type') || '';
+      const name = accessibleName(el);
+      const registry = full ? (window.__openjiuwenDecisionNodes || (window.__openjiuwenDecisionNodes = {{
+        document: String(Date.now()) + ':' + String(Math.random()), nodes: new WeakMap(), next: 0
+      }})) : null;
+      if (registry && !registry.nodes.has(el)) registry.nodes.set(el, ++registry.next);
+      const sensitive = type === 'password' || /password|secret|token|credit.card|card.number|cc-number|cc-csc/i.test(
+        `${{name}} ${{el.getAttribute('name') || ''}} ${{el.getAttribute('autocomplete') || ''}}`);
+      const checked = 'checked' in el ? Boolean(el.checked) : el.getAttribute('aria-checked');
+      return {{
+        tag, input_type: type, sensitive, readonly: Boolean(el.readOnly),
+        autocomplete: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
+        search_like: type === 'search' || el.getAttribute('role') === 'searchbox' ||
+          Boolean(el.closest('form[role="search"]')) || /search|搜索|查询/i.test(name),
+        current_value: sensitive ? null : ('value' in el ? String(el.value) : null),
+        checked: typeof checked === 'boolean' ? checked : checked === 'true' ? true : checked === 'false' ? false : null,
+        options: tag === 'select' ? Array.from(el.options).slice(0, 80).map(o => ({{
+          value: o.value, label: o.label, disabled: o.disabled, selected: o.selected
+        }})) : [],
+        options_omitted: tag === 'select' ? Math.max(0, el.options.length - 80) : 0,
+        node_guard: sensitive || !full ? null : ({NODE_STATE_JS})(el)
+      }};
+    }};
     const all = Array.from(document.querySelectorAll(selectors.join(',')));
     const seen = new Set();
     const candidates = [];
     const widenedCandidates = [];
+    const decisionExcluded = {{}};
 
     for (const el of all) {{
       if (!el || seen.has(el)) continue;
@@ -803,7 +850,26 @@ async (page) => {{
         /(^|[\\s_-])(active|selected|checked)([\\s_-]|$)/i.test(className) ? 'class' :
         selectionSourceFromUrl(el, kind);
 
+      let decisionState = {{}};
+      if (params.decision_mode) {{
+        decisionState = decisionStateFor(el, false);
+        const field = ['input', 'textarea', 'select'].includes(tag) &&
+          ['textbox', 'searchbox', 'combobox'].includes(role) &&
+          (tag !== 'input' || ['', 'text', 'search', 'email', 'url', 'tel', 'number', 'date'].includes(type.toLowerCase()));
+        const checkbox = tag === 'input' && type === 'checkbox';
+        const click = clickable && !['textbox', 'searchbox', 'combobox', 'slider', 'spinbutton'].includes(role);
+        const excluded = !enabled || !actionable || !clickable ? 'not_actionable' :
+          !(name || text) ? 'missing_name' : decisionState.sensitive ? 'sensitive' :
+          decisionState.readonly ? 'readonly' :
+          (el.closest('form,[role="dialog"]')?.querySelectorAll('input,textarea,select').length || 0) > 128 ? 'large_form' :
+          !(field || checkbox || click) ? 'unsupported_control' : '';
+        if (excluded) {{
+          decisionExcluded[excluded] = (decisionExcluded[excluded] || 0) + 1;
+          continue;
+        }}
+      }}
       const candidate = {{
+        decision_state: decisionState,
         tag,
         role,
         action_likelihood: actionLikelihood,
@@ -811,6 +877,7 @@ async (page) => {{
         kind: kind || actionLikelihood,
         text,
         accessible_name: name,
+        _decision_element: el,
         aria_label: normalize(el.getAttribute('aria-label') || ''),
         testid: normalize(testid),
         input_type: normalize(type),
@@ -853,6 +920,8 @@ async (page) => {{
 
     const elements = selectedCandidates.slice(0, maxItems).map((item, index) => {{
       const copy = {{ ...item }};
+      copy.decision_state = decisionStateFor(copy._decision_element);
+      delete copy._decision_element;
       copy.id = `e${{index + 1}}`;
       delete copy.score;
       return copy;
@@ -872,9 +941,17 @@ async (page) => {{
       viewport_only: viewportOnly,
       generation_id: generationId,
       total_candidates: selectedCandidates.length,
+      decision_excluded: decisionExcluded,
       query_widened: Boolean(exactQuery && !candidates.length && widenedCandidates.length),
       returned: elements.length,
       elements,
+      decision_snapshot: params.decision_mode ? {{
+        capture_id: String(Date.now()) + ':' + String(Math.random()),
+        observed_at_ms: Date.now(), visibility: document.visibilityState,
+        url: window.location.href, title: document.title,
+        page_text: Array.from(document.body?.innerText || '').slice(0, 6000).join(''),
+        page_guard: ({PAGE_STATE_JS})(), excluded: decisionExcluded
+      }} : null,
       local_excerpt: elements.filter((item) => !item.clickable).slice(0, 5)
         .map((item) => `${{item.role || item.tag}} "${{item.accessible_name || item.text}}" ` +
           `(${{item.actionability_reason}})`)

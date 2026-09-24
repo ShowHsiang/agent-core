@@ -33,6 +33,7 @@ DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 OPENAI_TRANSCRIPTION_ENDPOINT_MODELS = {
+    "funaudiollm/sensevoicesmall",
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
     "whisper-1",

@@ -90,6 +90,7 @@ class JevSystemOneClient:
         verify_ssl: bool | str | ssl.SSLContext = True,
         custom_headers: dict[str, str] | None = None,
         http_client: httpx.AsyncClient | None = None,
+        endpoint_path: str = _SYSTEM_ONE_ENDPOINT,
     ) -> None:
         if not api_key:
             raise build_error(
@@ -107,6 +108,17 @@ class JevSystemOneClient:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR, error_msg="max_retries cannot be negative.")
         if retry_backoff < 0:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR, error_msg="retry_backoff cannot be negative.")
+        if (
+            not isinstance(endpoint_path, str)
+            or not endpoint_path.startswith("/")
+            or endpoint_path.startswith("//")
+            or any(char.isspace() or char in "?#\\" for char in endpoint_path)
+            or any(part in {".", ".."} for part in endpoint_path.split("/"))
+        ):
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg="endpoint_path must be an absolute URL path without query, fragment or traversal.",
+            )
 
         self._api_key = api_key
         self.api_base = api_base.rstrip("/")
@@ -114,6 +126,7 @@ class JevSystemOneClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        self.endpoint_path = endpoint_path
         self._custom_headers = dict(custom_headers or {})
         self._owns_http_client = http_client is None
         self._http_client = (
@@ -169,7 +182,7 @@ class JevSystemOneClient:
                 "Content-Type": "application/json",
             }
         )
-        url = f"{self.api_base}{_SYSTEM_ONE_ENDPOINT}"
+        url = f"{self.api_base}{self.endpoint_path}"
 
         llm_logger.info(
             "Before request Jev System One, request params ready.",
@@ -186,7 +199,9 @@ class JevSystemOneClient:
                 request_timeout=request_timeout,
             )
             response.raise_for_status()
-            return SystemOneResponse.model_validate(response.json())
+            # A boolean/string confidence must not become a valid float before
+            # callers enforce their decision thresholds and distributions.
+            return SystemOneResponse.model_validate(response.json(), strict=True)
         except (httpx.HTTPError, ValueError) as exc:
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,

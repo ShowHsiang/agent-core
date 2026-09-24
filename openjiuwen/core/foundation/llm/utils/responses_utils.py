@@ -10,8 +10,6 @@ import uuid
 from typing import Any, Iterable, Optional, Union
 
 import httpx
-from pydantic import BaseModel
-
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
@@ -21,7 +19,9 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 from openjiuwen.core.foundation.tool import ToolInfo
+from pydantic import BaseModel
 
 
 class OpenAIAccountResponsesError(Exception):
@@ -87,7 +87,7 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
-    return body
+    return clean_unicode(body)
 
 
 def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, Any]:

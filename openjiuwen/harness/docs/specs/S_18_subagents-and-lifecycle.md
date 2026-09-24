@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-22 |
-| 关联 feature | F_05_browser-task-integrity |
+| 最近一次修订日期 | 2026-09-23 |
+| 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy |
 
 ## 范围 / 边界
 
@@ -106,6 +106,19 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     现有 browser_progress 文本标注 partial/next_action，不要求逐轮进度或另一个验证模型。
     支付/登录接管必须有当前页正证据；取消、截止期限和已有明确终态仍保持不变。
 
+15. **Browser 决策与执行分离**：RuntimeSettings.decision 默认 llm；shadow 后台只记录建议，
+    hybrid 使用 BrowserPolicyModel 将 Jev 的有界选择编译为标准工具调用。上下文处理器
+    传递运行时同次 DOM 观察的任务内引用，禁止反向解析提示词或共享全局最新页面。
+    权限流程完成后由工具派发入口重查节点并消费单次决策，禁止刷新旧 Jev 目标继续执行。节点检查、权限、
+    预算、执行结果和完成协议仍属于现有 runtime。Jev 错误、无效/低可信决策、未覆盖操作
+    和收尾请求回到同一任务的原模型；取消继续传播，不重置 deadline，不重放副作用。
+    模型热更新重新绑定显式模型实例，Browser 策略保留包装并替换底层 LLM。
+    Jev transport 显式区分 TypeSafe native 和 OpenRouter Decisions；使用各自模型名、端点与
+    密钥环境变量，OpenRouter 的同版本日期快照视为有效响应，不经过 chat completions。
+    两种 provider 统一复用 core 的 JevSystemOneClient 完成 HTTP 与严格类型解析；浏览器适配层
+    负责同一总预算内的有限重试、模型校验和安全诊断，关闭底层默认重试以避免叠加。布尔值或
+    字符串不得被强制转换为有效置信度；浏览器侧仍校验候选集合、概率分布和置信度阈值。
+
 ## 接口契约
 
 ```python
@@ -159,3 +172,13 @@ async def cleanup_subagent_task_resources(subagent: Any) -> None
   字段 —— `S_01`（`SubAgentSpec` 解析成 `SubAgentConfig`，装配见 `S_13`）。
 - `SubagentRail` 挂载 / `create_subagent` 装配 —— `S_04` / `S_02`。
 - `create_*_agent` 复用 `create_deep_agent` 构造流 —— `S_01`。
+
+## Jev 分段交接补充（F_08，2026-09-23）
+
+同一任务的评估总预算、回退作用域、可执行状态指纹和执行记录保存在 session phase state；
+focused resume / 模型重建不重置预算或 deadline。软回退只在意图或可执行状态实质变化后
+重新准入，时间、capture_id、target_id 更新本身不构成恢复条件。FINISH 留在现有 LLM
+收尾协议；认证、计费、配置与协议硬错误维持任务级 LLM。
+browser_page_action 是参数封闭的运行时辅助工具，提供显式 URL 导航、返回和有界滚动；
+与 Batch 一样先经过权限钩子，再检查实际参数、任务、页面与 DOM document，且验证底层
+capability。工具成功回执与执行后观察分开记录；不能自动重放结果不明的操作。

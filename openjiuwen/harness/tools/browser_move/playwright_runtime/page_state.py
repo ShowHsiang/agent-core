@@ -172,6 +172,7 @@ class BrowserTarget:
     field_name: str = ""
     selected: bool = False
     selected_source: str = ""
+    decision_state: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def generation_id(self) -> str:
@@ -189,6 +190,8 @@ class BrowserTarget:
             result["recommended_action"] = "navigate_primary_link" if self.navigation_url else "click"
         if self.role:
             result["role"] = self.role
+        if self.name:
+            result["name"] = _compact_text(self.name, 160)
         if self.text:
             result["text"] = _compact_text(self.text, 80)
         if self.region:
@@ -236,6 +239,8 @@ class BrowserPageState:
         self._ref_targets: Dict[str, str] = {}
         self._selector_targets: Dict[tuple[int, str], str] = {}
         self._interactive_target_ids: list[str] = []
+        self.decision_omitted = 0
+        self.decision_snapshot: dict[str, Any] = {}
         self._cards: list[Dict[str, Any]] = []
         self._target_counter = 0
         self.listing_stale = False
@@ -253,6 +258,8 @@ class BrowserPageState:
         self.field_coverage.clear()
         self.blockers.clear()
         self._interactive_target_ids.clear()
+        self.decision_omitted = 0
+        self.decision_snapshot = {}
         self._cards.clear()
         self.listing_stale = False
         self._trim_target_history()
@@ -301,6 +308,9 @@ class BrowserPageState:
                     entry["requires_scroll"] = True
                 matches.append(entry)
         self._update_blockers(payload, elements)
+        self._decision_target_ids = [item["target_id"] for item in matches]
+        self.decision_omitted = max(0, int(payload.get("total_candidates") or len(matches)) - len(matches))
+        self.decision_snapshot = dict(payload.get("decision_snapshot") or {})
         return matches
 
     def register_cards(self, payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -683,6 +693,21 @@ class BrowserPageState:
             self.selector_generations[selector] = self.generation
             self._selector_targets[(self.generation, selector)] = target.target_id
 
+    def export_decision_targets(self) -> list[dict[str, Any]]:
+        """Local policy projection; node guards are never part of public PageState."""
+        return [
+            {**target.compact_index(), "decision_state": target.decision_state}
+            for target_id in getattr(self, "_decision_target_ids", [])
+            if (target := self._targets.get(target_id)) is not None
+            and target.generation == self.generation
+        ]
+
+    def export_decision_observation(self) -> dict[str, Any]:
+        if not self.decision_snapshot:
+            return {}
+        return {**self.decision_snapshot, "page": self.export_summary(),
+                "controls": self.export_decision_targets(), "omitted_count": self.decision_omitted}
+
     def export(self) -> Dict[str, Any]:
         """Return a bounded PageState index suitable for every browser result."""
         interactives = self._export_targets(
@@ -762,6 +787,11 @@ class BrowserPageState:
                 existing.clickable = bool(item.get("clickable", False))
                 existing.selected = bool(item.get("selected", False))
                 existing.selected_source = str(item.get("selected_source") or "")[:40]
+                existing.name = str(item.get("accessible_name") or item.get("name") or "").strip()
+                existing.text = str(item.get("text") or item.get("title") or "").strip()
+                existing.role = str(item.get("role") or "").strip()
+                existing.region = str(item.get("region") or "").strip()
+                existing.decision_state = dict(item.get("decision_state") or {})
                 if href:
                     existing.href = href
                     existing.navigation_url = navigation_url
@@ -784,6 +814,7 @@ class BrowserPageState:
             clickable=bool(item.get("clickable", False)),
             selected=bool(item.get("selected", False)),
             selected_source=str(item.get("selected_source") or "")[:40],
+            decision_state=dict(item.get("decision_state") or {}),
         )
         if selector:
             self.selector_generations[selector] = self.generation

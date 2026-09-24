@@ -224,12 +224,24 @@ class BrowserSubagentStatusLogger:
                 "browser_batch_steps_ok": state.get("batch_steps_ok", 0),
                 "browser_batch_steps_failed": state.get("batch_steps_failed", 0),
                 "fallback_count": state.get("fallback_count", 0),
+                "decision_summary": self._decision_summary(ctx),
                 "total_model_elapsed_ms": state.get("total_model_elapsed_ms", 0),
                 "total_tool_elapsed_ms": state.get("total_tool_elapsed_ms", 0),
                 "recent_tools": list(state.get("history") or [])[-_TOOL_HISTORY_LIMIT:],
                 "result_summary": self.summarize_result("browser_task", result),
             },
         )
+
+    @staticmethod
+    def _decision_summary(ctx: Any) -> dict[str, Any]:
+        session = getattr(ctx, "session", None)
+        getter = getattr(session, "get_state", None)
+        phase = getter("__browser_phase_budget_state__") if callable(getter) else None
+        if not isinstance(phase, dict):
+            return {}
+        policy = phase.get("decision_policy") or {}
+        return {"scope": "task_cumulative", "evaluations": policy.get("decisions", 0),
+                "fallback_scope": policy.get("fallback_scope", ""), **policy.get("counters", {})}
 
     def before_model_call(self, ctx: Any) -> None:
         state = self._state(ctx)
@@ -252,7 +264,7 @@ class BrowserSubagentStatusLogger:
         state = self._state(ctx)
         inputs = getattr(ctx, "inputs", None)
         response = _mapping_get(inputs, "response", None)
-        elapsed_ms = self._elapsed_ms(state.get("model_started_at"))
+        elapsed_ms = self._elapsed_ms(state.pop("model_started_at", None))
         if elapsed_ms is not None:
             state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
         self._emit(
@@ -261,13 +273,15 @@ class BrowserSubagentStatusLogger:
             {
                 "iteration": state.get("model_calls", 0),
                 "elapsed_ms": elapsed_ms,
+                "model_source": (_mapping_get(response, "metadata", {}) or {}).get("browser_policy", {}).get("route", "llm"),
+                "browser_policy": (_mapping_get(response, "metadata", {}) or {}).get("browser_policy"),
                 "response_summary": self._summarize_model_response(response),
             },
         )
 
     def on_model_exception(self, ctx: Any) -> None:
         state = self._state(ctx)
-        elapsed_ms = self._elapsed_ms(state.get("model_started_at"))
+        elapsed_ms = self._elapsed_ms(state.pop("model_started_at", None))
         if elapsed_ms is not None:
             state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
         exc = getattr(ctx, "exception", None)
@@ -314,6 +328,8 @@ class BrowserSubagentStatusLogger:
             {
                 "iteration": state.get("model_calls", 0),
                 "tool_index": state.get("tool_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "args_summary": self.summarize_args(str(tool_name), tool_args),
             },
@@ -340,6 +356,8 @@ class BrowserSubagentStatusLogger:
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "elapsed_ms": elapsed_ms,
                 "result_summary": result_summary,
@@ -362,6 +380,8 @@ class BrowserSubagentStatusLogger:
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
+                "tool_call_id": _mapping_get(tool_call, "id", ""),
+                "model_source": "jev" if str(_mapping_get(tool_call, "id", "")).startswith("jev_") else "llm",
                 "tool_name": _safe_str(tool_name, 180),
                 "elapsed_ms": elapsed_ms,
                 "error_type": type(exc).__name__ if exc is not None else "",

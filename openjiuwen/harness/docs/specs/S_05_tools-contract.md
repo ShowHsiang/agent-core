@@ -56,6 +56,12 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      热重载不能因卡片 ID 相同而保留旧的付费搜索描述或参数枚举。
    - vision/audio：`create_vision_tools()` / `create_audio_tools()`；由 `VisionModelConfig`
      / `AudioModelConfig` 门控（`S_01` 不变量 8）。
+     `audio_transcription` 对 `gpt-4o-transcribe`、`gpt-4o-mini-transcribe`、`whisper-1`
+     和 `FunAudioLLM/SenseVoiceSmall` 忽略大小写精确匹配，使用 `/audio/transcriptions`
+     的 multipart 文件上传；请求保留原始模型名。其他模型（如 MiMo、Gemini）继续使用
+     `/chat/completions` 的 `input_audio`。SiliconFlow 的 `base_url` 应为
+     `https://api.siliconflow.cn/v1`，不含接口后缀。本路由不改变 `audio_question_answering`，
+     不代表 SenseVoice 支持音频问答。
    - todo：`create_todos_tool()`（`TodoCreateTool` / `TodoListTool` / `TodoGetTool` /
      `TodoModifyTool`）+ `TodoLockManager`（session 级锁）。
    - goal：`SubmitGoalReportTool` / `GetCurrentGoalTool` + `GoalReportSink`（接 `S_11`）。
@@ -300,3 +306,13 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
 因此该设置不是网络访问隔离边界。严格访问隔离应由网络层实施。
 
 决策与限制见 `../features/F_01_task-scoped-web-research.md`。
+
+## Jev 分段交接补充（F_08，2026-09-23）
+
+同一任务的评估总预算、回退作用域、可执行状态指纹和执行记录保存在 session phase state；
+focused resume / 模型重建不重置预算或 deadline。软回退只在意图或可执行状态实质变化后
+重新准入，时间、capture_id、target_id 更新本身不构成恢复条件。FINISH 留在现有 LLM
+收尾协议；认证、计费、配置与协议硬错误维持任务级 LLM。
+browser_page_action 是参数封闭的运行时辅助工具，提供显式 URL 导航、返回和有界滚动；
+与 Batch 一样先经过权限钩子，再检查实际参数、任务、页面与 DOM document，且验证底层
+capability。工具成功回执与执行后观察分开记录；不能自动重放结果不明的操作。

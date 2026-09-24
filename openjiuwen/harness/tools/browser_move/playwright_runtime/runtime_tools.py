@@ -765,6 +765,9 @@ class BrowserProbeCardsTool(Tool):
 
 
 class BrowserBatchInteractTool(Tool):
+    # AbilityManager supplies the final callback context after all permission hooks.
+    accepts_tool_callback_context = True
+
     def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
         del language
         super().__init__(
@@ -777,13 +780,21 @@ class BrowserBatchInteractTool(Tool):
         self._runtime = runtime
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
-        del kwargs
-
         steps = inputs.get("steps")
         session_id = (inputs.get("session_id") or "").strip() or _ctx_parent_session_id.get()
         request_id = (inputs.get("request_id") or "").strip() or _ctx_parent_request_id.get()
 
         try:
+            context = kwargs.get("_tool_callback_context")
+            callback_inputs = getattr(context, "inputs", None)
+            call_id = str(getattr(getattr(callback_inputs, "tool_call", None), "id", "") or "")
+            strict_args = {}
+            if call_id.startswith("jev_"):
+                policy = getattr(self._runtime, "decision_policy", None)
+                if policy is None:
+                    raise ValueError("browser_policy_unavailable_at_execution")
+                await policy.validate_tool_call(callback_inputs, kwargs.get("session"), actual_arguments=inputs)
+                strict_args["allow_stale_recovery"] = False
             result = await self._runtime.batch_interact(
                 steps=steps,
                 generation_id=str(inputs.get("generation_id") or ""),
@@ -794,6 +805,7 @@ class BrowserBatchInteractTool(Tool):
                 global_timeout_ms=inputs.get("global_timeout_ms"),
                 session_id=session_id,
                 request_id=request_id,
+                **strict_args,
             )
             return ToolOutput(
                 success=bool(result.get("ok", True)),
@@ -848,8 +860,13 @@ def build_browser_runtime_tools(
     actions.
     """
 
-    return [
+    result = [
         BrowserProbeInteractivesTool(runtime, language),
         BrowserProbeCardsTool(runtime, language),
         BrowserBatchInteractTool(runtime, language),
     ]
+    if getattr(runtime, "decision_policy", None) is not None:
+        from .policy_page_action import BrowserPageActionTool
+
+        result.append(BrowserPageActionTool(runtime))
+    return result

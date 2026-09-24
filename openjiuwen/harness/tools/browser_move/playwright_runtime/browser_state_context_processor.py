@@ -46,6 +46,7 @@ _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
         "browser_hover",
         "browser_navigate",
         "browser_navigate_back",
+        "browser_page_action",
         "browser_press_key",
         "browser_run_code",
         "browser_run_code_unsafe",
@@ -100,6 +101,7 @@ class BrowserStateContextProcessorConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Any = Field(exclude=True, repr=False)
+    decision_policy: Any = Field(default=None, exclude=True, repr=False)
     max_dom_chars: int = Field(default=12_000, ge=2_000)
 
 
@@ -147,12 +149,20 @@ class BrowserStateContextProcessor(ContextProcessor):
             action_group_id and action_group_id not in self._seen_action_group_ids
         )
         if should_refresh:
+            include_decision = False
+            if self.config.decision_policy is not None:
+                try:
+                    include_decision = self.config.decision_policy.should_observe(context)
+                except Exception:
+                    browser_agent_log_warning("[BROWSER_POLICY] observation eligibility failed; use original LLM")
             if reconciliation_only and action_group_id:
-                captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id)
+                captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id,
+                                                                         include_decision=include_decision)
             elif observation_only and action_group_id:
                 captured_state = await self._capture_compact_state(action_group_id=action_group_id)
             else:
-                captured_state = await self._capture_state(action_group_id=action_group_id or "initial")
+                captured_state = await self._capture_state(action_group_id=action_group_id or "initial",
+                                                          include_decision=include_decision)
             await self._preserve_projected_state(captured_state)
             self._page_change = self._classify_page_change(captured_state)
             semantic_progress = captured_state.get("semantic_progress")
@@ -181,7 +191,16 @@ class BrowserStateContextProcessor(ContextProcessor):
         ]
         if self._cached_state_message is None:
             self._cached_state_message = self._build_state_message(self._cached_state or {})
-        context_window.context_messages.append(self._cached_state_message)
+        state_message = self._cached_state_message
+        if self.config.decision_policy is not None:
+            try:
+                metadata = await self.config.decision_policy.publish_context(
+                    context, self._cached_state or {}, refresh=should_refresh, observation_only=observation_only,
+                )
+                state_message = state_message.model_copy(update={"metadata": {**state_message.metadata, **metadata}})
+            except Exception:
+                browser_agent_log_warning("[BROWSER_POLICY] observation publication failed; use original LLM")
+        context_window.context_messages.append(state_message)
         return None, context_window
 
     @classmethod
@@ -232,7 +251,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             group_browser_ids = group_refresh_ids | group_observation_ids
             if not group_browser_ids:
                 continue
-            refresh_tool_call_ids.update(group_browser_ids)
+            refresh_tool_call_ids = set(group_browser_ids)
             latest_group_id = hashlib.sha256("\x1f".join(call_ids).encode("utf-8")).hexdigest()[:16]
             latest_observation_only = not group_refresh_ids and bool(group_observation_ids)
         return latest_group_id, refresh_tool_call_ids, latest_observation_only
@@ -366,10 +385,12 @@ class BrowserStateContextProcessor(ContextProcessor):
             for expected in _BROWSER_STATE_OBSERVATION_TOOL_NAMES
         )
 
-    async def _capture_state(self, *, action_group_id: str) -> Dict[str, Any]:
+    async def _capture_state(self, *, action_group_id: str, include_decision: bool = False) -> Dict[str, Any]:
         try:
             capture = self.config.provider.capture_browser_state
-            if action_group_id == "initial":
+            if include_decision:
+                state = await capture(action_group_id=action_group_id, include_decision=True)
+            elif action_group_id == "initial":
                 state = await capture()
             else:
                 try:
@@ -426,12 +447,14 @@ class BrowserStateContextProcessor(ContextProcessor):
                 state["page_position"] = self._cached_state.get("page_position") or {}
         return state
 
-    async def _capture_reconciliation_state(self, *, action_group_id: str) -> Dict[str, Any]:
+    async def _capture_reconciliation_state(self, *, action_group_id: str,
+                                            include_decision: bool = False) -> Dict[str, Any]:
         capture = getattr(self.config.provider, "capture_reconciliation_browser_state", None)
         if not callable(capture):
             return await self._capture_state(action_group_id=action_group_id)
         try:
-            state = await capture(action_group_id=action_group_id)
+            decision_kwargs = {"include_decision": True} if include_decision else {}
+            state = await capture(action_group_id=action_group_id, **decision_kwargs)
         except Exception as exc:
             browser_agent_log_warning(
                 "[BrowserStateContextProcessor] browser state reconciliation failed: %s",

@@ -383,6 +383,13 @@ def create_browser_agent(
         "allowed_tool_names": resolved_capabilities.allowed_tool_names,
     }
     browser_backend = BrowserAgentRuntime(**runtime_kwargs)
+    decision_policy = None
+    if resolved_settings.decision.mode != "llm":
+        from openjiuwen.harness.tools.browser_move.decision.policy_model import BrowserPolicyModel
+
+        decision_policy = BrowserPolicyModel(browser_model, resolved_settings.decision, browser_backend)
+        browser_model = decision_policy
+        browser_backend.decision_policy = decision_policy
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     working_context_config = BrowserWorkingContextProcessorConfig(
         language=resolved_language,
@@ -394,7 +401,7 @@ def create_browser_agent(
 
     browser_state_processor = (
         "BrowserStateContextProcessor",
-        BrowserStateContextProcessorConfig(provider=browser_backend),
+        BrowserStateContextProcessorConfig(provider=browser_backend, decision_policy=decision_policy),
     )
     browser_working_context_processor = (
         "BrowserWorkingContextProcessor",
@@ -465,6 +472,8 @@ def create_browser_agent(
         browser_backend.release_task_resources,
         prepare=browser_backend.acquire_task_resources,
     )
+    if decision_policy is not None:
+        agent.register_task_resource_cleanup(decision_policy.release_task_resources)
     return agent
 
 

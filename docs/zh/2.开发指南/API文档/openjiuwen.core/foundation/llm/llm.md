@@ -33,7 +33,11 @@ async def evaluate_request():
         return response.answers["needs_refund"]
 ```
 
-默认端点为 TypeSafe（`https://api.typesafe.ai`），默认模型别名为 `jev-latest`。如需使用 OpenRouter 的 TypeSafe 兼容路由，可设置 `api_base="https://openrouter.ai/api"` 并提供对应 API key。客户端会对官方文档要求的 `429` 和 `529` 响应进行退避重试。
+默认端点为 TypeSafe（`https://api.typesafe.ai`），默认模型别名为 `jev-latest`。如需使用 OpenRouter 的 TypeSafe 兼容路由，设置 `api_base="https://openrouter.ai/api"`、`model_name="typesafe/jev-1.13"` 并提供 OpenRouter API key。客户端会对官方文档要求的 `429` 和 `529` 响应进行退避重试。
+
+`endpoint_path` 默认 `/v1/systemone`，直接追加到 `api_base`，不隐式改写地址前缀。同一类型化客户端也支持 OpenRouter Decisions：设置 `api_base="https://openrouter.ai/api/alpha"`、`endpoint_path="/decisions"`。如果已有 TypeSafe base 以 `/v1` 结尾，设置 `endpoint_path="/systemone"`。该参数只能是绝对路径，不能包含源站、查询参数或片段。
+
+响应采用严格类型解析，布尔值或字符串概率会被拒绝，不会先转换成数字。候选集合、概率分布和置信度阈值仍由调用方校验。使用共享任务 deadline 的应用可设置 `max_retries=0`，在 `system_one` 外统一实施有限重试和总预算，避免嵌套重试。注入的 HTTP 客户端始终由调用方负责关闭。
 
 ---
 

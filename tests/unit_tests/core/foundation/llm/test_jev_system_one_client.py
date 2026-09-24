@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for the lightweight Jev System One client and wire schema."""
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -164,6 +165,56 @@ class TestSystemOneSchema:
 
 
 class TestJevSystemOneClientRequest:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("api_base", "endpoint_path", "expected_url"),
+        [
+            ("https://api.typesafe.ai/v1/", "/systemone", "https://api.typesafe.ai/v1/systemone"),
+            ("https://openrouter.ai/api/alpha/", "/decisions", "https://openrouter.ai/api/alpha/decisions"),
+        ],
+    )
+    async def test_explicit_endpoint_preserves_existing_gateway_prefix(self, api_base, endpoint_path, expected_url):
+        client, http = _make_client(
+            _response(_response_data({"type": "noul", "noul": 0.5})),
+            api_base=api_base, endpoint_path=endpoint_path,
+        )
+        await client.system_one(state="hello", questions={"result": NoulQuestion(instructions="Greeting?")})
+        assert http.post.call_args.args[0] == expected_url
+
+    @pytest.mark.parametrize(
+        "endpoint_path", ["", "systemone", "https://example.test", "//example.test", "/x?q=1",
+                          "/x#fragment", "/x\\y", "/x\ny", "/../x", None],
+    )
+    def test_endpoint_override_cannot_be_an_origin_or_ambiguous_path(self, endpoint_path):
+        with pytest.raises(BaseError, match="endpoint_path"):
+            _make_client(endpoint_path=endpoint_path)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["confidence", "probability"])
+    @pytest.mark.parametrize("value", [True, "0.9"])
+    async def test_wire_probabilities_are_not_coerced_before_caller_validation(self, field, value):
+        answer = {"type": "choice", "choice": "yes", "confidence": 0.9,
+                  "probabilities": {"yes": 0.9, "no": 0.1}}
+        if field == "confidence":
+            answer["confidence"] = value
+        else:
+            answer["probabilities"]["yes"] = value
+        client, http = _make_client(_response(_response_data(answer)))
+        with pytest.raises(BaseError) as error:
+            await client.system_one(state="hello", questions={"result": ChoiceQuestion(
+                instructions="Greeting?", criteria={"yes": None, "no": None},
+            )})
+        assert isinstance(error.value.cause, ValidationError)
+        http.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_propagated_without_retry(self):
+        client, http = _make_client()
+        http.post.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):
+            await client.system_one(state="hello", questions={"result": NoulQuestion(instructions="Greeting?")})
+        http.post.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_sends_official_request_shape_and_parses_noul_answer(self):
         client, http_client = _make_client(_response(_response_data({"type": "noul", "noul": 0.99})))
