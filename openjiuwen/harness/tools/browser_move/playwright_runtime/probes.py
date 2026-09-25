@@ -261,6 +261,7 @@ def build_interactive_probe_js(
     generation_id: str = "g0",
     decision_mode: bool = False,
     intent: str = "",
+    target_selectors: Optional[List[str]] = None,
 ) -> str:
     """Build browser_run_code JavaScript for compact interactive-element probing."""
 
@@ -272,6 +273,7 @@ def build_interactive_probe_js(
         "generation_id": str(generation_id or "g0"),
         "decision_mode": bool(decision_mode),
         "intent": str(intent or "").lower(),
+        "target_selectors": list(target_selectors or [])[:30],
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
@@ -610,6 +612,14 @@ async (page) => {{
       const sortLabel = /(?:^|\s)(sales?|volume|price|latest|newest|relevance|comprehensive)(?:\s|$)/.test(own) ||
         /(\u9500\u91cf|\u4ef7\u683c|\u6700\u65b0|\u7efc\u5408|\u8bc4\u5206)/.test(own);
       if ((role === 'tab' || /(sort-item|sort-option|sort-tab)/.test(own)) && (sortAncestor || sortLabel)) return 'sort_tab';
+      if (sortAncestor && (tag === 'button' || role === 'button') &&
+          el.closest('[class*="sort" i],[id*="sort" i],[aria-label*="排序"]')) return 'sort_tab';
+      const orderingLabel = (node) => /^(综合排序|最多播放|最新发布|最多点击|销量|价格|评分|relevance|most views|newest|sales|price)$/i
+        .test(normalize(node.textContent || '', 80));
+      if ((tag === 'button' || role === 'button') && orderingLabel(el)) {{
+        const siblings = Array.from(el.parentElement?.querySelectorAll('button,[role="button"],[role="tab"]') || []);
+        if (siblings.length <= 20 && siblings.filter(orderingLabel).length >= 2) return 'sort_tab';
+      }}
       const ratingAncestor = /(rating|score|star|rating-filter)/.test(ancestor) || /\u8bc4\u5206|\u661f\u7ea7/.test(ancestor);
       if ((role === 'option' || /(rating-item|rating-option|star-item)/.test(own)) && ratingAncestor) return 'rating_filter';
       if (role === 'tab') return 'tab';
@@ -762,6 +772,25 @@ async (page) => {{
       return score;
     }};
 
+    const isSearchField = (el) => {{
+      if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName)) return false;
+      if (el.tagName === 'INPUT' && !['text', 'search'].includes(el.type)) return false;
+      if (el.matches('[type="password"],[autocomplete^="cc-"]')) return false;
+      return el.type === 'search' || el.getAttribute('role') === 'searchbox' ||
+        /^(q|wd|query|keyword|keywords|search_query|search)$/i.test(el.getAttribute('name') || '') ||
+        /search|搜索|查询/i.test(`${{accessibleName(el)}} ${{el.getAttribute('placeholder') || ''}}`);
+    }};
+    const searchFieldFor = (el) => {{
+      if (isSearchField(el)) return el;
+      if (!el.matches('button,input[type="submit"],input[type="button"],[role="button"]')) return false;
+      const scope = el.form || el.closest('form,[role="search"],search,[class*="search" i],[id*="search" i]');
+      if (!scope || scope.querySelector('input[type="password"],[autocomplete^="cc-"]')) return false;
+      const fields = Array.from(scope.querySelectorAll(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]),textarea,select'));
+      // A submit/adjacent search control must be tied to one observed query field,
+      // not merely live somewhere on a search-results page.
+      return fields.length === 1 && isSearchField(fields[0]) ? fields[0] : null;
+    }};
     const decisionStateFor = (el, full = true) => {{
       if (!params.decision_mode) return {{}};
       const tag = el.tagName.toLowerCase();
@@ -774,20 +803,48 @@ async (page) => {{
       const sensitive = type === 'password' || /password|secret|token|credit.card|card.number|cc-number|cc-csc/i.test(
         `${{name}} ${{el.getAttribute('name') || ''}} ${{el.getAttribute('autocomplete') || ''}}`);
       const checked = 'checked' in el ? Boolean(el.checked) : el.getAttribute('aria-checked');
+      // Observed capability metadata stays local; tool arguments cannot declare safety.
+      const cartLabel = `${{name}} ${{elementText(el)}} ${{el.getAttribute('data-action') || ''}}`;
+      const cartOperation = /add.{{0,8}}cart|加购|加入.{{0,5}}购物车/i.test(cartLabel) ? 'add' :
+        /remove.{{0,8}}cart|移除/i.test(cartLabel) && el.closest('[class*="cart" i],[id*="cart" i]') ? 'remove' :
+        /quantity|数量/i.test(cartLabel) && el.closest('[class*="cart" i],[id*="cart" i]') ? 'set_quantity' : '';
+      const queryField = cartOperation ? null : searchFieldFor(el);
+      if (registry && queryField && !registry.nodes.has(queryField)) registry.nodes.set(queryField, ++registry.next);
+      const identities = {{}};
+      if (cartOperation) for (const attr of ['data-sku', 'data-sku-id', 'data-skuid', 'data-variant-id']) {{
+        const owner = el.closest(`[${{attr}}]`);
+        if (owner && owner.getAttribute(attr)) identities[attr] = owner.getAttribute(attr);
+      }}
       return {{
         tag, input_type: type, sensitive, readonly: Boolean(el.readOnly),
         autocomplete: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
-        search_like: type === 'search' || el.getAttribute('role') === 'searchbox' ||
-          Boolean(el.closest('form[role="search"]')) || /search|搜索|查询/i.test(name),
+        search_like: Boolean(queryField),
+        search_query: queryField ? {{value: String(queryField.value || ''),
+          document: registry?.document || null, node: registry?.nodes.get(queryField) ?? null}} : null,
         current_value: sensitive ? null : ('value' in el ? String(el.value) : null),
         checked: typeof checked === 'boolean' ? checked : checked === 'true' ? true : checked === 'false' ? false : null,
         options: tag === 'select' ? Array.from(el.options).slice(0, 80).map(o => ({{
           value: o.value, label: o.label, disabled: o.disabled, selected: o.selected
         }})) : [],
         options_omitted: tag === 'select' ? Math.max(0, el.options.length - 80) : 0,
+        effect: cartOperation ? {{domain:'cart', operation:cartOperation, identities}} : null,
         node_guard: sensitive || !full ? null : ({NODE_STATE_JS})(el)
       }};
     }};
+    if (params.target_selectors.length) {{
+      // Runtime-only exact target enrichment. Hidden/unnamed nodes still have
+      // capabilities; this does not make them executable Jev candidates.
+      const capabilities = params.target_selectors.flatMap(selector => {{
+        let nodes;
+        try {{ nodes = document.querySelectorAll(selector); }} catch (_error) {{ return []; }}
+        if (nodes.length !== 1) return [];
+        const el = nodes[0], text = elementText(el), name = accessibleName(el);
+        const kind = classifyControlKind(el, text, name);
+        return [{{selector, role: roleFromTag(el), kind: kind || classifyActionLikelihood(el, name, kind),
+          href: String(el.href || ''), decision_state: decisionStateFor(el)}}];
+      }});
+      return {{ok:true, url:window.location.href, capabilities}};
+    }}
     const all = Array.from(document.querySelectorAll(selectors.join(',')));
     const seen = new Set();
     const candidates = [];

@@ -65,6 +65,38 @@ def goal_values(goal: str) -> list[str]:
     return list(dict.fromkeys(value for value in values if value and value in goal))[:20]
 
 
+def search_values(goal: str) -> list[str]:
+    """Bind literals by their search role; quoted ordering labels are not queries."""
+    goal = normalize_goal(goal)
+    values = []
+    for match in re.finditer(
+        r"(?:搜索(?!结果|按钮|框|栏|页)|查询(?!结果|按钮|框)|search(?!\s*(?:results?\b|box\b))(?: for)?|look up)\s*[:：]?\s*",
+        goal, re.I,
+    ):
+        tail = goal[match.end():]
+        quoted = _QUOTES.match(tail)
+        if quoted:
+            values.append(next(part for part in quoted.groups() if part is not None))
+            rest = tail[quoted.end():]
+            # Two search literals joined by a conjunction remain ambiguous.
+            while conjunction := re.match(r"\s*(?:和|以及|、|and|or)\s*", rest, re.I):
+                rest = rest[conjunction.end():]
+                quoted = _QUOTES.match(rest)
+                if not quoted:
+                    break
+                values.append(next(part for part in quoted.groups() if part is not None))
+                rest = rest[quoted.end():]
+        else:
+            value = re.split(
+                r"[，。；;,\n]|然后|并(?:返回|点击|按|切换|打开)|再(?:按|点击|切换)|"
+                r"\s+and\s+(?:then\s+)?(?:return|click|open|press|sort|switch)\b",
+                tail, maxsplit=1, flags=re.I,
+            )[0].strip()
+            if value and not value.startswith(('"', '“', '”', '「', '」', '『', '』')):
+                values.append(value)
+    return list(dict.fromkeys(v for v in values if 0 < len(v) <= 200))[:20]
+
+
 def explicit_urls(goal: str) -> list[str]:
     urls = []
     for match in re.finditer(r'https?://[^\s<>"“”「」，。；]+', normalize_goal(goal)):

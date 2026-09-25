@@ -64,6 +64,8 @@ class DecisionGuard:
     task_key: str
     deadline_at: float
     tool_name: str = "browser_batch_interact"
+    phase_version: int = 0
+    first_result: dict[str, Any] | None = None
 
 
 def canonical_arguments(arguments: Any) -> str:
@@ -74,12 +76,21 @@ def canonical_arguments(arguments: Any) -> str:
 def validate_binding(runtime: Any, guard: DecisionGuard, inputs: Any, session: Any) -> Any:
     if session is None or session.get_session_id() != guard.session_id:
         raise ValueError("browser_policy_wrong_session")
+    phase = session.get_state("__browser_phase_budget_state__") or {}
+    owner = phase.get("query_id") or session.get_session_id()
+    task_key = f"{owner}:{phase.get('task_id')}:{phase.get('deadline_started_at')}"
+    if task_key != guard.task_key:
+        raise ValueError("browser_policy_wrong_task")
+    if int((phase.get("active_phase_contract") or {}).get("version", 0)) != guard.phase_version:
+        raise ValueError("browser_policy_phase_changed")
     if inputs.tool_name != guard.tool_name or canonical_arguments(inputs.tool_args) != guard.arguments:
         raise ValueError("browser_policy_arguments_changed")
     state = runtime._ensure_page_state()  # Runtime owns this check; never refresh a stale policy target.
     if state.page_id != guard.page_id or state.generation_id != guard.generation_id or state.url != guard.url:
         raise ValueError("browser_policy_stale_page")
-    if guard.tool_name == "browser_page_action":
+    if not guard.target_id and guard.tool_name in {
+        "browser_page_action", "browser_phase", "browser_probe_interactives", "browser_probe_cards"
+    }:
         return None
     target = state.get_target(guard.target_id)
     if target is None or target.generation_id != guard.generation_id or not target.selector:
@@ -89,14 +100,43 @@ def validate_binding(runtime: Any, guard: DecisionGuard, inputs: Any, session: A
 
 async def validate_guard(runtime: Any, guard: DecisionGuard, inputs: Any, session: Any) -> None:
     target = validate_binding(runtime, guard, inputs, session)
-    if guard.tool_name == "browser_page_action":
-        args = json.dumps({"url": guard.url, "guard": guard.node_guard}, ensure_ascii=True)
+    if guard.tool_name == "browser_phase":
+        return
+    if target is None and guard.tool_name in {
+        "browser_page_action", "browser_probe_interactives", "browser_probe_cards"
+    }:
+        from ..playwright_runtime.policy_page_action import READ_PAGE_OPERATIONS
+
+        observing = guard.tool_name in {"browser_probe_interactives", "browser_probe_cards"} or (
+            guard.tool_name == "browser_page_action" and json.loads(guard.arguments).get("op") in READ_PAGE_OPERATIONS
+        )
+        args = json.dumps({"url": guard.url, "guard": guard.node_guard, "observing": observing}, ensure_ascii=True)
         script = """async (page) => {
           const args = ARGS;
           if (page.url() !== args.url) return {ok:false};
           const current = await page.evaluate(PAGE_STATE);
-          return {ok:JSON.stringify(current) === JSON.stringify(args.guard)};
+          // Readers intentionally refresh the current viewport; document identity
+          // remains mandatory, but asynchronous layout changes are not a stale target.
+          return {ok:args.observing ? current.document === args.guard.document :
+            JSON.stringify(current) === JSON.stringify(args.guard)};
         }""".replace("PAGE_STATE", PAGE_STATE_JS).replace("ARGS", args)
+        if guard.first_result:
+            from ..playwright_runtime.probes import build_card_probe_js
+            from ..playwright_runtime.site_profiles import site_profiles_for_url
+
+            probe = build_card_probe_js(max_cards=12, viewport_only=False, include_buttons=False,
+                                        site_profiles=site_profiles_for_url(guard.url), generation_id=guard.generation_id)
+            expected = json.dumps(guard.first_result, ensure_ascii=True)
+            script = """async (page) => {
+              const pageCheck = await (PAGE_CHECK)(page);
+              if (!pageCheck.ok) return pageCheck;
+              const observed = await (CARD_PROBE)(page), expected = EXPECTED;
+              const first = (observed.cards || []).filter(card => card.result_index === 1 &&
+                card.order_known === true && !card.is_ad &&
+                ['main_result','primary_result','main_results'].includes(card.region));
+              return {ok:observed.ok === true && first.length === 1 && first[0].title === expected.title &&
+                (first[0].primary_link || first[0].href) === expected.href};
+            }""".replace("PAGE_CHECK", script).replace("CARD_PROBE", probe).replace("EXPECTED", expected)
         await _validate_script(runtime, script)
         return
     # The observed DOM node must still be the same node, in the same document,

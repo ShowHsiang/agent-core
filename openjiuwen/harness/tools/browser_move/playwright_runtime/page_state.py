@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from .evidence import same_page_url
+from .evidence import observed_label, same_page_url
 
 
 def navigation_destination(href: Any, page_url: str = "", *, role: str = "", kind: str = "") -> str:
@@ -185,6 +185,9 @@ class BrowserTarget:
             "target_id": self.target_id,
             "generation_id": self.generation_id,
         }
+        label = observed_label({"name": self.name, "text": self.text})
+        if label:
+            result["label"] = _compact_text(label, 160)
         if self.href:
             result["href"] = self.href
             result["recommended_action"] = "navigate_primary_link" if self.navigation_url else "click"
@@ -243,6 +246,12 @@ class BrowserPageState:
         self.decision_snapshot: dict[str, Any] = {}
         self._cards: list[Dict[str, Any]] = []
         self._target_counter = 0
+        self.interaction_revision = 0
+        self.pending_interaction = False
+        self.observed_selected_filters: Any = None
+        self.observation_metadata: Dict[str, Any] = {}
+        self.read_observation: Dict[str, Any] = {}
+        self.cards_observed_revision = -1
         self.listing_stale = False
 
     @property
@@ -253,6 +262,11 @@ class BrowserPageState:
     def advance(self, *, url: str = "", title: str = "") -> None:
         """Start a new document generation while retaining stale-target history."""
         self.generation += 1
+        self.observed_selected_filters = None
+        self.observation_metadata = {}
+        self.read_observation = {}
+        self.pending_interaction = False
+        self.interaction_revision += 1
         self.url = str(url or "").strip()
         self.title = _compact_text(title, 300)
         self.field_coverage.clear()
@@ -320,6 +334,7 @@ class BrowserPageState:
         if not isinstance(cards, list):
             cards = []
         self._cards = []
+        self.cards_observed_revision = self.interaction_revision
         self.listing_stale = False
         for card in cards:
             if not isinstance(card, dict):
@@ -716,6 +731,8 @@ class BrowserPageState:
         )
         return {
             "page_id": self.page_id,
+            "interaction_revision": self.interaction_revision,
+            "cards_observed": self.cards_observed_revision == self.interaction_revision and not self.listing_stale,
             "generation_id": self.generation_id,
             "url": self.url,
             "title": self.title,
@@ -726,9 +743,22 @@ class BrowserPageState:
             "blockers": sorted(self.blockers),
         }
 
-    def invalidate_listing(self) -> None:
-        """A changed sort/filter invalidates result identities, not stable controls."""
+    def mark_interaction(self) -> None:
+        """Invalidate cross-read association before a potentially mutating action.
+
+        Keep target identities for the already admitted call; fresh card probes
+        re-establish listing facts. This counter is not a second task state machine.
+        """
+        self.interaction_revision += 1
+        self.pending_interaction = True
+        self.read_observation = {}
+        self.listing_stale = True
+
+    def invalidate_listing(self, *, advance_revision: bool = True) -> None:
+        """Retire list identities; action acknowledgement must not advance twice."""
         self._cards.clear()
+        if advance_revision:
+            self.interaction_revision += 1
         self.listing_stale = True
         for target_id, target in list(self._targets.items()):
             if target.generation != self.generation or not target.source.startswith("card"):
@@ -744,6 +774,8 @@ class BrowserPageState:
 
         return {
             "page_id": self.page_id,
+            "interaction_revision": self.interaction_revision,
+            "cards_observed": self.cards_observed_revision == self.interaction_revision and not self.listing_stale,
             "generation_id": self.generation_id,
             "url": self.url,
             "title": self.title,
@@ -791,6 +823,7 @@ class BrowserPageState:
                 existing.text = str(item.get("text") or item.get("title") or "").strip()
                 existing.role = str(item.get("role") or "").strip()
                 existing.region = str(item.get("region") or "").strip()
+                existing.kind = str(item.get("kind") or "").strip()
                 existing.decision_state = dict(item.get("decision_state") or {})
                 if href:
                     existing.href = href

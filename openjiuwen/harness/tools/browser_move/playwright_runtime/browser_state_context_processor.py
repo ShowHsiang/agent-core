@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any, Dict
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.context_engine import ContextEngine, ContextWindow, ModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
@@ -17,8 +16,9 @@ from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMe
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
 )
+from pydantic import BaseModel, ConfigDict, Field
 
-from .browser_logging import browser_agent_log_warning
+from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 from .browser_working_context import BrowserWorkingContextStore
 
 _BROWSER_STATE_MESSAGE_NAME = "current_browser_state"
@@ -87,6 +87,8 @@ _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
 )
 _BROWSER_STATE_OBSERVATION_TOOL_NAMES = frozenset(
     {
+        "browser_phase",
+        "browser_page_action",
         "browser_find",
         "browser_probe_cards",
         "browser_probe_interactives",
@@ -149,10 +151,15 @@ class BrowserStateContextProcessor(ContextProcessor):
             action_group_id and action_group_id not in self._seen_action_group_ids
         )
         if should_refresh:
-            include_decision = False
+            capture_started = time.perf_counter()
+            session = context.get_session_ref() if context is not None else None
+            from .phase_contract import task_state
+
+            # Shared execution guards need observed capabilities in both modes.
+            include_decision = bool(task_state(session).get("goal"))
             if self.config.decision_policy is not None:
                 try:
-                    include_decision = self.config.decision_policy.should_observe(context)
+                    include_decision = self.config.decision_policy.should_observe(context) or include_decision
                 except Exception:
                     browser_agent_log_warning("[BROWSER_POLICY] observation eligibility failed; use original LLM")
             if reconciliation_only and action_group_id:
@@ -163,6 +170,19 @@ class BrowserStateContextProcessor(ContextProcessor):
             else:
                 captured_state = await self._capture_state(action_group_id=action_group_id or "initial",
                                                           include_decision=include_decision)
+            session = context.get_session_ref() if context is not None else None
+            phase = session.get_state("__browser_phase_budget_state__") if session is not None else {}
+            phase = phase if isinstance(phase, dict) else {}
+            browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+                "component": "observation", "task_id": phase.get("task_id"),
+                "phase_version": (phase.get("active_phase_contract") or {}).get("version", 0),
+                "action_group_id": action_group_id or "initial",
+                "capture_mode": (captured_state.get("capture_source") or (
+                    "reconciliation" if reconciliation_only else "compact" if observation_only else "full"
+                )),
+                "elapsed_ms": round((time.perf_counter() - capture_started) * 1000, 3),
+                "success": bool(captured_state.get("ok")),
+            }))
             await self._preserve_projected_state(captured_state)
             self._page_change = self._classify_page_change(captured_state)
             semantic_progress = captured_state.get("semantic_progress")
@@ -178,6 +198,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                 self._consecutive_no_progress += 1
             else:
                 self._consecutive_no_progress = 0
+            from .phase_contract import observe_runtime
+
+            await observe_runtime(self.config.provider, session, captured_state)
             self._cached_state = captured_state
             self._cached_state_message = self._build_state_message(captured_state)
         self._seen_refresh_tool_call_ids.update(refresh_tool_call_ids)
@@ -293,6 +316,13 @@ class BrowserStateContextProcessor(ContextProcessor):
             if cls._is_refresh_tool_name(tool_call.name) and cls._tool_message_changed_state(tool_message):
                 mutation_ids.add(call_id)
             if cls._is_observation_tool_name(tool_call.name) and cls._tool_message_succeeded(tool_message):
+                if str(tool_call.name).endswith("browser_phase"):
+                    try:
+                        phase_result = json.loads(tool_message.content)
+                    except (TypeError, ValueError):
+                        phase_result = {}
+                    if not phase_result.get("observation_updated"):
+                        continue  # Metadata updates must not trigger another capture.
                 observation_ids.add(call_id)
         return call_ids, mutation_ids, observation_ids
 
@@ -513,6 +543,8 @@ class BrowserStateContextProcessor(ContextProcessor):
 
     @staticmethod
     def _state_header(state: Dict[str, Any]) -> Dict[str, Any]:
+        from .phase_contract import binding_targets
+
         page_state = state.get("page_state")
         if not isinstance(page_state, dict):
             page_state = {}
@@ -527,6 +559,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             "dom_error": state.get("dom_error"),
             "native_ax": state.get("dom") or "",
             "page_state": page_state,
+            "phase_bindings": binding_targets((state.get("decision_observation") or {}).get("controls", []), limit=12),
             "recall_handle": state.get("projection_recall_handle"),
         }
 
@@ -585,6 +618,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             collections = (
                 page_state.get("interactives"),
                 page_state.get("cards"),
+                (payload.get("phase_bindings") or {}).get("targets"),
             )
             while self._serialized_size(payload) > self.config.max_dom_chars:
                 largest = max(
@@ -595,6 +629,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                 if largest is None:
                     break
                 largest.pop()
+                bindings = payload.get("phase_bindings") or {}
+                if largest is bindings.get("targets"):
+                    bindings["omitted"] = int(bindings.get("omitted", 0)) + 1
 
         if self._serialized_size(payload) <= self.config.max_dom_chars:
             payload["truncated"] = True

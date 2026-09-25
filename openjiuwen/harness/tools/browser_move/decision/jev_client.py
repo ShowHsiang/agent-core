@@ -63,6 +63,20 @@ def validate_choice(answer: Any, criteria: dict[str, str], threshold: float) -> 
     return chosen
 
 
+def validate_action(answers: Any, questions: dict[str, Any], threshold: float) -> tuple[str, dict[str, Any]]:
+    """Validate both chosen heads; never pair an operation with another group's target."""
+    if not isinstance(answers, dict):
+        raise DecisionUnavailable("invalid_choice_type")
+    operation = validate_choice(answers.get("action"), questions["action"]["criteria"], threshold)
+    if operation in {"HANDOFF", "FINISH"}:
+        return operation, answers["action"]
+    head = "target_" + operation
+    if head not in questions:
+        raise DecisionUnavailable("invalid_choice_group")
+    key = validate_choice(answers.get(head), questions[head]["criteria"], threshold)
+    return key, answers[head]
+
+
 class JevClient:
     def __init__(self, config: BrowserDecisionConfig, *, client: httpx.AsyncClient | None = None):
         self.config = config
