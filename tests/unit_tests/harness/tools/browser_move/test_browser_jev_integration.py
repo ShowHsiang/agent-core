@@ -48,15 +48,13 @@ def test_factory_wires_one_policy_to_model_context_runtime_and_cleanup(mode):
     with ctx:
         agent = create_browser_agent(model("original"), settings=settings)
     chosen = calls[0]["model"]
-    if mode == "llm":
-        assert not isinstance(chosen, BrowserPolicyModel)
-        assert agent.register_task_resource_cleanup.call_count == 1
-    else:
-        assert isinstance(chosen, BrowserPolicyModel)
-        assert runtime_cls.return_value.decision_policy is chosen
-        assert agent.register_task_resource_cleanup.call_count == 2
-        configs = [config for rail in calls[0]["rails"] for _, config in getattr(rail, "_user_processors", [])]
-        assert any(getattr(config, "decision_policy", None) is chosen for config in configs)
+    assert isinstance(chosen, BrowserPolicyModel)
+    assert chosen.decision_config.mode == mode
+    assert calls[0]["parallel_tool_calls"] is False
+    assert runtime_cls.return_value.decision_policy is chosen
+    assert agent.register_task_resource_cleanup.call_count == 2
+    configs = [config for rail in calls[0]["rails"] for _, config in getattr(rail, "_user_processors", [])]
+    assert any(getattr(config, "decision_policy", None) is chosen for config in configs)
 
 
 def test_hot_reload_keeps_policy_and_replaces_only_its_llm_delegate():

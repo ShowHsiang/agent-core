@@ -23,8 +23,8 @@ def router_config(**kwargs):
     return BrowserDecisionConfig(provider="openrouter", api_key_env="TEST_JEV_ROUTER_KEY", **kwargs)
 
 
-def router_answer(model="typesafe/jev-1.13-20260917"):
-    return {**answer(), "model": model, "id": "gen-dec-synthetic", "provider": "TypeSafe"}
+def router_answer(model="typesafe/jev-1.13-20260917", *, flat=True):
+    return {**answer(flat=flat), "model": model, "id": "gen-dec-synthetic", "provider": "TypeSafe"}
 
 
 def test_provider_defaults_select_the_matching_endpoint_model_and_key():
@@ -101,7 +101,7 @@ async def test_openrouter_success_compiles_through_the_existing_policy(monkeypat
     policy, llm, _, runtime, context, captured = setup_policy()
     policy.decision_config = router_config(mode="hybrid")
     async with httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda _: httpx.Response(200, json=router_answer()),
+        lambda _: httpx.Response(200, json=router_answer(flat=False)),
     )) as http:
         policy.jev = JevClient(policy.decision_config, client=http)
         messages = await messages_for(policy, context, captured)

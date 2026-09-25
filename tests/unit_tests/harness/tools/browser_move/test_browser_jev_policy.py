@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.harness.tools.browser_move.decision.action_space import build_menu, goal_values
@@ -20,13 +19,38 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.page_state import 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 
 
-def answer(choice="a1", **changes):
+def answer(choice="a1", *, group="CLICK", flat=False, **changes):
     probabilities = {"HANDOFF": 0.01, "FINISH": 0.01, "a1": 0.98}
     if choice != "a1":
         probabilities = {key: 0.98 if key == choice else 0.01 for key in probabilities}
-    return {"model": "jev-1.13.0", "answers": {"action": {
+    response = {"model": "jev-1.13.0", "answers": {"action": {
         "type": "choice", "choice": choice, "probabilities": probabilities, "confidence": 0.95, **changes,
     }}, "usage": {"input_tokens": 30, "output_tokens": 4}}
+    if not flat:
+        action = response["answers"]["action"]
+        action["probabilities"][group] = action["probabilities"].pop("a1")
+        if choice == "a1":
+            action["choice"] = group
+        response["answers"]["target_" + group] = {
+            "type": "choice", "choice": "a1", "probabilities": {"a1": 1.0}, "confidence": 1.0,
+        }
+    return response
+
+
+def grouped_answer(payload, group, key=None, *, confidence=0.96):
+    """A provider fixture obeying the actual multi-head wire request."""
+    answers = {}
+    for name, question in payload["questions"].items():
+        criteria = question["criteria"]
+        choice = group if name == "action" else key if name == "target_" + group else None
+        choice = choice or next(iter(criteria))
+        answers[name] = {"type": "choice", "choice": choice, "confidence": confidence,
+                         "probabilities": {k: 1.0 if k == choice else 0.0 for k in criteria}}
+    return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 30, "output_tokens": 4}}
+
+
+def choose_operation(client, group):
+    client.evaluate.side_effect = lambda payload, **kwargs: grouped_answer(payload, group)
 
 
 def request_payload(model="jev-1.13.0"):
@@ -73,6 +97,9 @@ def setup_policy(mode="hybrid", *, goal="点击销量排序", deadline=None, ses
 
 async def messages_for(policy, context, captured, **kwargs):
     captured = {**captured, "decision_observation": policy.runtime._ensure_page_state().export_decision_observation()}
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.phase_contract import observe_runtime
+
+    await observe_runtime(policy.runtime, context.get_session_ref(), captured)
     metadata = await policy.publish_context(context, captured, refresh=True, observation_only=False)
     return [UserMessage(content="current state", metadata=metadata)]
 
@@ -210,13 +237,14 @@ async def test_executor_rejects_changed_state_without_dispatching_an_action(muta
 
 
 @pytest.mark.asyncio
-async def test_runtime_error_and_no_progress_route_back_without_another_decision():
+async def test_previous_error_does_not_disable_a_still_legal_decision():
     policy, llm, client, runtime, context, captured = setup_policy()
     messages = await messages_for(policy, context, captured)
     messages.append(ToolMessage(content='{"ok":false}', tool_call_id="jev_previous"))
-    await policy.invoke(messages, tools=TOOLS)
-    client.evaluate.assert_not_awaited()
-    llm.invoke.assert_awaited_once()
+    result = await policy.invoke(messages, tools=TOOLS)
+    assert result.tool_calls
+    client.evaluate.assert_awaited_once()
+    llm.invoke.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -284,7 +312,7 @@ async def test_transport_timeout_cancellation_missing_key_and_invalid_response(m
 
     async def slow(_):
         await asyncio.sleep(1)
-        return httpx.Response(200, json=answer())
+        return httpx.Response(200, json=answer(flat=True))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as http:
         client = JevClient(config, client=http)
@@ -361,12 +389,12 @@ async def test_request_success_uses_native_protocol_and_pinned_model(monkeypatch
     def handler(request):
         assert request.headers["Authorization"] == "Bearer synthetic-key"
         assert json.loads(request.content)["model"] == "jev-1.13.0"
-        return httpx.Response(200, json=answer())
+        return httpx.Response(200, json=answer(flat=True))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = JevClient(BrowserDecisionConfig(api_key_env="TEST_JEV_KEY"), client=http)
         result = await client.evaluate(request_payload(), deadline_at=time.time() + 5)
-        assert result == answer()
+        assert result == answer(flat=True)
         client.config = BrowserDecisionConfig(model="jev-1.12.0", api_key_env="TEST_JEV_KEY")
         with pytest.raises(DecisionUnavailable, match="model_mismatch"):
             await client.evaluate(request_payload(), deadline_at=time.time() + 5)

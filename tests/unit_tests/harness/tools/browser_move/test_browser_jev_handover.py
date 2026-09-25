@@ -43,6 +43,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
 )
 from tests.unit_tests.harness.tools.browser_move.test_browser_jev_policy import (
     TOOLS,
+    choose_operation,
     answer,
     messages_for,
     setup_policy,
@@ -134,7 +135,7 @@ async def test_soft_fallback_reenters_only_after_meaningful_change_and_survives_
         client.evaluate.side_effect = DecisionUnavailable(reason)
     first = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert first.metadata["browser_policy"]["fallback_scope"] == "segment"
-    assert client.evaluate.call_args.args[0]["state"]["goal"] == "点击“销量”排序"
+    assert client.evaluate.call_args.args[0]["state"]["current_intent"] == "点击“销量”排序"
     deadline = phase["deadline_at"]
     assert policy.should_observe(context)
     # A focused continuation can recreate the model and session wrapper, but not its budget/history.
@@ -160,8 +161,8 @@ async def test_soft_fallback_reenters_only_after_meaningful_change_and_survives_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["jev_http_401", "jev_http_402", "jev_http_403", "invalid_jev_response", "finish"])
-async def test_hard_failure_and_finish_do_not_reenter_on_new_intent(reason):
+@pytest.mark.parametrize("reason", ["jev_http_401", "jev_http_402", "jev_http_403", "invalid_jev_response"])
+async def test_hard_failure_does_not_reenter_on_new_intent(reason):
     policy, llm, client, runtime, context, captured = setup_policy()
     if reason == "finish":
         client.evaluate.return_value = answer("FINISH")
@@ -233,8 +234,14 @@ async def test_execution_receipts_postconditions_and_no_automatic_replay():
     state = context.get_session_ref().get_state(PHASE)["decision_policy"]
     assert state["counters"]["executions_ok"] == 1
     assert state["receipts"][-1]["postcondition"] == "no_observable_progress"
-    assert result.metadata["browser_policy"]["reason"] == "already_evaluated_state"
-    assert client.evaluate.await_count == 1
+    assert result.metadata["browser_policy"]["reason"] == "compiled_action"
+    assert client.evaluate.await_count == 2
+    second = result.tool_calls[0]
+    policy.record_execution(SimpleNamespace(tool_call=second), context.get_session_ref(), {"success": True})
+    runtime._ensure_page_state().decision_snapshot["capture_id"] = "second-noop"
+    result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
+    assert result.metadata["browser_policy"]["reason"] == "no_supported_actions"
+    assert client.evaluate.await_count == 2  # This button cannot consume further decisions.
 
 
 def test_unsupported_controls_are_removed_before_candidate_budget():
@@ -289,6 +296,7 @@ async def test_llm_supplied_search_value_is_bound_to_its_observed_node_only(succ
         {"success": successful_fill},
     )
     target.decision_state["current_value"] = "人民币 SGD 汇率"
+    choose_operation(client, "PRESS_ENTER")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     if successful_fill:
         assert json.loads(result.tool_calls[0].arguments)["steps"][0]["op"] == "press"
@@ -401,7 +409,8 @@ async def test_page_dispatch_uses_ability_manager_late_guard_and_never_retries(m
     policy, llm, client, runtime, context, captured = setup_policy(goal="打开 https://destination.test/")
     page = runtime._ensure_page_state()
     page.decision_snapshot["page_guard"] = {"document": "doc-a", "history_length": 1}
-    # Only the authorized page helper is supplied, so this menu contains exactly one native navigation.
+    choose_operation(client, "NAVIGATE")
+    # Only the authorized page helper is supplied.
     result = await policy.invoke(await messages_for(policy, context, captured), tools=[{"name": "browser_page_action"}])
     call = result.tool_calls[0]
     inputs = SimpleNamespace(tool_name=call.name, tool_args=json.loads(call.arguments), tool_call=call)
@@ -430,7 +439,8 @@ async def test_page_dispatch_uses_ability_manager_late_guard_and_never_retries(m
     assert output.success is (mutation is None)
     assert runtime._call_playwright_tool.await_count == (1 if mutation in {None, "timeout"} else 0)
     if mutation == "timeout":
-        assert output.data["executed"] is True and output.data["error"] == "page_action_uncertain"
+        assert output.data["executed"] is None and output.data["error"] == "page_action_uncertain"
+        assert output.data["execution_state"] == "dispatched_unknown"
 
 
 def test_old_failed_action_group_does_not_poison_later_successful_group():
@@ -519,7 +529,7 @@ async def test_recovery_metadata_includes_fresh_decision_targets_without_extra_a
 
 
 @pytest.mark.asyncio
-async def test_failed_dispatch_requires_llm_reconciliation_before_new_state_reentry():
+async def test_failed_dispatch_leaves_other_fresh_local_choices_available():
     policy, llm, client, runtime, context, captured = setup_policy()
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     call = result.tool_calls[0]
@@ -531,8 +541,8 @@ async def test_failed_dispatch_requires_llm_reconciliation_before_new_state_reen
     page.get_target(page.export_decision_targets()[0]["target_id"]).name = "new control"
     failed = ToolMessage(tool_call_id=call.id, content='{"ok":false}', metadata={"success": False})
     result = await policy.invoke([failed, *await messages_for(policy, context, captured)], tools=TOOLS)
-    assert result.metadata["browser_policy"]["reason"] == "runtime_recovery_required"
-    assert client.evaluate.await_count == 1
+    assert result.tool_calls and client.evaluate.await_count == 2
     observed = ToolMessage(tool_call_id="llm-snapshot", content='{"ok":true}', metadata={"success": True})
     result = await policy.invoke([observed, *await messages_for(policy, context, captured)], tools=TOOLS)
-    assert result.tool_calls and client.evaluate.await_count == 2
+    assert result.metadata["browser_policy"]["cached_fallback"]
+    assert client.evaluate.await_count == 2

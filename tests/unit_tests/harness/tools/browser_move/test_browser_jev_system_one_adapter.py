@@ -29,7 +29,7 @@ def config(request, monkeypatch):
 
 def response_data(config, **changes):
     model = config.model + ("-20260917" if config.provider == "openrouter" else "")
-    return {**answer(**changes), "model": model}
+    return {**answer(flat=True, **changes), "model": model}
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage, UserMessage
 from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
@@ -1083,7 +1082,7 @@ def test_worker_cannot_claim_completion_from_field_names_without_observations() 
         ("mcp_playwright-official_browser_find", {"text": "next"}),
     ],
 )
-def test_target_discovery_gets_one_bounded_replan_recovery(tool_name, tool_args) -> None:
+def test_target_discovery_gets_bounded_verification_after_replan_trial(tool_name, tool_args) -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("find the next control")
     state.update(
@@ -1099,6 +1098,8 @@ def test_target_discovery_gets_one_bounded_replan_recovery(tool_name, tool_args)
     action_class = BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args)
     assert action_class == "target_discovery"
 
+    for _ in range(3):
+        assert BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args) == "verification"
     with pytest.raises(ValueError, match="already ran without verified semantic progress"):
         BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args)
 
@@ -1789,7 +1790,7 @@ def test_required_fields_use_requested_output_clause_not_operation_preconditions
     assert BrowserRuntimeRail._infer_required_fields("打开淘宝把蓝牙耳机加入购物车") == []
 
 
-def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
+def test_cart_action_feedback_is_preserved_but_does_not_prove_sku_delta() -> None:
     state = BrowserRuntimeRail._build_phase_state("打开淘宝把蓝牙耳机加入购物车")
     state["recent_actions"] = [{"action_class": "form", "outcome": "success"}]
     BrowserWorkingContextStore._merge_semantic_evidence(
@@ -1812,8 +1813,8 @@ def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
     )
 
     updated = session.get_state("__browser_phase_budget_state__")
-    assert updated["status"] == "completed"
-    assert updated["terminal_reason"] == "worker_completed_with_observations"
+    assert updated["status"] == "partial"
+    assert any("cart_delta_requires_baseline" in item for item in updated["blockers"])
     assert updated["structured_evidence"][-1]["fields"] == ["action_confirmation"]
 
 
@@ -2195,7 +2196,8 @@ def test_after_tool_call_does_not_advance_state_for_string_mcp_error() -> None:
 
     assert ctx.inputs.tool_result["ok"] is False
     assert tool_message.metadata["success"] is False
-    assert tool_message.metadata["executed"] is True
+    assert tool_message.metadata["executed"] is None
+    assert tool_message.metadata["execution_state"] == "dispatched_unknown"
     assert tool_message.metadata["state_changed"] is False
     state = session.get_state("__browser_phase_budget_state__")
     assert state["recent_actions"][-1]["outcome_status"] == "failed"

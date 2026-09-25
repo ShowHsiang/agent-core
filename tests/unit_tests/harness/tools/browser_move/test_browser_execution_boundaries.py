@@ -77,10 +77,13 @@ def test_redirect_is_proved_by_this_successful_navigation_not_another_tabs_cache
     state = _state("Open the first search result and return title", ["title"])
     state["last_page"] = {"url": "https://search.test/search?q=university", "title": "Results"}
     args = {"url": "https://search.test/link?token=123"}
+    state["structured_evidence"] = [{"source": state["last_page"]["url"], "cards": [{
+        "title": "University", "primary_link": args["url"], "region": "main_result", "is_ad": False,
+    }]}]
     result = {"result": "### Page\n- Page URL: https://university.test/\n- Page Title: University"}
     BrowserRuntimeRail._record_structured_evidence(state, result, tool_name="browser_navigate", tool_args=args)
     assert state["evidence_slots"][0]["value"] == "University"
-    metadata = state["structured_evidence"][0]
+    metadata = next(item for item in state["structured_evidence"] if item.get("kind") == "page_metadata")
     assert metadata["destination_verified"]
     assert metadata["navigation"]["requested_url"] == args["url"]
     unrelated = {**result, "page_state": {"url": "https://other.test/", "title": "Unrelated"}}
