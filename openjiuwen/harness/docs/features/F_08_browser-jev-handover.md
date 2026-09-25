@@ -16,6 +16,10 @@ on dictionary tool arguments or unpaired Unicode surrogates.
 
 ## Current design
 
+Historical implementation baseline. The September 24 P0 audit found that the
+progress projection and unknown-write enforcement below were incomplete. F_09
+and S_18 supersede the FINISH scope, field binding and postcondition contracts.
+
 - Runtime supplies the normalized original goal, current subtask, observed controls
   and execution receipts. Jev selects a closed action; the LLM supplies planning,
   missing values, recovery and the final answer. Page text never grants authority.

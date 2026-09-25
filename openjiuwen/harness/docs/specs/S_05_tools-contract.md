@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-22 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md` |
+| 最近一次修订日期 | 2026-09-25 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop |
 
 ## 范围 / 边界
 
@@ -91,7 +91,7 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
    rail init 再动态加工具（`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04`
    梯队 100）。工具分批装载的时序语义由 rail priority 保证。
 9. **Browser 默认工具面保持紧凑**：`browser_capabilities=None` / `[]` 只选择 `core`，
-   加上两类 Probe、Batch 和受限 offload recall。其他 MCP 工具通过显式 capability 启用；
+   加上两类 Probe、Batch、可选意图/验证入口 browser_phase 和受限 offload recall。其他 MCP 工具通过显式 capability 启用；
    `unsafe_dev` 与 `advanced_code` 同选时以前者替换后者。不支持图像输入时过滤截图工具。
    取消、健康检查、custom-action discovery 是可显式装配的 Python Tool，不是 capability
    自动注入的工具。runtime 内部 transport 的代码执行器不等于模型可见工具面。
@@ -138,6 +138,14 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 13. **可执行数据不是展示文本**：URL、selector、target/generation 标识完整保留；紧凑投影
     超过容量时删除整项或省略字段，不产生貌似可执行的截断链接。滚动 transport 最长等待
     15 秒（仍受更短的任务期限约束），点击和脚本等副作用操作超时不能自动重放。
+
+14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
+    逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。
+15. **Browser 输入与回执可恢复**：阶段条件按 kind 声明字段，set/verify 分开校验；错误包含
+    字段路径和修正方向，绑定目标来自同一当前 guarded registry。执行器确认的反馈文本保留
+    在 journal，但不能替代业务读数。原生工具和 Batch 共用业务前置条件，见 F_11。
+    `browser_phase verify` 的 `inspect_cart:true` 仅执行固定 DOM 读取，返回 reader 线索；不认证
+    完整性、不修改页面或关闭基线。cart_delta 的 requirement_id 允许重绑 reader，不允许改写原基线/增量。
 
 ## 接口契约
 
@@ -316,3 +324,34 @@ focused resume / 模型重建不重置预算或 deadline。软回退只在意图
 browser_page_action 是参数封闭的运行时辅助工具，提供显式 URL 导航、返回和有界滚动；
 与 Batch 一样先经过权限钩子，再检查实际参数、任务、页面与 DOM document，且验证底层
 capability。工具成功回执与执行后观察分开记录；不能自动重放结果不明的操作。
+
+
+### September 24 shared observation and Jev coverage (F_12)
+
+Control capability facts belong to the shared Runtime regardless of model mode.
+Exact AX targets can be enriched with bounded fixed DOM reads before journal preparation.
+Cross-read sort/card proofs require the same query, source, page, generation and
+interaction revision; potentially mutating actions invalidate that association.
+Ordinary reads do not consume the three explicit unknown-effect verification attempts,
+which are keyed to each outstanding effect rather than the most recent unrelated action.
+Resolving one effect cannot reset another effect's consumed attempts.
+Jev may select registered fixed probes and source-grounded first-result navigation,
+with the same task, permission, argument and late page/node guards as other actions.
+Separately quoted sort labels do not make an otherwise unique search literal ambiguous.
+No alternate executor, model-generated proof or new browser lock is introduced.
+
+
+### September 25 local decision loop (F_13)
+
+Observed labels have one normalization. Action-result and automatic observation
+share an interaction revision; independent later changes invalidate it. Navigation
+proof binds a selected result to the actual landing page, including popup batches.
+Browser tools execute serially through the existing scheduler. Recovery trials
+are consecutive, reset by observed progress, and remain bounded by task budgets.
+Model total/idle and tool timeouts are independent of the task deadline.
+
+Jev selects operation and its scoped target in a single multi-head request. Closed
+fixed reads and known local UI remain available during unknown-effect recovery;
+unverified business effects never certify completion or authorize replay.
+Bindings, receipts, milestones and observations reuse the existing phase, journal
+and PageState. No additional workflow manager or alternate executor is introduced.
