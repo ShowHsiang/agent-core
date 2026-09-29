@@ -15,10 +15,10 @@ from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructure
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import EvaluationJudger, JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace, write_judge_json
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import (
-    JudgeBudgetRail,
     JudgeIterationLimitError,
     repair_judge_json,
     run_judge_agent,
+    run_judge_closeout,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
     finite_number,
@@ -31,6 +31,20 @@ from openjiuwen.rsi.harness_rsi.model_call import run_model_call_with_retries
 
 if TYPE_CHECKING:
     from openjiuwen.rsi.harness_rsi.evaluator.case_backend import CaseExecutionResult
+
+
+async def _parse_with_format_repair(
+    config: EvaluatorConfig,
+    judge_dir: Path,
+    output: str,
+) -> dict[str, Any]:
+    try:
+        return parse_judge_output(output)
+    except ValueError as parse_error:
+        async with asyncio.timeout(config.judge_timeout_sec):
+            repaired = await repair_judge_json(config, output, str(parse_error))
+        write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
+        return parse_judge_output(repaired)
 
 
 class LlmAsJudgeJudger(EvaluationJudger):
@@ -129,87 +143,84 @@ class LlmAsJudgeJudger(EvaluationJudger):
             '{"status":"unavailable","reason":"specific limitation"}. '
             "Missing work is not evaluator unavailability. "
         )
-        budget = JudgeBudgetRail(self._config.judge_agent_max_iterations, judge_dir / "tool_events.jsonl")
-        raw = ""
-        format_repair_used = False
-        # One recovery from complete frozen evidence, never best-of scoring.
-        for attempt in range(2):
 
-            async def invoke(
-                current_prompt: str = prompt, current_attempt: int = attempt, previous_output: str = raw,
-            ) -> str:
-                # Timeout must be inside the retry boundary, with the same frozen evidence.
-                try:
-                    async with asyncio.timeout(self._config.judge_timeout_sec):
-                        if current_attempt:
-                            return await budget.closeout(previous_output)
-                        return await run_judge_agent(
-                            self._config, workspace, current_prompt + output_contract,
-                            judge_dir / "tool_events.jsonl", budget=budget,
-                        )
-                except TimeoutError as exc:
-                    raise TimeoutError(
-                        f"Judge attempt timed out after {self._config.judge_timeout_sec}s"
-                    ) from exc
+        async def invoke_agent() -> str:
+            try:
+                async with asyncio.timeout(self._config.judge_timeout_sec):
+                    return await run_judge_agent(
+                        self._config,
+                        workspace,
+                        prompt + output_contract,
+                        judge_dir / "tool_events.jsonl",
+                    )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Judge attempt timed out after {self._config.judge_timeout_sec}s"
+                ) from exc
 
+        async def invoke_closeout() -> str:
             try:
-                raw = await run_model_call_with_retries(
-                    invoke,
-                    operation_name="llm evaluator",
-                    max_retries=self._config.judge_max_retries,
-                )
-            except JudgeIterationLimitError:
-                if attempt:
-                    raise
-                raw = ""
-            write_judge_json(judge_dir / f"response_{attempt + 1}.json", {"raw_output": raw})
-            try:
-                try:
-                    parsed = parse_judge_output(raw)
-                except json.JSONDecodeError as parse_error:
-                    if format_repair_used:
-                        raise
-                    format_repair_used = True
-                    async with asyncio.timeout(self._config.judge_timeout_sec):
-                        repaired = await repair_judge_json(self._config, raw, str(parse_error))
-                    write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
-                    parsed = parse_judge_output(repaired)
-                if parsed.get("status") == "unavailable":
-                    raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
-                if parsed.get("status", "completed") != "completed":
-                    raise ValueError("invalid judge status")
-                score, normalized, requirements = score_judge_output(
-                    parsed,
-                    behaviors,
-                    forbidden,
-                    penalty_mode=penalty_mode,
-                )
-            except (ValueError, TypeError) as exc:
-                write_judge_json(
-                    judge_dir / f"validation_error_{attempt + 1}.json",
-                    {"error_type": type(exc).__name__, "message": str(exc)},
-                )
-                if attempt:
-                    raise EvaluationInfrastructureError(f"Unusable LLM evaluation: {exc}; inspect {judge_dir}") from exc
-                continue
-            write_judge_json(judge_dir / "assessment.json", normalized)
-            passed = score >= self._config.judge_success_score
-            return JudgeResult(
-                method=self.method,
-                score=float(passed),
-                passed=passed,
-                reason=normalized["overall_reason"],
-                metadata={
-                    "parsed": normalized,
-                    "dimensions": normalized["dimensions"],
-                    "requirement_results": requirements,
-                    "judge_dir": str(judge_dir),
-                    "pass_threshold": self._config.judge_success_score,
-                    "optimization_signals": optimization_signals_contract(
-                        continuous_score=score,
-                        source="llm_as_judge.assessment.overall_score",
-                    ),
-                    "attempt": attempt + 1,
-                },
+                async with asyncio.timeout(self._config.judge_timeout_sec):
+                    return await run_judge_closeout(self._config, workspace)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Judge closeout timed out after {self._config.judge_timeout_sec}s"
+                ) from exc
+
+        recovery = "none"
+        try:
+            raw = await run_model_call_with_retries(
+                invoke_agent,
+                operation_name="llm evaluator",
+                max_retries=self._config.judge_max_retries,
             )
-        raise EvaluationInfrastructureError("LLM evaluation did not produce a result")
+        except JudgeIterationLimitError:
+            recovery = "complete_frozen_evidence"
+            raw = await run_model_call_with_retries(
+                invoke_closeout,
+                operation_name="llm evaluator closeout",
+                max_retries=self._config.judge_max_retries,
+            )
+        write_judge_json(judge_dir / "response_1.json", {"raw_output": raw, "recovery": recovery})
+        try:
+            try:
+                parsed = parse_judge_output(raw)
+            except ValueError:
+                parsed = await _parse_with_format_repair(self._config, judge_dir, raw)
+            if parsed.get("status") == "unavailable":
+                raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
+            if parsed.get("status", "completed") != "completed":
+                raise ValueError("invalid judge status")
+            score, normalized, requirements = score_judge_output(
+                parsed,
+                behaviors,
+                forbidden,
+                penalty_mode=penalty_mode,
+            )
+        except (ValueError, TypeError) as exc:
+            write_judge_json(
+                judge_dir / "validation_error_1.json",
+                {"error_type": type(exc).__name__, "message": str(exc)},
+            )
+            raise EvaluationInfrastructureError(f"Unusable LLM evaluation: {exc}; inspect {judge_dir}") from exc
+        write_judge_json(judge_dir / "assessment.json", normalized)
+        passed = score >= self._config.judge_success_score
+        return JudgeResult(
+            method=self.method,
+            score=float(passed),
+            passed=passed,
+            reason=normalized["overall_reason"],
+            metadata={
+                "parsed": normalized,
+                "dimensions": normalized["dimensions"],
+                "requirement_results": requirements,
+                "judge_dir": str(judge_dir),
+                "pass_threshold": self._config.judge_success_score,
+                "optimization_signals": optimization_signals_contract(
+                    continuous_score=score,
+                    source="llm_as_judge.assessment.overall_score",
+                ),
+                "attempt": 2 if recovery != "none" else 1,
+                "recovery": recovery,
+            },
+        )

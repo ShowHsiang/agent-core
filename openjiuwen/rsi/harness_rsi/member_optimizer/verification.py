@@ -68,6 +68,14 @@ _REPAIRABLE_CHECK_PREFIXES = (
     "rail_runtime_contract:",
     "expert_harness_resolve:",
 )
+
+
+def _prepare_output_path(output_path: str) -> Path:
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    return output
+
+
 _UNREPAIRABLE_CHECK_NAMES = {
     "plan_schema",
     "execution_schema",
@@ -200,6 +208,37 @@ def _check_rail_runtime_contract(role: str, root: Path, target: str) -> Verifica
             )
         if "_next_model_tool_choice" in reads | writes:
             errors.append("Host does not consume _next_model_tool_choice; use supported callback control APIs")
+        for hook in ast.walk(tree):
+            if not isinstance(hook, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if hook.name != "after_model_call":
+                continue
+            finish_calls = []
+            for hook_node in ast.walk(hook):
+                if not isinstance(hook_node, ast.Call):
+                    continue
+                if not isinstance(hook_node.func, ast.Attribute):
+                    continue
+                if hook_node.func.attr == "request_force_finish":
+                    finish_calls.append(hook_node)
+            if not finish_calls:
+                continue
+            if not any(isinstance(node, ast.Attribute) and node.attr == "tool_calls" for node in ast.walk(hook)):
+                errors.append(
+                    "after_model_call must not force-finish before checking response.tool_calls"
+                )
+            for call in finish_calls:
+                if not call.args:
+                    continue
+                argument = call.args[0]
+                if isinstance(argument, ast.Attribute) and argument.attr == "response":
+                    owner = argument.value
+                    if not isinstance(owner, ast.Attribute) or owner.attr != "inputs":
+                        continue
+                    errors.append(
+                        "request_force_finish cannot return the raw model response; "
+                        "return a serializable result containing response.content"
+                    )
     except (OSError, ValueError, SyntaxError) as exc:
         errors.append(str(exc))
     return VerificationCheck(
@@ -1175,8 +1214,7 @@ class HarnessChangeVerifier:
         Verifies against worktrees/{role}/integration per spec Section 4.10.
         Concurrent per-role checking with serial shared-artifact writes.
         """
-        output = Path(output_path).expanduser().resolve()
-        output.parent.mkdir(parents=True, exist_ok=True)
+        output = await asyncio.to_thread(_prepare_output_path, output_path)
 
         selected_roles = {t.role for t in plan.targets}
         expected_tool_names_by_role: dict[str, set[str]] = {role: set() for role in selected_roles}
@@ -1305,8 +1343,7 @@ class HarnessChangeVerifier:
         stage_retry_limit: int = 2,
     ) -> MemberFixResult:
         """Attempt repair of failed verification checks."""
-        output = Path(output_path).expanduser().resolve()
-        output.parent.mkdir(parents=True, exist_ok=True)
+        output = await asyncio.to_thread(_prepare_output_path, output_path)
 
         if verification_result.status == "passed":
             fix_result = MemberFixResult(
