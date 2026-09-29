@@ -24,7 +24,7 @@ from openai import OpenAI
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.schema.config import AudioModelConfig
-from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 
 SANDBOX_PATH_MARKER = "home/user"
 DEFAULT_USER_AGENT = (
@@ -33,6 +33,7 @@ DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 OPENAI_TRANSCRIPTION_ENDPOINT_MODELS = {
+    "funaudiollm/sensevoicesmall",
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
     "whisper-1",
@@ -203,6 +204,7 @@ def _encode_audio_file(audio_path: str) -> tuple[str, str]:
             "mpeg": "mp3",
             "wav": "wav",
             "wave": "wav",
+            "x-wav": "wav",
         }
         file_format = format_mapping.get(mime_format, "mp3")
     else:
@@ -512,6 +514,12 @@ class AudioTranscriptionTool(Tool):
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the transcript."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["text"] or "No speech transcribed."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         _ = inputs, kwargs
         if False:
@@ -571,6 +579,12 @@ class AudioQuestionAnsweringTool(Tool):
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the answer to the audio question."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["answer"] or "The audio model returned no answer."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         _ = inputs, kwargs
         if False:
@@ -620,6 +634,12 @@ class AudioMetadataTool(Tool):
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the inspected metadata as ``key: value`` lines."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return render_fields(output.data)
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         _ = inputs, kwargs

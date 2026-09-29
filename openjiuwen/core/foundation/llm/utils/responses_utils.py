@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provider_error_text
 
 
 class OpenAIAccountResponsesError(Exception):
@@ -84,9 +85,29 @@ def build_request_body(
 
     if include_reasoning_encrypted_content:
         body["include"] = ["reasoning.encrypted_content"]
-    if extra_body:
-        body.update(extra_body)
+    expanded = expand_nested_extra_body(extra_body)
+    if expanded:
+        body.update(expanded)
     return body
+
+
+def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten a one-level nested ``extra_body`` into root request fields.
+
+    Callers often pass ``model_config.model_dump()`` which may itself contain
+    an ``extra_body`` key (e.g. ``{"extra_body": {"thinking": ...}}``). The
+    Responses wire format needs those fields at the body root, not nested.
+    Outer keys win over nested keys on conflict.
+    """
+    if not extra_body:
+        return {}
+    pending = dict(extra_body)
+    nested = pending.pop("extra_body", None)
+    expanded: dict[str, Any] = {}
+    if isinstance(nested, dict):
+        expanded.update(nested)
+    expanded.update(pending)
+    return expanded
 
 
 def build_headers(
@@ -269,6 +290,10 @@ def raise_for_http_error(response: httpx.Response) -> None:
         return
 
     message = _http_error_message(response)
+    if not message:
+        body = (response.text or "").strip()
+        if body:
+            message = summarize_provider_error_text(body, status_code=response.status_code)
     if not message:
         message = f"OpenAI account Responses request failed with status {response.status_code}."
     raise OpenAIAccountResponsesError(message, status_code=response.status_code)

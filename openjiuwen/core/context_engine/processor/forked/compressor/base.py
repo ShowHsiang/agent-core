@@ -39,11 +39,11 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.kv_cache import (
-    KVCacheIdentity,
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     context_compressor_cache_identity,
     resolve_session_lineage,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
 from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
@@ -160,6 +160,23 @@ class PrefixCompactProcessor(ContextProcessor):
         if model_client is not None and model is not None:
             self._model = Model(model_client, model)
             self._compression_executor = CompressionExecutor(self._model)
+
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Move the cached compression executor to the active agent model."""
+        changed = self._rebind_model_reference(
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
+        if self._model is not None and (changed or self._compression_executor is None):
+            self._compression_executor = CompressionExecutor(self._model)
+        return changed
 
     async def trigger_get_context_window(
         self,

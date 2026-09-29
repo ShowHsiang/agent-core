@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Collection, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Collection, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -20,6 +20,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 )
 from openjiuwen.harness.tools.subagent._control_registry import release_all_subagent_controls
 from openjiuwen.harness.tools.subagent.subagent_tools import build_subagent_tools
+from openjiuwen.harness.tools.subagent.task_tool import BROWSER_PARENT_QUERY_STATE_KEY, EXECUTION_DEADLINE_STATE_KEY
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -80,6 +81,21 @@ class SubagentRail(DeepAgentRail):
 
     def _runtime_mode(self) -> bool:
         return self.enable_subagent_runtime
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Carry an optional host deadline into synchronous task delegation."""
+        context = getattr(ctx.inputs, "run_context", None)
+        extra = getattr(context, "extra", {})
+        if isinstance(context, dict):
+            extra = context.get("extra", {})
+        deadline = extra.get("execution_deadline_at") if isinstance(extra, dict) else None
+        if ctx.session is not None:
+            value = deadline if isinstance(deadline, (int, float)) and deadline > 0 else None
+            query = getattr(ctx.inputs, "query", None)
+            ctx.session.update_state({
+                EXECUTION_DEADLINE_STATE_KEY: value,
+                BROWSER_PARENT_QUERY_STATE_KEY: query if isinstance(query, str) else None,
+            })
 
     def _async_mode(self) -> bool:
         return not self.enable_subagent_runtime and self.enable_async_subagent
@@ -248,21 +264,40 @@ class SubagentRail(DeepAgentRail):
                 ):
                     extension_content = self.task_prompt_extension(ctx, language)
                 if "subagent_spawn" in tool_names:
+                    if "task_tool" in tool_names:
+                        # Re-add the runtime section after the task section so
+                        # the runtime guidance is rendered below the common
+                        # subagent usage rules.
+                        self.system_prompt_builder.remove_section(SectionName.SUBAGENT_TOOLS)
+                        self._inject_task_tool_section(ctx)
+                    else:
+                        # Runtime tools replace task_tool, but still reuse its
+                        # system guidance as the parent heading.
+                        self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
+
                     section = build_subagent_tools_section(
                         language=language,
                         extension_content=extension_content,
                     )
                     if section is not None:
+                        if "task_tool" not in tool_names:
+                            from openjiuwen.harness.prompts.sections.task_tool import (
+                                build_task_system_prompt,
+                            )
+
+                            section.content[language] = (
+                                f"{build_task_system_prompt(language).rstrip()}\n\n"
+                                f"{section.content[language].lstrip()}"
+                            )
                         self.system_prompt_builder.add_section(section)
                 else:
                     self.system_prompt_builder.remove_section(SectionName.SUBAGENT_TOOLS)
+                    if "task_tool" in tool_names:
+                        self._inject_task_tool_section(ctx)
+                    else:
+                        self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             except ImportError:
                 logger.warning("[SubagentRail] subagent_tools prompt section not available, skipping")
-
-            if "task_tool" in tool_names:
-                self._inject_task_tool_section(ctx)
-            else:
-                self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             return
 
         if not self.enable_async_subagent:

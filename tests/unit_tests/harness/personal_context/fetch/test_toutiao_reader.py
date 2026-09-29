@@ -13,6 +13,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
+from openjiuwen.harness.personal_context.fetch import toutiao_reader
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.status_codes import StatusCode
@@ -123,6 +124,54 @@ def _set_responses(monkeypatch: pytest.MonkeyPatch, responses: dict[str, list[Re
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_candidate(article_id: str) -> dict[str, object]:
+    article = _article(article_id, 10)
+    return {
+        "stable_id": article_id,
+        "revision_id": f"revision-{article_id}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "article",
+        "locator": article["article_url"],
+        "article": article,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_isolates_one_article_timeout_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    async def bootstrap(*_args, **_kwargs):
+        return None
+
+    async def body(_session, article, *, referer):
+        del referer
+        if article["item_id"] == "broken":
+            raise toutiao_reader._fetch_error("Toutiao request failed", TimeoutError("private"))
+        return "body", None, article["publish_time"], False, False
+
+    monkeypatch.setattr(toutiao_reader, "_bootstrap_profile", bootstrap)
+    monkeypatch.setattr(toutiao_reader, "_fetch_article_body", body)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(_fetch_candidate("broken"), _fetch_candidate("good")),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["toutiao_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "broken",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
 
 
 async def _batches(
@@ -477,6 +526,68 @@ async def test_toutiao_empty_page_stops_discovery(
 
 
 @pytest.mark.asyncio
+async def test_toutiao_empty_object_after_valid_page_stops_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    recent = _article("recent", int((run_started_at - timedelta(days=18)).timestamp()))
+    old = _article("old", int((run_started_at - timedelta(days=90)).timestamp()))
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [
+                Response({"data": [recent, old], "next": {"max_behot_time": "1"}}),
+                Response({}),
+            ],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 30}),
+        home=tmp_path,
+    )
+
+    candidates = await service.prepare_run(run_id="empty-object", run_started_at=run_started_at, cursor=None)
+
+    assert [candidate["stable_id"] for candidate in candidates] == ["recent"]
+    assert sum(url == feed_url for url, _ in Session.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "feed_payloads",
+    [
+        [{}],
+        [
+            {"data": [_article("first", 1)], "next": {"max_behot_time": "1"}},
+            {"error": "blocked"},
+        ],
+    ],
+)
+async def test_toutiao_empty_object_only_ends_after_valid_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed_payloads: list[dict[str, object]],
+) -> None:
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.toutiao.com/c/user/token/demo": [Response({"data": {"name": "Demo"}})],
+            "https://www.toutiao.com/api/pc/feed/": [Response(payload) for payload in feed_payloads],
+        },
+    )
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    with pytest.raises(BaseError) as caught:
+        await service.prepare_run(run_id="invalid-empty-object", run_started_at=datetime.now(UTC), cursor=None)
+
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
+
+
+@pytest.mark.asyncio
 async def test_toutiao_uses_latest_published_or_updated_time_for_ranges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -534,7 +645,7 @@ async def test_toutiao_uses_latest_published_or_updated_time_for_ranges(
 
 
 @pytest.mark.asyncio
-async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
+async def test_toutiao_missing_time_is_skipped_but_allows_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -552,8 +663,7 @@ async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
         _config(time_range={"mode": "recent", "recent_days": 3}),
         home=tmp_path,
     )
-    with pytest.raises(BaseError):
-        await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None)
+    assert await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None) == ()
 
     _set_responses(
         monkeypatch,
@@ -565,6 +675,80 @@ async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
     all_time = ToutiaoReaderFetchService(_config(), home=tmp_path)
     candidates = await all_time.prepare_run(run_id="all", run_started_at=datetime.now(UTC), cursor=None)
     assert candidates[0]["candidate_time"] == "1970-01-01T00:00:00Z"
+
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [article, _article("kept", int(datetime.now(UTC).timestamp()))]})],
+        },
+    )
+    mixed = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+    kept = await mixed.prepare_run(run_id="mixed", run_started_at=datetime.now(UTC), cursor=None)
+    assert [candidate["stable_id"] for candidate in kept] == ["kept"]
+
+
+@pytest.mark.asyncio
+async def test_toutiao_relative_time_labels_are_resolved_against_run_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    fresh = {"item_id": "fresh", "title": "Fresh", "behot_time": "1天内"}
+    hours = {"item_id": "hours", "title": "Hours", "behot_time": "3小时前"}
+    yesterday = {"item_id": "yesterday", "title": "Yesterday", "behot_time": "昨天"}
+    stale = {"item_id": "stale", "title": "Stale", "behot_time": "30天前"}
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [fresh, hours, yesterday, stale]})],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 7}),
+        home=tmp_path,
+    )
+    candidates = await service.prepare_run(run_id="relative", run_started_at=run_started_at, cursor=None)
+    resolved = {candidate["stable_id"]: candidate["candidate_time"] for candidate in candidates}
+    assert resolved == {
+        "fresh": "2026-09-15T12:00:00Z",
+        "hours": "2026-09-15T09:00:00Z",
+        "yesterday": "2026-09-14T12:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_absolute_time_wins_over_relative_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    published = int((run_started_at - timedelta(days=2)).timestamp())
+    article = _article("precise", published)
+    article["behot_time"] = "1天内"
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [article]})],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 7}),
+        home=tmp_path,
+    )
+    candidates = await service.prepare_run(run_id="precise", run_started_at=run_started_at, cursor=None)
+    assert candidates[0]["candidate_time"] == datetime.fromtimestamp(published, tz=UTC).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
 from openjiuwen.core.context_engine.usage.models import ContextWindowTokenReport
-from openjiuwen.core.foundation.kv_cache import first_changed_index
+from openjiuwen.core.kv_cache.kv_cache_metadata import first_changed_index
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
@@ -172,6 +172,9 @@ class SessionModelContext(ModelContext):
         config: ContextEngineConfig,
         *,
         token_counter: TokenCounter = None,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> bool:
         """Switch model-specific state while retaining this context history.
 
@@ -189,9 +192,35 @@ class SessionModelContext(ModelContext):
             enable_openrouter_model_context_window_tokens=config.enable_openrouter_model_context_window_tokens,
             openrouter_request_timeout=config.openrouter_request_timeout,
         )
+        next_model_context_window_tokens_override = config.model_context_window_tokens_override
+        next_context_window_tokens = (
+            config.context_window_tokens
+            if isinstance(config.context_window_tokens, int) and config.context_window_tokens > 0
+            else next_model_context_window_tokens_override
+        )
+        processors_rebound = False
+        if model is not None or model_config is not None or model_client_config is not None:
+            for processor in self._processors or []:
+                rebind_processor = getattr(processor, "rebind_model", None)
+                if not callable(rebind_processor):
+                    continue
+                try:
+                    processors_rebound = bool(
+                        rebind_processor(
+                            model=model,
+                            model_config=model_config,
+                            model_client_config=model_client_config,
+                        )
+                    ) or processors_rebound
+                except TypeError:
+                    # Third-party processors may not implement the optional
+                    # model-rebind hook with the full keyword signature.
+                    continue
+
         current_model_state = (
             self._default_window_size,
             self._context_window_tokens,
+            self._model_context_window_tokens_override,
             self._model_name,
             self._model_context_window_tokens,
             self._default_dialogue_round,
@@ -200,18 +229,20 @@ class SessionModelContext(ModelContext):
         )
         next_model_state = (
             config.default_window_message_num,
-            config.context_window_tokens,
+            next_context_window_tokens,
+            next_model_context_window_tokens_override,
             config.model_name,
             next_model_context_window_tokens,
             config.default_window_round_num,
             config.compression_recall_config,
             self._token_counter_binding(token_counter),
         )
-        if current_model_state == next_model_state:
+        if current_model_state == next_model_state and not processors_rebound:
             return False
 
         self._default_window_size = config.default_window_message_num
-        self._context_window_tokens = config.context_window_tokens
+        self._context_window_tokens = next_context_window_tokens
+        self._model_context_window_tokens_override = next_model_context_window_tokens_override
         self._model_name = config.model_name
         self._model_context_window_tokens = next_model_context_window_tokens
         self._default_dialogue_round = config.default_window_round_num
@@ -320,7 +351,7 @@ class SessionModelContext(ModelContext):
             self._message_buffer.add_back(messages_to_add)
             if messages_to_add:
                 self._mark_message_changed("append")
-                ContextUtils.invalidate_usage_metadata(retained_messages)
+                self._invalidate_usage_if_append_changed_retained_prefix(retained_messages)
             return messages_to_add
 
         async with self._guarded_processor_lock("add_messages"):
@@ -334,8 +365,42 @@ class SessionModelContext(ModelContext):
             self._message_buffer.add_back(messages_to_add)
             if messages_to_add:
                 self._mark_message_changed("append")
-                ContextUtils.invalidate_usage_metadata(retained_messages)
+                self._invalidate_usage_if_append_changed_retained_prefix(retained_messages)
             return messages_to_add
+
+    def _invalidate_usage_if_append_changed_retained_prefix(
+        self,
+        retained_messages_before_append: List[BaseMessage],
+    ) -> None:
+        """Invalidate usage only when an append also changed old context.
+
+        A provider usage record is a cumulative baseline for the messages that
+        were present at the corresponding model call.  Pure append operations
+        are safe because compressor counters add the messages after that
+        assistant as a tail estimate.  Context processors may rewrite the
+        existing buffer, and ``max_context_message_num`` may roll the buffer
+        forward after an append; both cases make the old cumulative baseline
+        invalid and must retain the stale marker.
+        """
+        current_messages = self._message_buffer.get_back()
+        if not self._retained_message_prefix_preserved(
+            retained_messages_before_append,
+            current_messages,
+        ):
+            ContextUtils.invalidate_usage_metadata(current_messages)
+
+    @staticmethod
+    def _retained_message_prefix_preserved(
+        previous_messages: List[BaseMessage],
+        current_messages: List[BaseMessage],
+    ) -> bool:
+        """Return whether the old retained messages remain an unchanged prefix."""
+        if len(current_messages) < len(previous_messages):
+            return False
+        return all(
+            current is previous
+            for current, previous in zip(current_messages, previous_messages)
+        )
 
     async def compress_context(
         self,

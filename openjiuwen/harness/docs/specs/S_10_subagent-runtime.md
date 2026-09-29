@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagent_runtime/`（18 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-21 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -38,7 +38,7 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
 - 子代理工具（`SubagentSpawnTool` 等）—— `S_05`。
 - 预设子代理（browser/code/research/verification）—— `S_18`。
 - `SubagentRail` / `SessionRail` —— `S_04`。
-- KVC 亲和（`kv_cache_hooks.py`）—— `S_16`。
+- KVC 亲和（`kv_cache_subagent_lifecycle.py`）—— `S_16`。
 
 ## 不变量
 
@@ -65,7 +65,8 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
    （`S_02` 不变量 11）。`cancel_all(reason="parent_ended")` 是父会话结束时的批量清理。
 9. **输出投影两路**：`ActivityProjector`（活动事件：reasoning / boundary / tool）与
    `TranscriptEmitter` / `TranscriptProjector`（turn 转录）；`resolve_presentation` 把它们
-   折成宿主可渲染形态。`SUBAGENT_*_EVENT_TYPE` 常量是事件类型契约。
+   折成宿主可渲染形态。`SUBAGENT_*_EVENT_TYPE` 常量是事件类型契约。工具结果的展示文本按
+   `summary` → `rendered_result`（模型可见文本，`S_05` 不变量 11）→ 兼容字段 `result` 取值。
 
 ## 接口契约
 
@@ -82,7 +83,7 @@ class SubagentControl:
     def subscribe_status(self, subagent_id: str) -> StatusReceiver
     def list_live(self) -> list[SubagentMetadata]
     def capacity(self) -> dict[str, int]
-    async def send_input(self, subagent_id: str, ...) -> None
+    async def send_input(self, subagent_id: str, query: str, *, interrupt: bool = False) -> str
     async def resume(self, subagent_id: str) -> ResumeResult
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus
     async def cancel_all(self, reason: str = "parent_ended") -> list[str]
@@ -114,8 +115,10 @@ class SubagentStatusKind(str, Enum):
 - `spawn` 超容量 → 抛 `SubagentCapacityInvalid`（`raise_subagent_capacity_invalid`）。
 - `wait` 对已关闭 / 不存在的子代理 → `WaitResult` 带对应状态（不抛）。
 - `get_status` 未知 id → `SubagentStatus(NOT_FOUND)`。
-- `close` 返回关闭后的 `SubagentStatus`；幂等。
-- `send_input` 目标非运行中 → 抛（`UserInputOp` 校验）。
+- `close` 返回关闭前的 `SubagentStatus`；目标为 `RUNNING` 时拒绝，目标不存在时抛错。
+- `send_input` 向存活实例投递输入并返回新 `task_id`；实例已关闭或不存在时抛错，须先恢复。
+- `resume` 不投递任务；恢复后的无活动实例以内部 `COMPLETED` 对外呈现 `idle`，
+  不代表执行了新请求。对存活实例重复调用返回 `restored=false`；有活动任务时保留其状态。
 
 ## 数据结构
 
@@ -145,6 +148,6 @@ class SubagentStatusKind(str, Enum):
 - 预设子代理（`subagents/`）被 manifest 构建器（`S_12`）注册、被
   `SubagentRail`（`S_04`）挂载。
 - 活动/转录投影喂给宿主 UI —— `S_02` 输出流（`S_15` CLI 消费）。
-- KVC 亲和钩子挂在子代理生命周期 —— `S_16`。
+- KVC 子代理生命周期适配 —— `S_16`。
 - 与 `agent_teams` 的 `F_44`（worker-not-teammate-no-db）同属子代理运行时思想，但实现
   独立（harness 侧不自带 DB，状态走 record 文件）。

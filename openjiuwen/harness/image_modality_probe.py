@@ -58,6 +58,7 @@ _IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS = (
     "multimodal input is not supported",
     "not a multimodal model",
     "not support image input",
+    "unknown variant",
     "unsupported image",
     "vision is not supported",
 )
@@ -173,6 +174,19 @@ def get_cached_image_support(llm) -> Optional[bool]:
     if key is None:
         return None
     return _probe_results.get(key)
+
+
+def set_cached_image_support(key: tuple[str, str], supported: bool) -> None:
+    """Pre-populate the probe cache with a known verdict.
+
+    Used when a model entry declares ``supports_vision`` explicitly in the
+    configuration, so no round-trip probe is needed.
+
+    Args:
+        key: The ``(api_base, model_name)`` cache key.
+        supported: The declared verdict.
+    """
+    _probe_results[key] = supported
 
 
 def reset_image_support_cache() -> None:

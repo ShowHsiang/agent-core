@@ -11,6 +11,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
+from openjiuwen.harness.personal_context.fetch import zhihu_reader
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
 from openjiuwen.harness.personal_context.status_codes import StatusCode
@@ -110,6 +111,49 @@ def _set_responses(monkeypatch: pytest.MonkeyPatch, responses: dict[str, list[Re
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_candidate(article_id: str) -> dict[str, object]:
+    article = _article(article_id, 10)
+    return {
+        "stable_id": article_id,
+        "revision_id": f"revision-{article_id}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "article",
+        "locator": article["url"],
+        "article": article,
+    }
+
+
+@pytest.mark.asyncio
+async def test_zhihu_fetch_isolates_one_article_timeout_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ZhihuReaderFetchService(_config(), home=tmp_path)
+
+    async def body(_session, article):
+        if article["id"] == "broken":
+            raise zhihu_reader._fetch_error("Zhihu request failed", TimeoutError("private"))
+        return "body", None, article["updated"], False
+
+    monkeypatch.setattr(zhihu_reader, "_fetch_article_body", body)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(_fetch_candidate("broken"), _fetch_candidate("good")),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["zhihu_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "broken",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
 
 
 async def _batches(
@@ -364,7 +408,7 @@ async def test_zhihu_uses_latest_published_or_updated_time_for_ranges(
 
 
 @pytest.mark.asyncio
-async def test_zhihu_missing_time_fails_filtered_run_but_allows_all(
+async def test_zhihu_missing_time_is_skipped_but_allows_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,13 +419,24 @@ async def test_zhihu_missing_time_fails_filtered_run_but_allows_all(
         _config(time_range={"mode": "recent", "recent_days": 3}),
         home=tmp_path,
     )
-    with pytest.raises(BaseError):
-        await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None)
+    assert await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None) == ()
 
     _set_responses(monkeypatch, {url: [Response({"data": [article], "paging": {"is_end": True}})]})
     all_time = ZhihuReaderFetchService(_config(), home=tmp_path)
     candidates = await all_time.prepare_run(run_id="all", run_started_at=datetime.now(UTC), cursor=None)
     assert candidates[0]["candidate_time"] == "1970-01-01T00:00:00Z"
+
+    kept = _article("kept", int(datetime.now(UTC).timestamp()))
+    _set_responses(
+        monkeypatch,
+        {url: [Response({"data": [article, kept], "paging": {"is_end": True}})]},
+    )
+    mixed = ZhihuReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+    candidates = await mixed.prepare_run(run_id="mixed", run_started_at=datetime.now(UTC), cursor=None)
+    assert [candidate["stable_id"] for candidate in candidates] == ["kept"]
 
 
 @pytest.mark.asyncio

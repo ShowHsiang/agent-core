@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -161,6 +162,26 @@ class AudioModelConfig:
 
 
 @dataclass
+class TaskLoopNoProgressGuardConfig:
+    """Guard repeated empty/near-empty no-tool answers in task-loop mode."""
+
+    enabled: bool = True
+    max_consecutive_empty_answers: int = 3
+    min_answer_chars: int = 20
+
+
+def resolve_inner_react_max_iterations(max_iterations: Optional[int]) -> int:
+    """Map DeepAgentConfig.max_iterations onto the inner ReAct loop cap.
+
+    ``None`` (unconfigured) keeps the inner loop unbounded. An explicit
+    integer is used as-is, including when the outer task loop is enabled.
+    """
+    if max_iterations is None:
+        return sys.maxsize
+    return int(max_iterations)
+
+
+@dataclass
 class DeepAgentConfig:
     """Runtime configuration for DeepAgent.
 
@@ -194,8 +215,9 @@ class DeepAgentConfig:
             (subagent_spawn/wait/list). Takes precedence over enable_async_subagent.
         add_general_purpose_agent: Add general-purpose agent.
             When True, a general-purpose agent is added as sub-agents.
-        max_iterations: Maximum ReAct iterations per
-            single invoke.
+        max_iterations: Maximum inner ReAct iterations per
+            single invoke. ``None`` means unbounded. An explicit
+            value is applied even when the outer task loop is enabled.
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         mcps: MCP server configs mounted on the agent.
@@ -237,7 +259,7 @@ class DeepAgentConfig:
     enable_async_subagent: bool = False
     enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False
-    max_iterations: int = 15
+    max_iterations: Optional[int] = None
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None
@@ -284,6 +306,15 @@ class DeepAgentConfig:
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
+
+    # Task-loop no-progress guard: stop repeated short answer rounds.
+    task_loop_no_progress_guard: TaskLoopNoProgressGuardConfig = field(
+        default_factory=lambda: TaskLoopNoProgressGuardConfig()
+    )
+
+    # Skill budget: gently truncate skill prompts by dropping whole low-ranked skills.
+    skill_budget_max_skills: Optional[int] = None
+    skill_budget_max_total_chars: Optional[int] = None
 
 
 @dataclass

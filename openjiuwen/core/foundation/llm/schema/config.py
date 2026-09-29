@@ -45,10 +45,7 @@ class LLMAuthMode(str, Enum):
 
 
 class KVCacheExtensionConfig(BaseModel):
-    mode: Literal["none", "release", "affinity"] = "none"
-    release_endpoint: str = "/release_kv_cache"
-    session_field: str = "cache_salt"
-    enable_cache_sharing_field: str = "cache_sharing"
+    mode: Literal["none", "affinity"] = "none"
     affinity_field: str = "agent_hint"
 
 
@@ -98,7 +95,7 @@ class ModelClientConfig(BaseModel):
     client_provider: Union[ProviderType, str] = Field(
         ...,
         description="Service provider identification, Enumeration value: OpenAI, OpenRouter, "
-                    "OpenAIAccount, SiliconFlow, DashScope, InferenceAffinity or ICBC"
+                    "OpenAIAccount, SiliconFlow, DashScope, AscendAffinity or ICBC"
     )
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
@@ -121,9 +118,11 @@ class ModelClientConfig(BaseModel):
     )
 
     max_retries: int = Field(
-        default=1,
-        description="Maximum number of thin SDK-level retries for transient HTTP failures "
-                    "(connection drops, 429, 5xx). Whole-call retries are handled by LLMRetryRail."
+        default=0,
+        description="Retained for compatibility. OpenAI and Anthropic SDK clients are "
+                    "created with max_retries=0, so this value is not passed to the SDK. "
+                    "Whole-call retries for transient provider failures are handled by "
+                    "ModelAnomalyDetectionRail."
     )
     use_shared_llm_http_client: bool = Field(
         default=True,

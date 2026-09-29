@@ -199,7 +199,7 @@ def resolve_deep_agent_parts(
     enable_async_subagent: bool = False,
     enable_subagent_runtime: bool = False,
     add_general_purpose_agent: bool = False,
-    max_iterations: int = 15,
+    max_iterations: Optional[int] = None,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -381,6 +381,8 @@ def resolve_deep_agent_parts(
             skill_mode="all",
             disabled_skills=disabled_skills or None,
             include_tools=include_tools,
+            max_skills=config.skill_budget_max_skills,
+            max_total_chars=config.skill_budget_max_total_chars,
         )
 
     def _make_task_planning_rail() -> TaskPlanningRail:
@@ -466,7 +468,7 @@ def create_deep_agent(
     enable_async_subagent: bool = False,
     enable_subagent_runtime: bool = False,
     add_general_purpose_agent: bool = False,
-    max_iterations: int = 15,
+    max_iterations: Optional[int] = None,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -513,8 +515,8 @@ def create_deep_agent(
             When False, it registers synchronous task tools.
         add_general_purpose_agent: Add general-purpose agent.
              When True, a general-purpose agent is added as sub-agents.
-        max_iterations: Max ReAct iterations per
-            invoke.
+        max_iterations: Max inner ReAct iterations per
+            invoke. ``None`` means unbounded.
         workspace: Workspace path for file operations.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).

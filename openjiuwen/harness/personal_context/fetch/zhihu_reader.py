@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import html
 import json
+import logging
 import math
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -25,10 +26,13 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 20
@@ -41,6 +45,30 @@ _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = "openjiuwen-personal-context/1.0"
 
 
+def _validated_article_candidate(candidate: Mapping[str, object]) -> tuple[dict[str, object], str]:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("Zhihu candidate is invalid")
+    raw_article = candidate.get("article")
+    if not isinstance(raw_article, Mapping):
+        raise _fetch_error("Zhihu candidate has no article metadata")
+    article = dict(raw_article)
+    article_id = _article_id(article)
+    if not article_id or article_id != candidate["stable_id"] or len(article_id) > 256:
+        raise _fetch_error("Zhihu candidate has no stable ID")
+    return article, article_id
+
+
+def _article_failure(offset: int, article_id: str) -> dict[str, object]:
+    return {
+        "offset": offset,
+        "item_ref": article_id,
+        "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+        "message": "条目读取或解析失败",
+    }
+
+
 class ZhihuReaderFetchService(ContextFetchService):
     """Read public articles from one Zhihu column without login or cookies."""
 
@@ -50,6 +78,7 @@ class ZhihuReaderFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -72,7 +101,9 @@ class ZhihuReaderFetchService(ContextFetchService):
                     for article in articles
                 )
                 filtered = tuple(candidate for candidate in candidates if candidate is not None)
-                return select_latest_candidates(filtered, cursor, max_items)
+                return select_latest_candidates(
+                    filtered, cursor, max_items, retry_quarantined=include_failed
+                )
 
             async with aiohttp.ClientSession(
                 timeout=timeout,
@@ -118,33 +149,43 @@ class ZhihuReaderFetchService(ContextFetchService):
                     return
                 for index in range(0, len(candidates), _BATCH_SIZE):
                     items: list[RawChangeItem] = []
+                    success_offsets: list[int] = []
+                    failures: list[dict[str, object]] = []
                     end = index + _BATCH_SIZE
-                    for candidate in candidates[index:end]:
-                        raw_article = candidate.get("article")
-                        if not isinstance(raw_article, Mapping):
-                            raise _fetch_error("Zhihu candidate has no article metadata")
-                        article = dict(raw_article)
-                        article_id = _article_id(article)
-                        if not article_id or article_id != candidate.get("stable_id"):
-                            raise _fetch_error("Zhihu candidate has no stable ID")
-                        article_body, raw_snapshot, updated_value, content_truncated = await _fetch_article_body(
-                            session, article
-                        )
-                        items.append(
-                            _change_item(
-                                article,
-                                article_id=article_id,
-                                column_id=column_id,
-                                source_url=source_url,
-                                body=article_body,
-                                raw_snapshot=raw_snapshot,
-                                updated_value=updated_value,
-                                content_truncated=content_truncated,
+                    chunk = candidates[index:end]
+                    for offset, candidate in enumerate(chunk):
+                        article, article_id = _validated_article_candidate(candidate)
+                        try:
+                            article_body, raw_snapshot, updated_value, content_truncated = await _fetch_article_body(
+                                session, article
                             )
-                        )
+                            items.append(
+                                _change_item(
+                                    article,
+                                    article_id=article_id,
+                                    column_id=column_id,
+                                    source_url=source_url,
+                                    body=article_body,
+                                    raw_snapshot=raw_snapshot,
+                                    updated_value=updated_value,
+                                    content_truncated=content_truncated,
+                                )
+                            )
+                        except BaseError as exc:
+                            if not is_candidate_read_error(exc):
+                                raise
+                            failures.append(_article_failure(offset, article_id))
+                            continue
+                        except (TypeError, ValueError):
+                            failures.append(_article_failure(offset, article_id))
+                            continue
+                        success_offsets.append(offset)
                     yield FetchBatch(
                         batch_id=f"batch-{index // _BATCH_SIZE}",
                         items=tuple(items),
+                        attempted_count=len(chunk),
+                        success_offsets=tuple(success_offsets),
+                        failures=tuple(failures),
                         next_cursor=next_cursor,
                     )
         except asyncio.CancelledError:
@@ -209,8 +250,16 @@ def _candidate(
         raise _fetch_error("Zhihu article has no stable ID")
     timestamp = _effective_timestamp(article)
     if timestamp <= 0:
+        # A single time-less entry must not abort the whole run: dropping one article
+        # is better than losing the batch. The warning keeps the skip visible instead
+        # of a silent empty run. Unfiltered runs keep an explicit "unknown, assume
+        # oldest" marker.
         if time_range.get("mode") != "all":
-            raise _fetch_error("Zhihu article has no usable published or updated time")
+            _LOGGER.warning(
+                "Zhihu article %s has no usable published or updated time; skipping it",
+                article_id,
+            )
+            return None
         candidate_time = "1970-01-01T00:00:00Z"
     else:
         candidate_time = datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")

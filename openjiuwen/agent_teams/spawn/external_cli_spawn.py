@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness_providers.skills import normalize_skills
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -236,6 +237,72 @@ def _resolve_external_paths(
     return cwd, tuple(extra_dirs)
 
 
+def _bind_protocol_member_team_tools(
+    runtime: Any,
+    *,
+    teammate: "TeamAgent",
+    teammate_backend: "TeamBackend",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    team_name: str,
+    session_id: str,
+) -> None:
+    """Bind local team tools through the protocol provider's native channel."""
+    if not runtime.inject_mcp:
+        return
+
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    if runtime.provider_name == "claude-code":
+        from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
+        from openjiuwen.harness_protocol import McpServerConfig, McpTransport
+
+        tool_set = build_claude_sdk_mcp_tool_set(
+            server_name=runtime.mcp_server_name,
+            team_backend=teammate_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=language,
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+            span_bridge=runtime.span_bridge,
+        )
+        runtime.bind_mcp_servers(
+            [
+                McpServerConfig(
+                    name=runtime.mcp_server_name,
+                    transport=McpTransport.IN_PROCESS,
+                    instance=tool_set.server,
+                )
+            ]
+        )
+        return
+
+    if runtime.provider_name != "codex":
+        return
+
+    from openjiuwen.agent_teams.external.tool_gateway import build_external_team_tool_gateway
+
+    runtime.bind_tools(
+        build_external_team_tool_gateway(
+            session_id=session_id,
+            team_backend=teammate_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=language,
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+        )
+    )
+
+
 async def external_cli_spawn(
     *,
     team_agent: "TeamAgent",
@@ -262,7 +329,7 @@ async def external_cli_spawn(
         An :class:`InProcessSpawnHandle` wrapping the member task.
     """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-    from openjiuwen.agent_teams.context import set_session_id
+    from openjiuwen.agent_teams.context import get_session_id, set_session_id
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -349,6 +416,9 @@ async def external_cli_spawn(
             add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
             cli_path=cli_cfg.cli_path,
+            system_prompt_mode=cli_cfg.system_prompt_mode,
+            skills=normalize_skills(cli_cfg.skills, cli_cfg.skill_conflict),
+            skill_conflict=cli_cfg.skill_conflict,
             codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
             mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,
@@ -356,6 +426,7 @@ async def external_cli_spawn(
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
             claude_turn_idle_timeout_s=cli_cfg.claude_turn_idle_timeout_s,
+            claude_max_buffer_size=cli_cfg.claude_max_buffer_size,
             external_model_config=external_model_config,
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,
@@ -414,26 +485,20 @@ async def external_cli_spawn(
             team_name,
         ),
     )
-    from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
-    from openjiuwen.agent_teams.external.cli_agent.codex import CodexSdkRuntime
+    from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
-    if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
-        runtime.bind_team_tools(
-            team_backend=teammate_backend,
-            role=ctx.role.value,
-            teammate_mode=spec.teammate_mode,
-            dispatch_mode=spec.dispatch_mode,
-            lifecycle=spec.lifecycle,
-            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
-            workspace_manager=teammate.infra.workspace_manager,
-            messager=teammate.infra.messager,
+    if isinstance(runtime, ExternalHarnessMemberRuntime) and teammate_backend is not None:
+        _bind_protocol_member_team_tools(
+            runtime,
+            teammate=teammate,
+            teammate_backend=teammate_backend,
+            spec=spec,
+            ctx=ctx,
             team_name=team_name,
-            team_permissions_enabled=spec.enable_permissions,
+            session_id=session_id or get_session_id(),
         )
-
-    # Inject the reliability delivery surface (failed message to the
-    # leader mailbox + member ERROR status) for Claude/Codex SDK runtimes only.
-    if isinstance(runtime, (ClaudeSdkRuntime, CodexSdkRuntime)) and teammate_backend is not None:
+        # Inject the reliability delivery surface (failed message to the
+        # leader mailbox + member ERROR status) for SDK-backed members only.
         leader_name = await teammate_backend.resolve_leader_member_name()
         runtime.bind_reliability_context(
             session_id=session_id or "",

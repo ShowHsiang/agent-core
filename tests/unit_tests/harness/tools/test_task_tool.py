@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-import re
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
@@ -533,7 +533,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(called_inputs["conversation_id"], resume_id)
-        run_context = called_inputs["run_context"]
+        run_context = parent_agent._normalize_inputs(called_inputs).run_context.extra
         self.assertTrue(run_context["browser_resume"])
         self.assertEqual(run_context["resume_task_id"], resume_id)
         self.assertEqual(run_context["browser_query_id"], "original-query")
@@ -619,17 +619,22 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(first.data["query_id"], "main-query-1")
-        self.assertIn("Collect only these unresolved evidence slots", calls[1]["query"])
-        self.assertNotIn("whole Taobao search", calls[1]["query"])
+        self.assertIn("Optional extraction hints (not a completion checklist)", calls[1]["query"])
+        self.assertIn("Focused repair instruction", calls[1]["query"])
+        self.assertIn("do not repeat satisfied work or expand scope", calls[1]["query"])
         self.assertEqual(calls[0]["conversation_id"], calls[1]["conversation_id"])
-        self.assertFalse(calls[0]["run_context"]["browser_resume"])
-        self.assertTrue(calls[1]["run_context"]["browser_resume"])
+        normalizer = DeepAgent(AgentCard(name="normalizer"))
+        first_context = normalizer._normalize_inputs(calls[0]).run_context.extra
+        second_context = normalizer._normalize_inputs(calls[1]).run_context.extra
+        self.assertFalse(first_context["browser_resume"])
+        self.assertTrue(second_context["browser_resume"])
         self.assertEqual(
-            calls[0]["run_context"]["browser_query_deadline_at"],
-            calls[1]["run_context"]["browser_query_deadline_at"],
+            first_context["browser_query_deadline_at"],
+            second_context["browser_query_deadline_at"],
         )
         self.assertEqual(second.data["browser_result"]["status"], "completed")
         self.assertEqual(third.data["code"], "browser_query_resume_not_allowed")
+        self.assertFalse(third.data["retryable"])
 
 
 class TestTaskToolSync(unittest.TestCase):

@@ -23,7 +23,8 @@ transformation for both regular functions and generators.
 """
 
 import inspect
-from functools import wraps
+from contextlib import aclosing
+from functools import lru_cache, wraps
 from typing import (
     Any,
     AsyncIterator,
@@ -78,6 +79,45 @@ class WrapHandler(Protocol):
         ...
 
 
+@lru_cache(maxsize=4096)
+def _sig_param_info(
+    func: Callable[..., Any],
+) -> tuple[tuple[str, ...], bool, bool]:
+    """Parse and cache a callable's signature facts.
+
+    Called from per-invocation wrappers (_bind_args_no_duplicate,
+    _remove_session_if_not_needed) that previously ran inspect.signature on
+    every call. The wrapped functions are created once at registration time
+    and reused, so caching by object identity hits ~100% of the time.
+
+    Returns:
+        (param_names, has_var_keyword, has_session): param_names stops at the
+        first *args (matching the previous early-break loop); has_var_keyword /
+        has_session scan ALL parameters, so a ``session`` declared after *args
+        is still detected.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        return (), True, True
+    param_names: list[str] = []
+    has_var_keyword = False
+    has_session = False
+    collect_names = True
+    for name, p in sig.parameters.items():
+        if p.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+        elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+            collect_names = False
+        elif name == "session":
+            has_session = True
+            if collect_names:
+                param_names.append(name)
+        elif collect_names:
+            param_names.append(name)
+    return tuple(param_names), has_var_keyword, has_session
+
+
 def _bind_args_no_duplicate(
     func: Callable[..., Any],
     new_args: tuple[Any, ...],
@@ -90,19 +130,13 @@ def _bind_args_no_duplicate(
     We prefer keyword: for the first len(args) parameters of func, if the
     parameter name is in new_kwargs, pass it only by keyword and drop that
     positional slot; otherwise keep the positional value.
+
+    Signature parsing is cached via _sig_param_info; when a signature cannot
+    be introspected the original args/kwargs are returned unchanged.
     """
-    try:
-        sig = inspect.signature(func)
-    except (ValueError, TypeError):
-        return new_args, new_kwargs
-    param_names: list[str] = []
-    for name, p in sig.parameters.items():
-        if p.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            break
-        param_names.append(name)
+    param_names, _, _ = _sig_param_info(func)
+    if not param_names and not new_args:
+        return (), dict(new_kwargs)
     n_pos = min(len(new_args), len(param_names))
     # Prefer keyword: drop positional for params that are in new_kwargs.
     keep_pos = [
@@ -231,8 +265,9 @@ def create_emit_before_decorator(
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
                 _remove_session_if_not_needed(func, kwargs)
-                async for item in func(*args, **kwargs):
-                    yield item
+                async with aclosing(func(*args, **kwargs)) as source:
+                    async for item in source:
+                        yield item
 
             return async_gen_wrapper
 
@@ -310,9 +345,10 @@ def create_emit_after_decorator(
                 async def async_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
                     collected: list[Any] = []
                     _remove_session_if_not_needed(func, kwargs)
-                    async for item in func(*args, **kwargs):
-                        collected.append(item)
-                        yield item
+                    async with aclosing(func(*args, **kwargs)) as source:
+                        async for item in source:
+                            collected.append(item)
+                            yield item
                     await _do_trigger(
                         framework, event, args, kwargs,
                         pass_args=pass_args,
@@ -325,14 +361,15 @@ def create_emit_after_decorator(
             @wraps(func)
             async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
                 _remove_session_if_not_needed(func, kwargs)
-                async for item in func(*args, **kwargs):
-                    await _do_trigger(
-                        framework, event, args, kwargs,
-                        pass_args=pass_args,
-                        extra={item_key: item},
-                        extra_kwargs=extra_kwargs,
-                    )
-                    yield item
+                async with aclosing(func(*args, **kwargs)) as source:
+                    async for item in source:
+                        await _do_trigger(
+                            framework, event, args, kwargs,
+                            pass_args=pass_args,
+                            extra={item_key: item},
+                            extra_kwargs=extra_kwargs,
+                        )
+                        yield item
 
             return async_gen_per_item_wrapper
 
@@ -532,24 +569,15 @@ def _remove_session_if_not_needed(callback, narrowed_kwargs):
     """
     Remove session from narrowed_kwargs if the callback doesn't accept it
 
+    Signature parsing is cached via _sig_param_info. When a signature cannot
+    be introspected, the session is kept (same as the previous behaviour).
+
     Args:
         callback: Target function
         narrowed_kwargs: Keyword arguments to potentially modify
     """
-    # Check if callback accepts session
-    accepts_session = False
-
-    try:
-        sig = inspect.signature(callback)
-        # Check for explicit 'session' parameter
-        if 'session' in sig.parameters:
-            accepts_session = True
-        # Check if callback has **kwargs (which would accept any parameter)
-        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            accepts_session = True
-    except (ValueError, TypeError):
-        # If we can't inspect, keep the session to be safe
-        return
+    _, has_var_keyword, has_session = _sig_param_info(callback)
+    accepts_session = has_var_keyword or has_session
 
     # Remove session if callback doesn't accept it
     if not accepts_session and 'session' in narrowed_kwargs:
@@ -628,8 +656,9 @@ def _make_transform_io_decorator(
                     "expected async generator function, "
                     f"got {type(async_gen)}"
                 )
-            async for item in async_gen:
-                yield await output_fn(item)
+            async with aclosing(async_gen) as source:
+                async for item in source:
+                    yield await output_fn(item)
 
         return async_gen_wrapper  # type: ignore[return-value]
 

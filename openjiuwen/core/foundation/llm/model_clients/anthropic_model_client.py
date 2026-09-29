@@ -74,6 +74,7 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
+from openjiuwen.core.foundation.llm.utils.provider_error import format_provider_exception
 
 if TYPE_CHECKING:
     import anthropic
@@ -697,7 +698,7 @@ class AnthropicModelClient(BaseModelClient):
                 "Created shared long-lived AsyncAnthropic client.",
                 event_type=LogEventType.LLM_CALL_START,
                 timeout=self.model_client_config.timeout,
-                max_retries=self.model_client_config.max_retries,
+                max_retries=0,
                 metadata={"base_url": self._normalize_base_url(self.model_client_config.api_base)},
             )
         return client
@@ -732,7 +733,7 @@ class AnthropicModelClient(BaseModelClient):
             "Before create anthropic client, model client config params ready.",
             event_type=LogEventType.LLM_CALL_START,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
             metadata={"base_url": base_url},
         )
 
@@ -741,7 +742,7 @@ class AnthropicModelClient(BaseModelClient):
             base_url=base_url,
             http_client=http_client,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
         )
 
     @classmethod
@@ -772,8 +773,8 @@ class AnthropicModelClient(BaseModelClient):
 
         Closing is immediate even if a call is in flight: a model the user
         removed should stop consuming tokens at once. An in-flight request on a
-        closed client surfaces as a normal model-call failure (not retried by
-        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        closed client surfaces as a normal model-call failure. ModelAnomalyDetectionRail
+        may retry it when no user-visible output has been written.
         """
         keys = {cls.connection_key(cfg) for cfg in configs}
         closed = 0
@@ -1048,12 +1049,16 @@ class AnthropicModelClient(BaseModelClient):
             return assistant_message
 
         except Exception as e:
+            error_detail = format_provider_exception(e, include_exc_type=False)
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
                 error=e,
+                error_message=(
+                    format_provider_exception(e) if not str(e).strip() else None
+                ),
             )
             llm_logger.error(
                 "Anthropic API async invoke error.",
@@ -1061,11 +1066,11 @@ class AnthropicModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
-                exception=str(e),
+                exception=error_detail,
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"Anthropic API async invoke error: {str(e)}",
+                error_msg=f"Anthropic API async invoke error: {error_detail}",
             ) from e
         finally:
             # Only close clients we own (fallback path). Shared/pooled clients
@@ -1190,12 +1195,16 @@ class AnthropicModelClient(BaseModelClient):
                 )
 
         except Exception as e:
+            error_detail = format_provider_exception(e, include_exc_type=False)
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 error=e,
+                error_message=(
+                    format_provider_exception(e) if not str(e).strip() else None
+                ),
             )
             llm_logger.error(
                 "Anthropic API async stream error.",
@@ -1203,11 +1212,11 @@ class AnthropicModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                exception=str(e),
+                exception=error_detail,
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"Anthropic API async stream error: {str(e)}",
+                error_msg=f"Anthropic API async stream error: {error_detail}",
             ) from e
         finally:
             # Only close clients we own (fallback path). Shared/pooled clients

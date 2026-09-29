@@ -17,30 +17,28 @@ from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_
 from openjiuwen.extensions.observability.redaction import redact_completion, redact_prompt
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
-    AT_AGENT_INPUT,
-    AT_AGENT_NAME,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_INPUT,
+    GEN_AI_AGENT_NAME,
+    OJ_SPAN_OUTPUT,
     AT_AGENT_ROLE,
-    AT_MEMBER_ID,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     AT_TEAM_ID,
     AT_TEAM_NAME,
+    GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_TOOL_ID,
-    GEN_AI_TOOL_INPUT,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
-    GEN_AI_USAGE_CACHE_TOKENS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_TOTAL_TOKENS,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-    LANGFUSE_OBSERVATION_TYPE,
-    LANGFUSE_SESSION_ID,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    OJ_TRAJECTORY_RECORD_KIND,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -190,21 +188,20 @@ class ClaudeSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_prompt = redact_prompt(prompt, config)
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_prompt)
-        span.set_attribute(AT_AGENT_INPUT, safe_prompt)
+        span.set_attribute(OJ_SPAN_INPUT, safe_prompt)
+        span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
+        span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
-        span.set_attribute(AT_AGENT_NAME, self._member_name)
+        span.set_attribute(GEN_AI_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
-        span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_ID, self._team_name)
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         self._turn_span = span
         self._turn_started_at_ns = time.time_ns()
@@ -451,7 +448,7 @@ class ClaudeSpanBridge:
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
+        span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute("gen_ai.system", "claude")
         span.set_attribute(GEN_AI_PROVIDER_NAME, "Anthropic")
         span.set_attribute(GEN_AI_REQUEST_MODEL, str(attributes.get("model") or "unknown"))
@@ -461,18 +458,16 @@ class ClaudeSpanBridge:
         input_tokens = _int_or_none(attributes.get("input_tokens"))
         output_tokens = _int_or_none(attributes.get("output_tokens"))
         if input_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_PROMPT_TOKENS, input_tokens)
+            span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, input_tokens)
         if output_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_COMPLETION_TOKENS, output_tokens)
-        if input_tokens is not None and output_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS, input_tokens + output_tokens)
+            span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, output_tokens)
         cache_read_tokens = _int_or_none(attributes.get("cache_read_tokens"))
         cache_creation_tokens = _int_or_none(attributes.get("cache_creation_tokens"))
-        if cache_read_tokens is not None or cache_creation_tokens is not None:
-            span.set_attribute(
-                GEN_AI_USAGE_CACHE_TOKENS,
-                (cache_read_tokens or 0) + (cache_creation_tokens or 0),
-            )
+        if cache_read_tokens is not None:
+            span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, cache_read_tokens)
+        if cache_creation_tokens is not None:
+            # Cache writes have no standard GenAI key; keep them provider-scoped.
+            span.set_attribute("claude.usage.cache_creation_tokens", cache_creation_tokens)
         # Transparent diagnostics from the native span.
         passthrough_keys = (
             "ttft_ms",
@@ -493,8 +488,7 @@ class ClaudeSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         if int(event.get("status_code") or 0) == 2:
             description = self._redact_diagnostic(
@@ -529,12 +523,12 @@ class ClaudeSpanBridge:
             if span.is_recording():
                 if pending.get("input") is not None and config is not None:
                     span.set_attribute(
-                        LANGFUSE_OBSERVATION_INPUT,
+                        OJ_SPAN_INPUT,
                         redact_prompt(str(pending["input"]), config),
                     )
                 if pending.get("output") is not None and config is not None:
                     span.set_attribute(
-                        LANGFUSE_OBSERVATION_OUTPUT,
+                        OJ_SPAN_OUTPUT,
                         redact_completion(str(pending["output"]), config),
                     )
                 span.end(end_time=pending["end_ns"])
@@ -611,8 +605,7 @@ class ClaudeSpanBridge:
             reasoning = "".join(self._reasoning)
             if output:
                 safe_output = redact_completion(output, config)
-                span.set_attribute(AT_AGENT_OUTPUT, safe_output)
-                span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
+                span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             if reasoning:
                 self._emit_reasoning_span(reasoning)
 
@@ -676,31 +669,32 @@ class ClaudeSpanBridge:
         if tracer is None:
             return
         span = tracer.start_span(
-            name=f"tool.{tool_name}",
+            name=f"execute_tool {tool_name}",
             context=set_span_in_context(turn_span, otel_context.get_current()),
             kind=SpanKind.INTERNAL,
         )
         safe_input = redact_prompt(_json_text(record.get("tool_args")), config)
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
+        span.set_attribute(OJ_SPAN_INPUT, safe_input)
         span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
-        span.set_attribute(GEN_AI_TOOL_INPUT, safe_input)
+        span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "tool")
+        span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
+        span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, safe_input)
         tool_call_id = str(record.get("tool_call_id") or "")
         if tool_call_id:
-            span.set_attribute(GEN_AI_TOOL_ID, tool_call_id)
+            span.set_attribute(GEN_AI_TOOL_CALL_ID, tool_call_id)
             span.set_attribute("claude.tool.call_id", tool_call_id)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         if record.get("completed"):
             safe_output = redact_completion(_json_text(record.get("tool_result")), config)
-            span.set_attribute(GEN_AI_TOOL_OUTPUT, safe_output)
-            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
+            span.set_attribute(GEN_AI_TOOL_CALL_RESULT, safe_output)
+            span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             span.set_status(Status(StatusCode.OK))
         else:
             span.set_status(Status(StatusCode.ERROR, "incomplete tool call"))
@@ -724,22 +718,22 @@ class ClaudeSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_reasoning = redact_completion(reasoning, config)
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
-        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_reasoning)
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "reasoning")
+        span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
             _json_text([{
-                "role": "reasoning",
-                "parts": [{"type": "text", "content": safe_reasoning}],
+                "role": "assistant",
+                "parts": [{"type": "reasoning", "content": safe_reasoning}],
             }]),
         )
+        span.set_attribute(OJ_SPAN_OUTPUT, safe_reasoning)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
         span.set_status(Status(StatusCode.OK))
         span.end()
 

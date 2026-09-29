@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-09-09 |
-| 关联 feature | N/A |
+| 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
+| 最近一次修订日期 | 2026-09-23 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md` |
 
 ## 范围 / 边界
 
@@ -17,7 +17,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 具体覆盖：
 
-- 工具返回形态 `ToolOutput`（`tools/base_tool.py`）。
+- 工具返回形态 `ToolOutput`（定义于 `core/foundation/tool/schema.py`，经 `tools/base_tool.py` 再导出）
+  与面向模型的结果渲染 `Tool.render_for_llm`。
 - 工具组：shell（`tools/shell/`）、web（`tools/web/`）、multimodal
   （`tools/multimodal/`）、subagent（`tools/subagent/`）、skills（`tools/skills/`）、
   worktree（`tools/worktree/`）、lsp_tool（`tools/lsp_tool/`）、browser_move /
@@ -35,9 +36,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 ## 不变量
 
-1. **`ToolOutput` 是工具的统一返回形态**（`tools/base_tool.py`）：
-   `success: bool`、`data`、`error`、`extracted_content`、`include_extracted_content_only_once`、
-   `long_term_memory`。工具失败必须 `success=False` + `error`，不抛裸异常上抛宿主。
+1. **`ToolOutput` 是工具的统一返回形态**（定义于 `core/foundation/tool/schema.py`，
+   `tools/base_tool.py` 再导出）：`success: bool`、`data`、`error`、`extracted_content`、
+   `include_extracted_content_only_once`、`long_term_memory`。工具失败必须 `success=False` +
+   `error`，不抛裸异常上抛宿主。
 2. **工具注册走 `DeepAgent` / rail 的卡片机制**：工具以 `Tool | ToolCard` 形态存在，
    `card.name` 是身份（`_tool_identity` / `ability_manager.get(name)` 强校验）；新增工具
    不得复用已有 card.name。卸载先校验 card 身份（见 `S_04` 不变量 7）。
@@ -54,6 +56,14 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      热重载不能因卡片 ID 相同而保留旧的付费搜索描述或参数枚举。
    - vision/audio：`create_vision_tools()` / `create_audio_tools()`；由 `VisionModelConfig`
      / `AudioModelConfig` 门控（`S_01` 不变量 8）。
+     `audio_transcription` 对 `gpt-4o-transcribe`、`gpt-4o-mini-transcribe`、`whisper-1`
+     和 `FunAudioLLM/SenseVoiceSmall` 忽略大小写精确匹配，使用 `/audio/transcriptions`
+     的 multipart 文件上传；请求保留原始模型名。其他模型（如 MiMo、Gemini）继续使用
+     `/chat/completions` 的 `input_audio`。SiliconFlow 的 `base_url` 应为
+     `https://api.siliconflow.cn/v1`，不含接口后缀。本路由不改变 `audio_question_answering`，
+     不代表 SenseVoice 支持音频问答。
+     Chat 音频编码将 `audio/wav`、`audio/wave` 和 `audio/x-wav` 统一为 `wav`，
+     避免不同平台的 MIME 数据库把同一 WAV 文件误标为 `mp3`。
    - todo：`create_todos_tool()`（`TodoCreateTool` / `TodoListTool` / `TodoGetTool` /
      `TodoModifyTool`）+ `TodoLockManager`（session 级锁）。
    - goal：`SubmitGoalReportTool` / `GetCurrentGoalTool` + `GoalReportSink`（接 `S_11`）。
@@ -82,23 +92,79 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 8. **工具装载顺序**：`create_deep_agent` / `DeepAgentConfig.tools` 进 `ability_manager`；
    rail init 再动态加工具（`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04`
    梯队 100）。工具分批装载的时序语义由 rail priority 保证。
-9. **Browser 默认工具面保持紧凑**：默认只暴露常用 Playwright primitive、两类 Probe、
-   Batch 和受限 offload recall。诊断、取消、custom-action discovery、拖放及其他低频能力
-   通过显式 capability 启用；runtime 内部 transport 工具不进入模型工具面。
+9. **Browser 默认工具面保持紧凑**：`browser_capabilities=None` / `[]` 只选择 `core`，
+   加上两类 Probe、Batch 和受限 offload recall。其他 MCP 工具通过显式 capability 启用；
+   `unsafe_dev` 与 `advanced_code` 同选时以前者替换后者。不支持图像输入时过滤截图工具。
+   取消、健康检查、custom-action discovery 是可显式装配的 Python Tool，不是 capability
+   自动注入的工具。runtime 内部 transport 的代码执行器不等于模型可见工具面。
+   完整清单和当前行为统一见[浏览器子智能体](../../../../docs/zh/2.开发指南/API文档/openjiuwen.harness/subagents/浏览器子智能体.md)。
 10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
-    primary link 导航、Probe JSON 一次重试和新标签页 URL 等待由 runtime 确定性处理；只有
+    真实详情链接导航、无歧义参数别名和新标签页 URL 等待由 runtime 确定性处理；只有
     无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
+    Probe 确定性脚本异常保留原错且不重跑；当前页 fragment、JavaScript 链接和状态控件保留 click。
+    Batch 接受当前 generation 的原生 AX ref 或 PageState target；排序等待消费已解析目标的实时状态。
+11. **模型读到的工具结果文本只来自 `Tool.render_for_llm`**：`AbilityManager` 构造工具结果
+    `ToolMessage` 时对工具实例调用 `render_for_llm(result)`；结构化结果原样留在
+    `ToolCallInputs.tool_result` 给 rail / 事件 / 日志。默认实现（`render_tool_output`）：成功取
+    `data["content"]`（`data` 为字符串直接用，无 `content` 的其它载荷序列化为 JSON），失败取
+    `error`（为空回落载荷），空结果给占位文本；非 `ToolOutput` 结果为 `str(output)`。
+    - `data` 没有 `content` 的工具**必须覆写** `render_for_llm` 给出纯文本，JSON 兜底只是最后防线；
+      浏览器 runtime 工具例外——`BrowserRuntimeRail` 按 JSON 解析其消息，保持默认 JSON。
+    - 返回裸 dict 的工具（todo / goal）不改返回形态（CLI todo 视图解析其 `str()`），只覆写渲染。
+    - 函数式工具经 `LocalFunction(..., render=...)` 定制，无需子类化。
+    - 自定义渲染抛异常时记录日志并回落默认渲染：工具已执行（可能有副作用），不能因渲染失败
+      转成执行错误并触发重试。
+    - **渲染只作用于发给模型的 `ToolMessage.content`，绝不改写结构化结果**：流式出口
+      （`ToolTrackingRail` 的 `str(tool_result)`、native harness `_ObservationRail` 的
+      `to_json_safe(tool_result)`）与 observability 读的都是 `tool_result`，上层服务依赖其结构做
+      判断与展示。因此 `McpToolResult` 保持独立模型（不继承 `ToolOutput`，序列化不多字段）。
+    - **流式工具结果同时带结构化字段与渲染文本（独立字段）**：`tool_result` 流式块在原字段之外
+      增加 `rendered_result`——模型实际读到的文本，由 `resolve_tool_result_text(inputs, exception)`
+      取值（`core/single_agent/ability_manager.py`，与 `AbilityManager.execute` 共用
+      `resolve_tool_message` 这一条规则：正常 / 跳过取 `inputs.tool_msg`，工具抛异常取
+      `AbilityExecutionError.tool_message`）。展示侧（CLI 渲染器、subagent activity / transcript）
+      优先读 `rendered_result`，缺失才回落旧字段；不得再用 `str(tool_result)` 生成展示文本。
+    - 产出 `tool_result` 流式块的 rail（`ToolTrackingRail` / `_ObservationRail`，priority 5）必须
+      晚于所有改写 `tool_msg` 的 rail，`rendered_result` 才是最终文本。
+    - `structured_result` 暂不输出；`ToolTrackingRail` 的字符串 `tool_result` 是兼容字段。待 UI 迁移
+      到结构化数据后，该兼容字段与基于其字符串的解析逻辑全链路移除。
+    - `tool_call` 包装器不重新渲染目标结果：结构化结果保持 `{"name", "result"}` / 原 `error`，
+      目标工具已渲染（含 AFTER_TOOL_CALL 改写）的消息文本放在 `RelayedToolOutput` 的私有属性里，
+      不进 `model_dump` / `str()`，只由 `ToolCallTool.render_for_llm` 读取。
+    - 外部协议出口（team MCP server / Claude SDK MCP / skill CLI / 被动成员执行器）同样调用
+      `render_for_llm`，保证与进程内模型看到的文本一致。
+12. **Browser Batch 按顺序验证执行目标**：完整 schema 在执行前检查；DOM 唯一性、可见性和
+    可操作性在每个步骤执行前检查，允许前序等待或操作使后续目标出现。generation 绑定目标
+    不得跨导航复用。未执行的校验失败带 `executed=false/state_changed=false`；已执行前序
+    步骤后的失败保留 `partial`。只有明确 `optional` 的步骤失败才继续。
+13. **可执行数据不是展示文本**：URL、selector、target/generation 标识完整保留；紧凑投影
+    超过容量时删除整项或省略字段，不产生貌似可执行的截断链接。滚动 transport 最长等待
+    15 秒（仍受更短的任务期限约束），点击和脚本等副作用操作超时不能自动重放。
 
 ## 接口契约
 
 ```python
+# core/foundation/tool/schema.py（harness 经 tools/base_tool.py 再导出）
 class ToolOutput(BaseModel):
     success: bool
-    data: Optional[Any] = None
-    error: Optional[str] = None
-    extracted_content: Optional[str] = None
+    data: Any | None = None
+    error: str | None = None
+    extracted_content: str | None = None
     include_extracted_content_only_once: bool = False
-    long_term_memory: Optional[str] = None
+    long_term_memory: str | None = None
+
+# core/single_agent/ability_manager.py
+def resolve_tool_message(inputs: ToolCallInputs, exception: BaseException | None) -> ToolMessage | None: ...
+def resolve_tool_result_text(inputs: ToolCallInputs, exception: BaseException | None) -> str | None: ...
+
+# core/foundation/tool/base.py
+class Tool:
+    def render_for_llm(self, output: Any) -> str: ...     # 子类覆写以定制模型文本
+def render_tool_output(output: ToolOutput) -> str: ...   # 默认渲染规则
+def render_payload_text(data: Any) -> str: ...           # data["content"] / 字符串 / JSON 兜底
+
+# harness/tools/base_tool.py
+def render_fields(fields: Mapping[str, Any], *, separator: str = "\n") -> str: ...  # 扁平记录 → key: value
 
 def create_web_tools(...) -> list[Tool]
 def create_vision_tools(...) -> list[Tool]
@@ -140,6 +206,10 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 
 错误 / 返回语义：
 
+- `SubagentResumeTool` 恢复实例但不投递任务；返回 `idle` 时在 `message` 中明确说明
+  本次调用未执行新任务。用户只要求恢复时保持待命，有后续输入才调用 `send_input` + `wait`，
+  不因 `idle` / `turn_outcome=completed` 立即关闭。`restored=false` 表示实例已存活，
+  不应通过 `close` + `resume` 重试；运行中实例不附加空闲待命提示。
 - 可恢复的工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛裸异常。
   `ToolInterruptException` 属于用户交互控制流，所有工具包装层必须原样传播，具体契约见
   `S_04`。经包装层进入中断状态的 deferred 工具在 resume 时重新执行原 wrapper call，
@@ -183,6 +253,39 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 | session | `build_session_tools` | session 工具启用 |
 | subagent | `SubagentRail` init 注册 | `enable_subagent_runtime` |
 | worktree | `EnterWorktreeTool` / `ExitWorktreeTool` | worktree 配置 |
+
+## Browser 页面与动作协作
+
+- 定向 Interactive Probe 从同一个 registry 返回本次匹配的有效 target，保持匹配顺序；
+  不能拿全页前 20 个控件替代。全页摘要继续优先搜索框；无有效命中返回诊断并允许原生局部 AX 回退。
+- Browser Rail 的 snapshot 请求始终返回可读内容（忽略 filename 落盘选项）；大结果沿用任务内
+  recall，不添加任意文件读取能力。非 Browser Rail 的 MCP 调用不受此归一化影响。
+- 当前 tab 的 URL/title 成对解析，URL 变化而 title 未知时清空旧 title。目的页证据必须关联本次
+  结果选择/导航，不因“不是搜索页”就认证首页为目标详情，也不把目的页推荐卡标题当页面标题。
+- MCP Result 区先统一解码，再投影字段；支持数组/字符串和嵌套包装，不从执行脚本中挖 JSON。
+  成功导航记录 requested/landed 关系；同页 URL 规范化不清标题，路由参数与 fragment 仍保留。
+- Batch URL 等待限定动作来源页或动作后新开的关联页，不扫描任意旧 tab。切换后同步 MCP 活动页；
+  歧义不猜选，不重放成功动作。保留 Chrome/Profile/Cookie。
+- Card 质量分只用于挑选容器；主区域确定后按渲染/列表顺序输出。区域歧义、关键词过滤或
+  滚动视口不确认全局序号时返回 `order_known=false`，不伪造 `result_index`。
+- 作者排除操作按钮，计数只读取局部字段，日期不填入评论数；分段整数/小数价格需拼接。
+  可执行 URL、selector 不按展示文本截断；同实体详情纠错沿用现有 evidence/provenance。
+- 离屏可滚动控件与禁用/遮挡分别诊断；不使用强制点击绕过真实不可操作状态。无有效 target 时返回
+  有限局部片段。价格读取保留 DOM 文本节点边界，折扣不并入金额。导航/筛选组不占结果卡片窗口。
+- `observed_count` 是本次 Probe 观察到的自然条目数，不以排名是否已知归零；诊断的 ranked_count
+  单独表达可排序条目。工具返回本次注册卡片，PageState 仍保持原有小窗口，投影原文进入任务内 recall。
+- 原生 Playwright 负责单动作与 AX；Probe 补充结构化区域/字段；Batch 负责确定多步骤。
+  有明确前置排序 target 的缺参等待可一次修复；不猜歧义目标，不重放已成功点击。
+- 定向 evaluate 可用简短 `fields: {author: {value, selector, raw_text}}`，不强制每轮进度 JSON。
+  简单问答可直接搜索 URL 并读顶部答案卡，标注来源，不把 AI 答案伪装成自然结果排名。
+- 导航、广告、AI 答案与主结果分开分类；分类原因保留在紧凑卡片中，站点规则在 site profile。
+  `is_ad=true/ad_status=ad` 表示有广告标记；未识别到时 `ad_status=unknown`，不是非广告证明。
+  时长 scope 区分 current_part/collection/unknown，酒店星级不填住客评分，既有报价口径仍保留。
+- Cards/native/evaluate 共用已有 sourced observation 路径。evaluate 的有序列表按实际有效记录计数，
+  不采信单独 count 值。空查找标记 observation_status=not_observed，不等于证明字段不存在；
+  带依据的 missing/unknown 保留，后续同实体正证据可纠正早先空结果。
+  `value=null`、空数组和仅有 selector 的字段包装也属于未命中，字典的字符串表示不是缺失依据。
+  未命中的详情查找不能覆盖已有值，也不能阻止后续真实观察修正；短的非空原生文本不以长度判无效。
 
 ## 与其它 spec 的关系
 

@@ -1,3 +1,5 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Stream renderer — maps OutputSchema chunks to terminal output.
 
 Supports eight chunk types:
@@ -14,7 +16,6 @@ Supports eight chunk types:
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -38,16 +39,10 @@ from openjiuwen.harness.cli.ui.todo_render import (
 
 
 def _write_terminal(text: str) -> None:
-    """Write *text* directly to the terminal (stdout).
-
-    This is intentional CLI user-facing output, not
-    diagnostic logging. Uses the active stdout encoding
-    while writing directly to file descriptor 1.
-    """
+    """Write user-facing text through stdout and flush streaming output."""
     stdout = sys.stdout
-    encoding = stdout.encoding or "utf-8"
-    errors = stdout.errors or "strict"
-    os.write(1, text.encode(encoding, errors=errors))
+    stdout.write(text)
+    stdout.flush()
 
 # Chunk type constants (aligned with SDK OutputSchema.type)
 CHUNK_LLM_OUTPUT = "llm_output"
@@ -226,15 +221,18 @@ def _render_tool_result(
             console.print()
             return todo_items
 
+    # Display the text the model read; ``tool_result`` is only the legacy
+    # string form, kept for producers that do not emit ``rendered_result``.
+    display_text = payload.get("rendered_result") or tool_result
     summary = format_tool_result(
-        tool_name, tool_result, tool_args, payload
+        tool_name, display_text, tool_args, payload
     )
     if summary:
         console.print(f"[dim]  ⎿  {summary}[/dim]")
 
     # Write/edit content preview
-    if tool_name in ("write_file",) and tool_result:
-        preview = format_write_preview(tool_result)
+    if tool_name in ("write_file",) and display_text:
+        preview = format_write_preview(display_text)
         if preview:
             console.print(f"[dim]{preview}[/dim]")
 

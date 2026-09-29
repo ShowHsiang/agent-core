@@ -19,7 +19,6 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.harness import TeamHarness
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -59,6 +58,26 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+async def _validate_member_worktree_isolation(
+    spec: TeamAgentSpec,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Check the project scope and Git repository before registering a member."""
+    from openjiuwen.agent_teams.worktree.session_scope import build_worktree_owner_scope
+    from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+    scope = build_worktree_owner_scope(
+        team_name=team_name,
+        member_name=member_name,
+        spec=spec,
+    )
+    if await find_canonical_git_root(scope.project_dir) is None:
+        raise RuntimeError(
+            f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}"
+        )
+
+
 _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
     r"\bgit(?:\s+(?:-[A-Za-z](?:\s+\S+)?|--[^\s;&|]+(?:=\S+)?))*\s+worktree\s+"
     r"(?:add|remove|prune|move|repair|lock|unlock)\b",
@@ -68,13 +87,14 @@ _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    # HUMAN_AGENT predefined members are HITT roster declarations, and
-    # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
-    # is a signal to flip the team away from "default". A roster of
-    # ordinary predefined teammates derives "hybrid": the leader keeps
-    # its spawn_* tools so the roster can still grow at runtime.
-    # Lock it down by setting an explicit "predefined" team_mode.
-    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
+    # HUMAN_AGENT / PASSIVE_HUMAN predefined members are HITT roster
+    # declarations, and BRIDGE_AGENT entries are bridge-to-remote
+    # declarations — none is a signal to flip the team away from
+    # "default". A roster of ordinary predefined teammates derives
+    # "hybrid": the leader keeps its spawn_* tools so the roster can
+    # still grow at runtime. Lock it down by setting an explicit
+    # "predefined" team_mode.
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
 
@@ -294,9 +314,6 @@ class AgentConfigurator:
             )
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
-
-        if ctx.role == TeamRole.LEADER:
-            kv_cache_hooks.ensure_leader_registry(self)
 
         self.setup_team_backend(
             spec,
@@ -1010,6 +1027,11 @@ class AgentConfigurator:
                 current_model_name = request_config.model_name
             provider = current_model_config.model_client_config.client_provider
             current_model_provider = provider.value if isinstance(provider, ProviderType) else provider
+
+        async def validate_worktree_isolation(member_name: str) -> None:
+            """Validate the member's worktree scope and repository before registration."""
+            await _validate_member_worktree_isolation(spec, team_name, member_name)
+
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
@@ -1038,6 +1060,7 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 

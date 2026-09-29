@@ -18,9 +18,11 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import github as github_module
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.github import GitHubFetchService
+from openjiuwen.harness.personal_context.models import RawChangeItem
 
 
 def github_config(
@@ -142,8 +144,101 @@ def zip_bytes(*entries: tuple[str, bytes, int | None]) -> bytes:
     return stream.getvalue()
 
 
+def branch_response(head: str, candidate_time: str = "2026-01-01T00:00:00Z") -> FakeResponse:
+    return FakeResponse(
+        {
+            "name": "main",
+            "commit": {
+                "sha": head,
+                "commit": {"committer": {"date": candidate_time}},
+            },
+        }
+    )
+
+
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"github:item:{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Item {index}",
+        content=f"Body {index}",
+        original_ref=f"https://github.com/acme/demo/items/{index}",
+    )
+
+
+def _fetch_candidate(tmp_path: Path, index: int, *, code: bool = False) -> dict[str, object]:
+    candidate: dict[str, object] = {
+        "stable_id": f"github:item:{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "code" if code else "issue",
+        "locator": f"https://github.com/acme/demo/items/{index}",
+        "item": _fetch_item(index),
+    }
+    if code:
+        candidate.update(
+            owner="acme",
+            repo="demo",
+            head_sha="a" * 40,
+            materialized_source_path=str((tmp_path / "candidate").resolve()),
+        )
+    return candidate
+
+
+@pytest.mark.asyncio
+async def test_github_fetch_isolates_one_code_materialization_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitHubFetchService(github_config(tmp_path), home=tmp_path)
+
+    async def fail(*_args):
+        raise github_module._fetch_error("GitHub code materialization failed", TimeoutError("private"))
+
+    monkeypatch.setattr(service, "_materialize_code", fail)
+    candidates = (_fetch_candidate(tmp_path, 0, code=True), _fetch_candidate(tmp_path, 1))
+
+    batch = await service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert batch.items == (_fetch_item(1),)
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "github:item:0",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_github_fetch_does_not_quarantine_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitHubFetchService(github_config(tmp_path), home=tmp_path)
+
+    async def denied(*_args):
+        cause = aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(real_url="https://api.github.com/fake"),
+            history=(),
+            status=403,
+        )
+        raise github_module._fetch_error("GitHub archive download failed", cause)
+
+    monkeypatch.setattr(service, "_materialize_code", denied)
+
+    with pytest.raises(BaseError):
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate(tmp_path, 0, code=True),),
+        ).__anext__()
 
 
 @pytest.mark.asyncio
@@ -215,6 +310,7 @@ async def test_github_archive_retry_extracts_only_successful_download(
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "pushed_at": "2026-01-01T00:00:00Z"})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         archive_url: [FakeResponse({}, status=503), FakeResponse({}, content=archive)],
     }
     FakeSession.requests = []
@@ -254,6 +350,7 @@ async def test_github_fetches_enabled_resources_and_materializes_code(
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "pushed_at": "2026-01-01T00:00:00Z"})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
@@ -262,7 +359,7 @@ async def test_github_fetches_enabled_resources_and_materializes_code(
             FakeResponse([]),
         ],
         "https://api.github.com/repos/acme/demo/pulls": [FakeResponse([])],
-        "https://api.github.com/repos/acme/demo/commits": [FakeResponse([])],
+        "https://api.github.com/repos/acme/demo/commits": [FakeResponse([]) for _ in range(20)],
         f"https://api.github.com/repos/acme/demo/zipball/{head}": [FakeResponse({}, content=archive)],
     }
     FakeSession.timeout_totals = []
@@ -330,6 +427,7 @@ async def test_github_resource_lanes_apply_their_defined_times(
     commit_sha = "b" * 40
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main"})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(commit_sha, recent)],
         "https://api.github.com/repos/acme/demo/issues": [
             FakeResponse(
                 [
@@ -394,6 +492,7 @@ async def test_github_readme_and_code_use_head_commit_time_before_materializatio
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "head_commit_time": head_time})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head, head_time)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
@@ -467,12 +566,16 @@ async def test_github_total_limit_selects_latest_across_enabled_resources(
     ]
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main"})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(str(commits[-1]["sha"]), timestamp)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
         "https://api.github.com/repos/acme/demo/issues": [FakeResponse(issues)],
         "https://api.github.com/repos/acme/demo/pulls": [FakeResponse(pulls)],
-        "https://api.github.com/repos/acme/demo/commits": [FakeResponse(commits)],
+        "https://api.github.com/repos/acme/demo/commits": [
+            FakeResponse(commits),
+            *[FakeResponse([]) for _ in range(20)],
+        ],
     }
     monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
     provider = GitHubFetchService(
@@ -505,6 +608,7 @@ async def test_github_rejects_unsafe_archive_and_wrong_run_cannot_commit_or_abor
     archive_url = f"https://api.github.com/repos/acme/demo/zipball/{'a' * 40}"
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main", "sha": "a" * 40})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response("a" * 40)],
         archive_url: [FakeResponse({}, content=archive)],
     }
     FakeSession.requests = []
@@ -539,6 +643,7 @@ async def test_github_rejects_casefold_duplicate_archive_paths(tmp_path: Path, m
     )
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main", "sha": head})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         f"https://api.github.com/repos/acme/demo/zipball/{head}": [FakeResponse({}, content=archive)],
     }
     monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
@@ -728,7 +833,8 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
         FakeSession.timeout_totals = []
         monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
 
-    install_responses([initial, initial, initial])
+    initial_pages = [initial[index : index + 100] for index in range(0, len(initial), 100)]
+    install_responses([*initial_pages[:2], *initial_pages, *initial_pages])
     service = GitHubFetchService(
         github_config(tmp_path, resources=["issues"], max_items_per_run=100),
         home=tmp_path / "home",
@@ -752,7 +858,7 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
     assert len(cursor["_selection"]["completed"]) == 205
 
     priority_initial = initial
-    install_responses([priority_initial])
+    install_responses([priority_initial[:100], priority_initial[100:200]])
     priority_service = GitHubFetchService(
         github_config(tmp_path, resources=["issues"], max_items_per_run=100),
         home=tmp_path / "priority-home",
@@ -777,7 +883,8 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
             issue(1001, "2026-01-01T01:00:03Z", title="New B"),
         ]
     )
-    install_responses([changed])
+    changed.sort(key=lambda item: str(item["updated_at"]), reverse=True)
+    install_responses([changed[index : index + 100] for index in range(0, len(changed), 100)])
     second = await _batches(priority_service, run_id="priority-b", cursor=first_cursor)
     second_items = [item for batch in second for item in batch.items]
     assert len(second_items) == 100

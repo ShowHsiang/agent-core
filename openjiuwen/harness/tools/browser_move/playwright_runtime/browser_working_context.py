@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
+from .evidence import merge_evidence_slot, same_page_url, task_observation_allowed
 
 BROWSER_WORKING_CONTEXT_STATE_KEY = "__browser_subagent_working_context__"
 BROWSER_TASK_STATE_KEY = "__browser_phase_budget_state__"
@@ -29,13 +30,17 @@ _ERROR_PREFIXES = (
 )
 _WORKING_CONTEXT_INSTRUCTIONS = {
     "en": (
-        "Runtime-owned browser context. Requirements, evidence, blockers, status, and recent semantic "
-        "changes are authoritative. Choose the next strategy or answer concisely; do not echo this "
-        "context or repeat an action that made no progress."
+        "Runtime-owned execution context. Inferred fields are extraction hints, not extra user requirements. "
+        "Use source observations to answer ordinary page questions even when field mapping is incomplete. "
+        "Never invent missing values, substitute shop ratings for product ratings, or merge comparison variants. "
+        "Respect actual blockers and terminal status; stop when the user's question is answered; "
+        "do not echo this context or maintain a second progress object."
     ),
     "cn": (
-        "这是 runtime 维护的浏览器上下文。请求字段、证据、阻断项、状态和最近语义变化均为权威信息。"
-        "请选择下一步策略或简洁作答；不要复述上下文，也不要重复没有产生进展的动作。"
+        "这是 runtime 维护的执行上下文。推断字段是提取提示，不是额外用户要求。"
+        "普通页面问答可根据有来源的已读原文作答，不必为字段映射不完整反复验证。"
+        "不得编造缺失值、用店铺评分替代商品评分或混合对比项；遵守实际阻断和终态，回答充分即可结束。"
+        "不要复述上下文或维护第二份进度对象。"
     ),
 }
 _EPHEMERAL_USER_MESSAGE_NAMES = frozenset(
@@ -496,12 +501,14 @@ class BrowserWorkingContextStore:
                 "status": task.get("status", "in_progress"),
                 "current_phase": task.get("current_phase"),
                 "requirements": {
+                    "source": requirements.get("source", "explicit"),
                     "missing": list(requirements.get("missing") or [])[:12],
                     "unavailable": list(requirements.get("unavailable") or [])[:8],
                     "evidence": list(requirements.get("evidence") or [])[-6:],
                 },
                 "blockers": list(task.get("blockers") or [])[:6],
                 "last_page": task.get("last_page") or {},
+                "observations": list(task.get("observations") or [])[-1:],
             },
             "runtime_directive": payload.get("runtime_directive", "continue"),
             "recent_actions": list(payload.get("recent_actions") or [])[-2:],
@@ -576,6 +583,10 @@ class BrowserWorkingContextStore:
             state.get("replan_trial_pending")
             and (progress.get("observable_progress") is True or progress_name == "progress")
         )
+        recent = state.get("recent_actions") or []
+        if recent and recent[-1].get("semantic_delta") == "evidence_added":
+            recovered = True
+            recent[-1]["semantic_delta"] = "progress"
         recovered = cls._reconcile_observed_action(state, progress) or recovered
         cls._apply_replan_observation(state, progress, recovered=recovered)
         session.update_state({BROWSER_TASK_STATE_KEY: state})
@@ -604,6 +615,8 @@ class BrowserWorkingContextStore:
             url = str(semantic_state.get("url") or "").strip()
             if url:
                 last_page = state.setdefault("last_page", {})
+                if not same_page_url(url, last_page.get("url")):
+                    last_page["title"] = ""
                 last_page["url"] = url
 
         progress_name = str(progress.get("progress") or "unknown")
@@ -617,6 +630,8 @@ class BrowserWorkingContextStore:
     def _merge_semantic_evidence(state: Dict[str, Any], progress: Dict[str, Any]) -> None:
         semantic_state = progress.get("semantic_state")
         if not isinstance(semantic_state, dict):
+            return
+        if not task_observation_allowed(state, str(semantic_state.get("url") or "")):
             return
         required_fields = {str(field) for field in state.get("required_fields") or []}
         selected_filters = semantic_state.get("selected_filters")
@@ -703,7 +718,7 @@ class BrowserWorkingContextStore:
         if selection_source:
             provenance["selection_source"] = selection_source[:80]
         if selector:
-            provenance["selector"] = selector[:600]
+            provenance["selector"] = selector
         evidence = state.setdefault("structured_evidence", [])
         signature = (field_name, value, source)
         known = {
@@ -744,18 +759,8 @@ class BrowserWorkingContextStore:
                 str(required.get("variant") or "").lower(),
                 field_name,
             )
-            covered = {
-                (
-                    str(slot.get("entity") or "").lower(),
-                    str(slot.get("variant") or "").lower(),
-                    str(slot.get("field") or "").lower(),
-                )
-                for slot in state.setdefault("evidence_slots", [])
-                if isinstance(slot, dict)
-            }
-            if key in covered:
-                continue
-            state["evidence_slots"].append(
+            merge_evidence_slot(
+                state,
                 {
                     "entity": key[0],
                     "variant": key[1],
@@ -767,7 +772,6 @@ class BrowserWorkingContextStore:
                     "raw_text": value[:600],
                 }
             )
-            del state["evidence_slots"][:-20]
 
     @staticmethod
     def refresh_field_coverage(state: Dict[str, Any]) -> None:
@@ -835,7 +839,7 @@ class BrowserWorkingContextStore:
                     or target.get("ref")
                     or ""
                 )
-                return label, selector[:600]
+                return label, selector
         return None
 
     @staticmethod
@@ -1031,15 +1035,19 @@ class BrowserWorkingContextStore:
         covered_keys = {
             BrowserWorkingContextStore._evidence_slot_key(slot)
             for slot in evidence_slots
+            if slot.get("observation_status") != "not_observed"
         }
         missing_slots = [
             slot
             for slot in required_slots
             if BrowserWorkingContextStore._evidence_slot_key(slot) not in covered_keys
         ]
-        unavailable_slots = [
-            slot for slot in evidence_slots if slot.get("status") in {"missing", "unknown"}
-        ]
+        unavailable_slots = []
+        for slot in evidence_slots:
+            if slot.get("status") not in {"missing", "unknown"}:
+                continue
+            if slot.get("observation_status") != "not_observed":
+                unavailable_slots.append(slot)
         return {
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
@@ -1050,11 +1058,18 @@ class BrowserWorkingContextStore:
                 "limit": int(current_phase_state.get("budget") or 0),
             },
             "requirements": {
+                "source": state.get("requirements_source", "explicit"),
                 "requested": required_slots,
                 "missing": missing_slots,
                 "unavailable": unavailable_slots,
                 "evidence": evidence_slots,
             },
+            "observations": [
+                {"source": item.get("source"), "generation_id": item.get("generation_id"),
+                 "raw_text": _bounded_text(item.get("raw_text"), 1_500)}
+                for item in state.get("structured_evidence") or []
+                if isinstance(item, dict) and item.get("kind") == "page_observation"
+            ][-2:],
             "blockers": list(state.get("blockers") or [])[:8],
             "replan_required": bool(state.get("replan_required")),
             "replan_count": int(state.get("replan_count") or 0),
@@ -1080,11 +1095,25 @@ class BrowserWorkingContextStore:
         if not include_value:
             return projected
         projected["status"] = str(slot.get("status") or "present")[:20]
+        if slot.get("observation_status"):
+            projected["observation_status"] = str(slot.get("observation_status"))[:40]
         if slot.get("value") not in (None, ""):
-            projected["value"] = _bounded_text(slot.get("value"), 300)
-        for key, limit in (("source", 300), ("generation", 40), ("selector", 240), ("raw_text", 300)):
+            projected["value"] = (
+                str(slot["value"]) if slot.get("field") in {"url", "source"}
+                else _bounded_text(slot["value"], 300)
+            )
+        for key in ("source", "generation", "selector", "entity_source", "query_id"):
+            if slot.get(key) not in (None, ""):
+                projected[key] = str(slot[key])
+        for key, limit in (("raw_text", 300), ("qualifier", 80), ("date", 80)):
             if slot.get(key) not in (None, ""):
                 projected[key] = _bounded_text(slot.get(key), limit)
+        if slot.get("alternatives"):
+            projected["alternatives"] = [
+                BrowserWorkingContextStore._project_evidence_slot(
+                    {key: value for key, value in item.items() if key != "alternatives"}, include_value=True,
+                ) for item in slot["alternatives"][-3:]
+            ]
         return projected
 
     @staticmethod
@@ -1102,7 +1131,12 @@ class BrowserWorkingContextStore:
             }
             values = record.get("values")
             if isinstance(values, dict):
-                compact["values"] = {str(key): _bounded_text(item, 160) for key, item in list(values.items())[:12]}
+                compact["values"] = {
+                    str(key): (
+                        str(item) if key in {"url", "href", "primary_link", "source"} else _bounded_text(item, 160)
+                    )
+                    for key, item in list(values.items())[:12]
+                }
             cards = record.get("cards")
             if isinstance(cards, list):
                 compact["cards"] = [dict(card) for card in cards[:3] if isinstance(card, dict)]
@@ -1124,6 +1158,8 @@ class BrowserWorkingContextStore:
             return "return_partial_or_blocked"
         if state.get("replan_required"):
             return "replan_before_browser_action"
+        if state.get("next_action_class") == "may_finish":
+            return "may_finish_if_user_goal_met"
         return "continue"
 
     def _sanitize_list(self, values: Iterable[Any]) -> list[str]:

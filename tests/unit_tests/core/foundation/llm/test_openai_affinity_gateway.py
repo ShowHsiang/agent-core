@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -150,6 +151,34 @@ def test_normal_affinity_request_keeps_explicit_max_tokens():
     assert params["max_tokens"] == 512
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["evict_kvc", "offload_kvc", "prefetch_kvc"])
+async def test_session_affinity_action_builds_one_messages_argument(action):
+    client = _affinity_client()
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(return_value=_Obj())
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await getattr(client, action)(
+            session_id="child",
+            parent_session_id="parent",
+            messages=None,
+            tools=None,
+        )
+
+    assert result is True
+    sent = sdk_client.chat.completions.create.call_args.kwargs
+    assert sent["messages"] == []
+    assert sent["extra_body"]["agent_hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+        "context_management": {
+            "edits": [{"type": action.removesuffix("_kvc"), "target": "session"}],
+            "manage_request": True,
+        },
+    }
+
+
 def test_gateway_parser_accepts_token_text_and_reasoning():
     line = json.dumps({
         "choices": [{
@@ -173,6 +202,34 @@ def test_gateway_parser_accepts_data_without_space():
     chunk = _parse_gateway_stream_line(f"data:{payload}")
     assert chunk is not None
     assert chunk.finish_reason == "length"
+
+
+def test_gateway_parser_preserves_streamed_tool_calls():
+    payload = json.dumps({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"file_path":"test.py"}',
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }]
+    })
+
+    chunk = _parse_gateway_stream_line(f"data: {payload}")
+
+    assert chunk is not None
+    assert chunk.finish_reason == "tool_calls"
+    assert chunk.tool_calls is not None
+    assert chunk.tool_calls[0].id == "call-1"
+    assert chunk.tool_calls[0].name == "write_file"
+    assert chunk.tool_calls[0].arguments == '{"file_path":"test.py"}'
 
 
 def test_gateway_parser_surfaces_nested_upstream_error():
@@ -313,6 +370,46 @@ async def test_affinity_stream_rejects_usage_only_response(monkeypatch):
         )),
     )
     with pytest.raises(ValueError, match="raw_samples="):
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_summarizes_html_error_page(monkeypatch):
+    client = _affinity_client()
+    html = (
+        "<!DOCTYPE html><html><head><title>Not Found | opencode</title></head>"
+        "<body><h1>404 - Page Not Found</h1></body></html>"
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=404, body=html.encode("utf-8"))),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]
+
+    message = str(caught.value)
+    assert message.startswith("API returned error 404:")
+    assert "HTTP 404" in message
+    assert "Not Found | opencode" in message
+    assert "<!DOCTYPE" not in message
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_keeps_plain_http_error_body(monkeypatch):
+    client = _affinity_client()
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=400, body=b"model not found")),
+    )
+
+    with pytest.raises(ValueError, match=r"API returned error 400: model not found"):
         _ = [
             chunk
             async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})

@@ -18,7 +18,6 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -165,7 +164,6 @@ class CoordinationKernel:
             # runtime's outputs, so the runtime must be started first.
             if resources.harness is not None:
                 await resources.harness.start(team_session=session)
-                await kv_cache_hooks.register_harness_binding(host, resources.harness)
                 await host.stream_controller.start()
         else:
             sess_mgr.release_session()
@@ -328,9 +326,13 @@ class CoordinationKernel:
         if memory_manager:
             await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
+            paused_teammates = tuple(host.spawn_manager.spawned_handles)
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
             await host.spawn_manager.shutdown_all_handles()
+            team_backend = host.infra.team_backend
+            if team_backend is not None and host.team_name is not None:
+                await team_backend.db.member.reset_paused_member_execution_status(host.team_name, paused_teammates)
             self._persist_team_lifecycle("paused")
             # Make a later cold start (pause -> stop -> start) continue this
             # round rather than idle waiting for a new message.

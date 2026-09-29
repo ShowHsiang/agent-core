@@ -13,16 +13,18 @@ from typing import Any, Protocol
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.extensions.observability.content_addressing import (
+    AddressedSequence,
+    sequence_reference,
+)
 from openjiuwen.extensions.observability.otlp_codec import (
-    encode_span_to_otlp_json,
+    encode_span_with_addressed_sequences,
     snapshot_readable_span,
 )
 from openjiuwen.extensions.observability.semconv import (
-    AT_SESSION_ID,
     AT_TEAM_ID,
     AT_TEAM_NAME,
     GEN_AI_CONVERSATION_ID,
-    LANGFUSE_SESSION_ID,
     OJ_AGENT_MODE,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -31,10 +33,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
-    OJ_TEAM_ID,
-    OJ_TEAM_NAME,
-    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
 
 
@@ -52,23 +52,51 @@ class _LazyOtlpPayload:
     copy taken by ``snapshot_readable_span`` for a still-recording one.
     """
 
-    __slots__ = ("_encoded", "_lock", "_span")
+    __slots__ = ("_encoded", "_lock", "_sequences", "_span")
 
     def __init__(self, span: ReadableSpan) -> None:
         self._span = span
         self._encoded: bytes | None = None
+        self._sequences: tuple[AddressedSequence, ...] = ()
         self._lock = threading.Lock()
+
+    def _encode_once(self) -> bytes:
+        """Encode the span on first access and return its OTLP JSON bytes."""
+        if self._encoded is not None:
+            return self._encoded
+        with self._lock:
+            if self._encoded is None:
+                encoded, sequences = encode_span_with_addressed_sequences(self._span)
+                self._sequences = sequences
+                self._encoded = encoded
+        return self._encoded
 
     @property
     def raw_json(self) -> bytes:
-        """Return the OTLP JSON bytes, encoding them once on first access."""
-        encoded = self._encoded
-        if encoded is not None:
-            return encoded
-        with self._lock:
-            if self._encoded is None:
-                self._encoded = encode_span_to_otlp_json(self._span)
-            return self._encoded
+        """Return the OTLP JSON bytes, encoding them once on first access.
+
+        The restated GenAI attributes carry references rather than their own
+        content; :attr:`sequences` states what they refer to.
+        """
+        return self._encode_once()
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the sequences this payload references, encoding if needed."""
+        self._encode_once()
+        return self._sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return what the payload measures once its references are rebuilt.
+
+        A reader is budgeted by what it receives, and it receives the rebuilt
+        span. Measuring the reference-carrying bytes instead would let a page
+        promise four megabytes and deliver far more.
+        """
+        encoded = self._encode_once()
+        referenced = sum(len(sequence_reference(s.seq_hash, s.depth)) for s in self._sequences)
+        return len(encoded) - referenced + sum(s.logical_bytes for s in self._sequences)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +115,7 @@ class OtlpSpanRecord:
     request_id: str | None
     run_id: str | None
     agent_mode: str | None
-    schema_version: str = "1"
+    schema_version: str = TRAJECTORY_SPAN_SCHEMA_VERSION
     record_revision: int = 1
     observed_time_unix_nano: int = 0
     lifecycle: str = "final"
@@ -99,8 +127,18 @@ class OtlpSpanRecord:
 
     @property
     def raw_json(self) -> bytes:
-        """Return the complete single-span OTLP request bytes."""
+        """Return the single-span OTLP request bytes, carrying references."""
         return self.payload.raw_json
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the content-addressed sequences this record references."""
+        return self.payload.sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return the size of this record once its references are rebuilt."""
+        return self.payload.logical_size_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +159,7 @@ class OtlpSpanSnapshotRecord:
     request_id: str | None
     run_id: str | None
     agent_mode: str | None
-    schema_version: str = "1"
+    schema_version: str = TRAJECTORY_SPAN_SCHEMA_VERSION
     lifecycle: str = "running"
     execution_subject_id: str | None = None
     execution_subject_display_name: str | None = None
@@ -131,8 +169,75 @@ class OtlpSpanSnapshotRecord:
 
     @property
     def raw_json(self) -> bytes:
-        """Return the OTLP-shaped bytes of this recording-span snapshot."""
+        """Return the OTLP-shaped bytes, carrying sequence references."""
         return self.payload.raw_json
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the content-addressed sequences this snapshot references."""
+        return self.payload.sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return the size of this snapshot once its references are rebuilt."""
+        return self.payload.logical_size_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class StreamFrameRecord:
+    """One model-stream frame delivered outside the span-snapshot path.
+
+    A streaming answer produces hundreds of these. Carrying them as span
+    events made every frame cost a full span snapshot, and capped what
+    survived at the SDK's per-span event limit -- which evicts the *oldest*
+    events, so the beginning of a long answer was silently lost. Frames
+    travel on their own channel instead, and the span keeps only the phase
+    markers that stay bounded in number.
+
+    Field names follow the OpenTelemetry ``LogRecord`` shape so this
+    transport can be replaced by the logs pipeline, once that API leaves
+    experimental status, without changing what a frame means.
+
+    Attributes:
+        event_name: Frame event name, e.g. ``openjiuwen.stream.chunk``.
+        timestamp_unix_nano: Wall-clock epoch of the frame itself.
+        observed_timestamp_unix_nano: Wall-clock epoch this record was built.
+        trace_id: Owning span's trace id, lowercase hex.
+        span_id: Owning span's id, lowercase hex.
+        sequence: Per-span frame counter, so a reader can detect a gap.
+        kind: One of ``text-delta`` / ``reasoning-delta`` /
+            ``tool-call-delta`` / ``usage``.
+        session_id: Conversation this frame belongs to.
+        execution_subject_id: Execution subject owning the chain.
+        execution_subject_session_id: Session the subject was created under.
+        text: Text or reasoning increment, when the kind carries one.
+        tool_call_id: Tool call this frame contributes to, when any.
+        tool_name: Tool name, when the frame names one.
+        arguments_delta: Tool-argument increment, when the frame carries one.
+        request_id: Request correlation id.
+        run_id: Run correlation id.
+        agent_mode: Agent mode of the owning span.
+        schema_version: Frame schema version.
+    """
+
+    event_name: str
+    timestamp_unix_nano: int
+    observed_timestamp_unix_nano: int
+    trace_id: str
+    span_id: str
+    sequence: int
+    kind: str
+    session_id: str | None
+    execution_subject_id: str | None
+    execution_subject_session_id: str | None
+    text: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    arguments_delta: str | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    agent_mode: str | None = None
+    schema_version: str = "1"
 
 
 class OtlpSpanRecordConsumer(Protocol):
@@ -147,6 +252,13 @@ class OtlpSpanSnapshotConsumer(Protocol):
 
     def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
         """Accept one recording-span snapshot without blocking."""
+
+
+class StreamFrameConsumer(Protocol):
+    """Optional model-stream frame capability of an ended-span consumer."""
+
+    def consume_stream_frame(self, record: StreamFrameRecord) -> None:
+        """Accept one model-stream frame without blocking."""
 
 
 @dataclass(slots=True)
@@ -165,6 +277,13 @@ def _accepts_snapshots(registration: _ConsumerRegistration) -> bool:
     if not registration.accepting:
         return False
     return callable(getattr(registration.consumer, "consume_snapshot", None))
+
+
+def _accepts_stream_frames(registration: _ConsumerRegistration) -> bool:
+    """Report whether a live registration can take model-stream frames."""
+    if not registration.accepting:
+        return False
+    return callable(getattr(registration.consumer, "consume_stream_frame", None))
 
 
 def _attribute_text(attributes: Any, *keys: str) -> str | None:
@@ -186,7 +305,7 @@ def _agent_mode(attributes: Any) -> str | None:
     explicit = _attribute_text(attributes, OJ_AGENT_MODE)
     if explicit is not None:
         return explicit
-    if _attribute_text(attributes, OJ_TEAM_ID, OJ_TEAM_NAME, AT_TEAM_ID, AT_TEAM_NAME) is not None:
+    if _attribute_text(attributes, AT_TEAM_ID, AT_TEAM_NAME) is not None:
         return "team"
     return None
 
@@ -323,6 +442,40 @@ class SpanRecordProcessor(SpanProcessor):
 
         self._deliver_snapshot(registrations, record)
 
+    def publish_stream_frame(self, record: StreamFrameRecord) -> None:
+        """Fan one model-stream frame out to every frame-capable consumer.
+
+        A frame is additive, not a snapshot: nothing downstream may coalesce
+        one away, because a dropped frame is an increment lost for good. That
+        stays affordable only because a frame carries just its own increment
+        rather than the whole span.
+        """
+        registrations = self._acquire_stream_frame_leases()
+        if not registrations:
+            return
+        for index, registration in enumerate(registrations):
+            previous_registration = getattr(
+                self._callback_local,
+                "current_registration",
+                None,
+            )
+            self._callback_local.current_registration = registration
+            try:
+                registration.consumer.consume_stream_frame(record)
+            except Exception as exc:
+                logger.warning(
+                    "span_record_processor: stream frame consumer {} failed - {}",
+                    type(registration.consumer).__name__,
+                    exc,
+                )
+            except BaseException:
+                for pending_registration in registrations[index + 1:]:
+                    self._release_lease(pending_registration)
+                raise
+            finally:
+                self._callback_local.current_registration = previous_registration
+                self._release_lease(registration)
+
     def on_end(self, span: ReadableSpan) -> None:
         """Deliver one immutable record without affecting the business path."""
         registrations = self._acquire_leases()
@@ -447,6 +600,21 @@ class SpanRecordProcessor(SpanProcessor):
                 )
             return registrations
 
+    def _acquire_stream_frame_leases(self) -> tuple[_ConsumerRegistration, ...]:
+        thread_id = threading.get_ident()
+        with self._lock:
+            registrations = tuple(
+                registration
+                for registration in self._registrations
+                if _accepts_stream_frames(registration)
+            )
+            for registration in registrations:
+                registration.in_flight += 1
+                registration.lease_threads[thread_id] = (
+                    registration.lease_threads.get(thread_id, 0) + 1
+                )
+            return registrations
+
     def _next_revision(self, identity: tuple[str, str]) -> int:
         with self._lock:
             revision = self._span_revisions.get(identity, 0) + 1
@@ -503,17 +671,11 @@ class SpanRecordProcessor(SpanProcessor):
             parent_span_id=parent_span_id,
             start_time_unix_nano=int(start_time),
             end_time_unix_nano=int(end_time),
-            session_id=_attribute_text(
-                attributes,
-                GEN_AI_CONVERSATION_ID,
-                OJ_SESSION_ID,
-                LANGFUSE_SESSION_ID,
-                AT_SESSION_ID,
-            ),
+            session_id=_attribute_text(attributes, GEN_AI_CONVERSATION_ID),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),
-            schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            schema_version=_attribute_text(attributes, OJ_TRAJECTORY_SCHEMA_VERSION) or TRAJECTORY_SPAN_SCHEMA_VERSION,
             record_revision=record_revision,
             observed_time_unix_nano=time.time_ns(),
             execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
@@ -558,17 +720,11 @@ class SpanRecordProcessor(SpanProcessor):
             observed_time_unix_nano=time.time_ns(),
             record_revision=record_revision,
             update_kind=str(update_kind),
-            session_id=_attribute_text(
-                attributes,
-                GEN_AI_CONVERSATION_ID,
-                OJ_SESSION_ID,
-                LANGFUSE_SESSION_ID,
-                AT_SESSION_ID,
-            ),
+            session_id=_attribute_text(attributes, GEN_AI_CONVERSATION_ID),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),
-            schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            schema_version=_attribute_text(attributes, OJ_TRAJECTORY_SCHEMA_VERSION) or TRAJECTORY_SPAN_SCHEMA_VERSION,
             execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
             execution_subject_display_name=_attribute_text(
                 attributes,

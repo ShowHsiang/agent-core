@@ -14,11 +14,14 @@ import contextlib
 import errno
 import hashlib
 import json
+import logging
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,17 +36,28 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
     retry_reason_from_http_status,
+    root_provider_error,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
 _MAX_PAGES = 100
 _CLI_TIMEOUT_SECONDS = 30.0
 _CLI_OUTPUT_BYTES = 4 * 1024 * 1024
+_CONFIG_INIT_URL_TIMEOUT_SECONDS = 60.0
+_CONFIG_INIT_URL_RE = re.compile(r"https://[^\s\"'<>]+")
+_CONFIG_INIT_URL_HOSTS = ("feishu.cn", "larksuite.com")
+_NOT_CONFIGURED_SUBTYPE = "not_configured"
+_LARK_CLI_INSTALL_SPEC = "@larksuite/cli@1.0.94"
+_LARK_CLI_INSTALL_TIMEOUT = 300.0
+_LARK_CLI_INSTALL_COOLDOWN = 300.0
 _MAX_CONTENT_CHARS = 2_000_000
 _MAX_RAW_BYTES = 2 * 1024 * 1024
 _MAX_WIKI_PATH_PARTS = 100
@@ -183,6 +197,16 @@ def _cli_error_message(stdout: str, stderr: str) -> str:
     return _safe_cli_output(stdout or stderr or "lark-cli command failed")
 
 
+def _cli_error_subtype(payload: object) -> str | None:
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            subtype = error.get("subtype")
+            if isinstance(subtype, str) and subtype.strip():
+                return subtype.strip()
+    return None
+
+
 def _decoded_process_output(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
@@ -269,12 +293,81 @@ def _coerce_lark_cli_error(exc: Exception) -> BaseError:
     return _fetch_error("lark-cli read failed", exc)
 
 
+_lark_cli_install_guard = threading.Lock()
+_lark_cli_install_attempted = False
+_lark_cli_install_last_error = ""
+_lark_cli_install_last_attempt = 0.0
+
+
+async def _ensure_lark_cli_installed() -> None:
+    """Install the pinned ``lark-cli`` binary via npm when it is missing from PATH.
+
+    The install is attempted at most once per process and is gated by a cooldown so a
+    transient npm failure does not re-trigger a global install on every fetch interval.
+    """
+
+    global _lark_cli_install_attempted, _lark_cli_install_last_error, _lark_cli_install_last_attempt
+    with _lark_cli_install_guard:
+        if _lark_cli_install_attempted:
+            if time.monotonic() - _lark_cli_install_last_attempt >= _LARK_CLI_INSTALL_COOLDOWN:
+                _lark_cli_install_attempted = False
+            else:
+                if _lark_cli_install_last_error:
+                    raise _fetch_error(
+                        f"lark-cli is not installed; automatic install failed: {_lark_cli_install_last_error}"
+                    )
+                return
+        _lark_cli_install_attempted = True
+        _lark_cli_install_last_attempt = time.monotonic()
+        _lark_cli_install_last_error = ""
+
+    if shutil.which("lark-cli") is not None:
+        return
+    npm_binary = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm_binary is None:
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = "npm is not installed in the deployment environment"
+        raise _fetch_error("npm is not installed; cannot auto-install lark-cli")
+    kwargs: dict[str, object] = {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(npm_binary, "install", "-g", _LARK_CLI_INSTALL_SPEC, **kwargs)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=_LARK_CLI_INSTALL_TIMEOUT)
+    except asyncio.CancelledError:
+        if process is not None:
+            with contextlib.suppress(Exception):
+                process.kill()
+        raise
+    except asyncio.TimeoutError as exc:
+        if process is not None:
+            with contextlib.suppress(Exception):
+                process.kill()
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = "npm install timed out"
+        raise _fetch_error("lark-cli auto-install timed out") from exc
+    if process is None or process.returncode != 0:
+        stdout_text = bytes(stdout or b"").decode("utf-8", errors="replace")
+        stderr_text = bytes(stderr or b"").decode("utf-8", errors="replace")
+        detail = _safe_cli_output(stderr_text or stdout_text or "npm install failed")
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = detail
+        raise _fetch_error(f"lark-cli auto-install failed: {detail}")
+
+
 async def _run_lark_cli_once(
     argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS, cwd: Path | None = None
 ) -> tuple[str, str]:
     binary = shutil.which("lark-cli")
     if binary is None:
-        raise FileNotFoundError("lark-cli is not installed in the deployment environment")
+        await _ensure_lark_cli_installed()
+        binary = shutil.which("lark-cli")
+        if binary is None:
+            raise FileNotFoundError("lark-cli is not installed in the deployment environment")
     kwargs: dict[str, object] = {
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
@@ -419,10 +512,27 @@ def supported_read_scopes() -> tuple[str, ...]:
     return _SUPPORTED_FEISHU_READ_SCOPES
 
 
-async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool, set[str]]:
-    payload = await _run_lark_cli_json(["auth", "status", "--json", "--verify"])
+async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+    """Probe the CLI identity; the third element is ``False`` when lark-cli needs ``config init``."""
+
+    try:
+        payload = await _run_lark_cli_json(["auth", "status", "--json", "--verify"])
+    except BaseError as exc:
+        # 非零退出时，cli 的结构化错误 JSON 由 _coerce_lark_cli_error 收敛为文案，
+        # 原始输出留在 cause（CalledProcessError）里，从中恢复 subtype 做识别。
+        cause = exc.cause
+        if isinstance(cause, subprocess.CalledProcessError):
+            raw = _decoded_process_output(cause.output) or _decoded_process_output(cause.stderr)
+            with contextlib.suppress(BaseError):
+                if _cli_error_subtype(_parse_cli_json(raw)) == _NOT_CONFIGURED_SUBTYPE:
+                    return False, set(), False
+        raise
+    if isinstance(payload, Mapping) and payload.get("ok") is False:
+        if _cli_error_subtype(payload) == _NOT_CONFIGURED_SUBTYPE:
+            return False, set(), False
+        raise _fetch_error(f"lark-cli auth status failed: {_cli_error_message(json.dumps(payload), '')}")
     ready, granted = _user_auth_status(payload)
-    return ready and set(required_scopes).issubset(granted), granted
+    return ready and set(required_scopes).issubset(granted), granted, True
 
 
 async def _lark_cli_begin_authorization(required_scopes: tuple[str, ...]) -> tuple[str, str, str]:
@@ -453,6 +563,89 @@ async def _lark_cli_begin_authorization(required_scopes: tuple[str, ...]) -> tup
 
 async def _lark_cli_finish_authorization(device_code: str, *, timeout_seconds: float) -> None:
     await _run_lark_cli(["auth", "login", "--device-code", device_code], timeout_seconds=timeout_seconds)
+
+
+def _extract_config_init_url(text: str) -> str | None:
+    """Pick the feishu/lark verification URL out of free-form ``config init`` output."""
+
+    for match in _CONFIG_INIT_URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,);]")
+        host = (urlsplit(url).hostname or "").lower()
+        if any(host == item or host.endswith(f".{item}") for item in _CONFIG_INIT_URL_HOSTS):
+            return url
+    return None
+
+
+async def _read_config_init_url(process: asyncio.subprocess.Process) -> str:
+    """Read the merged init output until the verification URL shows up."""
+
+    if process.stdout is None:
+        raise _fetch_error("lark-cli config init output is unavailable")
+    buffer = ""
+    while True:
+        try:
+            chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=_CONFIG_INIT_URL_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise _fetch_error("lark-cli config init did not provide a verification URL in time") from exc
+        if not chunk:
+            detail = _cli_error_message(buffer, "") if buffer.strip() else ""
+            raise _fetch_error(detail or "lark-cli config init exited without a verification URL")
+        buffer += chunk.decode("utf-8", errors="replace")
+        if len(buffer) > _CLI_OUTPUT_BYTES:
+            tail_bytes = _CLI_OUTPUT_BYTES // 2
+            buffer = buffer[-tail_bytes:]
+        url = _extract_config_init_url(buffer)
+        if url is not None:
+            return url
+
+
+async def _lark_cli_begin_config_init() -> tuple[asyncio.subprocess.Process, str]:
+    """Spawn ``lark-cli config init --new`` and capture its verification URL.
+
+    The init flow provisions the CLI's own app configuration through a browser
+    handshake: the process prints a verification URL (JSON or plain text, on
+    either stream) and then blocks until the user completes the setup.
+    """
+
+    binary = shutil.which("lark-cli")
+    if binary is None:
+        await _ensure_lark_cli_installed()
+        binary = shutil.which("lark-cli")
+        if binary is None:
+            raise FileNotFoundError("lark-cli is not installed in the deployment environment")
+    kwargs: dict[str, object] = {
+        "stdout": asyncio.subprocess.PIPE,
+        # init 的错误 JSON 走 stderr、URL 走 stdout 都有可能，合并成单流读取。
+        "stderr": asyncio.subprocess.STDOUT,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = await asyncio.create_subprocess_exec(binary, "config", "init", "--new", **kwargs)
+    try:
+        url = await _read_config_init_url(process)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise
+    return process, url
+
+
+async def _lark_cli_finish_config_init(process: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
+    """Wait for the user-driven ``config init`` handshake to settle."""
+
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise
+    except asyncio.TimeoutError as exc:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise _fetch_error("lark-cli config init timed out") from exc
+    if process.returncode != 0:
+        detail = _cli_error_message(_decoded_process_output(stdout), "")
+        raise _fetch_error(f"lark-cli config init failed: {detail}")
 
 
 def _find_nested_text(value: object, key: str) -> str | None:
@@ -491,7 +684,7 @@ def _find_nested_number(value: object, key: str) -> float | None:
 
 async def _ensure_lark_cli_authorized(config: object) -> None:
     required = _required_scopes_for_service(config)
-    ready, granted = await _lark_cli_auth_status(required)
+    ready, granted, _configured = await _lark_cli_auth_status(required)
     if not ready:
         if not granted:
             raise _fetch_error("Feishu lark-cli user authorization is required; call authorize_provider")
@@ -575,6 +768,20 @@ def _revision(item: Mapping[str, object], content: str | None = None) -> str:
 
 def _title(item: Mapping[str, object], fallback: str) -> str:
     return _string(item, "title", "name", "summary", "subject", "title_highlighted") or fallback
+
+
+def _search_hit_title(value: Mapping[str, object]) -> str | None:
+    """Read the title of a document search hit.
+
+    A hit carries its title only in ``title_highlighted``; the ``title`` key does not exist
+    on it. When the search ran with a ``query`` the value wraps the matched terms in markup,
+    which must not leak into the item title.
+    """
+
+    title = _string(value, "title_highlighted", "title", "name")
+    if title is None:
+        return None
+    return re.sub(r"</?[A-Za-z][^>]*>", "", title).strip() or None
 
 
 def _original_ref(item: Mapping[str, object], fallback: str) -> str:
@@ -727,8 +934,17 @@ def _candidate(
 ) -> dict[str, object] | None:
     candidate_time = _resource_time(metadata, resource)
     if candidate_time is None:
+        # A single time-less entry must not abort the whole run: dropping one resource
+        # is better than losing the batch. The warning keeps the skip visible instead
+        # of a silent empty run. Unfiltered runs keep an explicit "unknown, assume
+        # oldest" marker.
         if time_range.get("mode") != "all":
-            raise _fetch_error(f"Feishu {resource} candidate has no usable time")
+            _LOGGER.warning(
+                "Feishu %s candidate %s has no usable time; skipping it",
+                resource,
+                stable_id,
+            )
+            return None
         candidate_time = _EPOCH
     if not candidate_in_time_range(candidate_time, time_range, run_started_at):
         return None
@@ -851,6 +1067,65 @@ async def _download_wiki_file(argv: list[str], *, sandbox_root: Path) -> tuple[s
         raise _coerce_lark_cli_error(exc) from None
 
 
+def _validated_candidate_item_ref(candidate: Mapping[str, object]) -> str:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("Feishu candidate is invalid")
+    item_ref = str(candidate["stable_id"])
+    if len(item_ref) > 256:
+        raise _fetch_error("Feishu candidate stable ID is too long")
+    kind = candidate.get("kind")
+    if kind == "doc":
+        if not isinstance(candidate.get("document_id"), str) or not isinstance(candidate.get("metadata"), Mapping):
+            raise _fetch_error("Feishu document candidate is invalid")
+    elif kind in {"task", "calendar"}:
+        if not isinstance(candidate.get("identifier"), str) or not isinstance(candidate.get("payload"), Mapping):
+            raise _fetch_error("Feishu list candidate is invalid")
+    elif kind == "wiki":
+        if not isinstance(candidate.get("node"), Mapping):
+            raise _fetch_error("Feishu Wiki candidate is invalid")
+    else:
+        raise _fetch_error("Feishu candidate kind is invalid")
+    return item_ref
+
+
+def _cli_status_codes(value: object) -> set[int]:
+    statuses: set[int] = set()
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if key in {"status", "status_code"}:
+                if isinstance(nested, int) and not isinstance(nested, bool):
+                    statuses.add(nested)
+                elif isinstance(nested, str) and nested.strip().isdigit():
+                    statuses.add(int(nested.strip()))
+            statuses.update(_cli_status_codes(nested))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            statuses.update(_cli_status_codes(nested))
+    return statuses
+
+
+def _is_feishu_candidate_read_error(exc: BaseException) -> bool:
+    if is_candidate_read_error(exc):
+        return True
+    root = root_provider_error(exc)
+    if not isinstance(root, subprocess.CalledProcessError):
+        return False
+    statuses: set[int] = set()
+    for raw_output in (root.output, root.stderr):
+        text = _decoded_process_output(raw_output).strip()
+        if not text:
+            continue
+        try:
+            statuses.update(_cli_status_codes(json.loads(text)))
+        except json.JSONDecodeError:
+            continue
+    if statuses & {401, 403}:
+        return False
+    return bool(statuses & {404, 408, 410, 429} or any(500 <= status <= 599 for status in statuses))
+
+
 class FeishuFetchService(ContextFetchService):
     """Fetch Feishu docs, tasks, calendar events or Wiki nodes."""
 
@@ -860,6 +1135,7 @@ class FeishuFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -875,6 +1151,7 @@ class FeishuFetchService(ContextFetchService):
                 tuple(candidates),
                 cursor,
                 self._config.max_items_per_run or _DEFAULT_MAX_ITEMS,
+                retry_quarantined=include_failed,
             )
         except asyncio.CancelledError:
             raise
@@ -898,10 +1175,33 @@ class FeishuFetchService(ContextFetchService):
                 return
             for index in range(0, len(candidates), _BATCH_SIZE):
                 end = index + _BATCH_SIZE
-                items = [await self._read_candidate(candidate) for candidate in candidates[index:end]]
+                chunk = candidates[index:end]
+                items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
+                for offset, candidate in enumerate(chunk):
+                    item_ref = _validated_candidate_item_ref(candidate)
+                    try:
+                        items.append(await self._read_candidate(candidate))
+                    except BaseError as exc:
+                        if not _is_feishu_candidate_read_error(exc):
+                            raise
+                        failures.append(
+                            {
+                                "offset": offset,
+                                "item_ref": item_ref,
+                                "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                "message": "条目读取或解析失败",
+                            }
+                        )
+                        continue
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
                     items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                 )
         except asyncio.CancelledError:
@@ -996,20 +1296,32 @@ class FeishuFetchService(ContextFetchService):
                 args.extend(["--query", query])
             found = []
             for value in await _paged_lark_cli(args, name="document search"):
+                # A search hit only carries the highlighted title/summary at the top level;
+                # ``token``, ``url`` and the timestamps live in ``result_meta``. Reading the
+                # hit itself yields no usable time and falls back to a hashed identity.
+                raw_metadata = value.get("result_meta")
+                metadata = raw_metadata if isinstance(raw_metadata, Mapping) else value
+                # The document endpoint rejects everything but docx ("Unsupported document
+                # type 'file'. Only docx is supported."), so drop the other entity types at
+                # discovery instead of failing the whole run when they are read.
+                doc_type = _string(metadata, "doc_types")
+                if doc_type is not None and doc_type.casefold() != "docx":
+                    continue
                 content = value.get("content") or value.get("summary") or value.get("description")
                 found.append(
                     {
                         "document_id": _stable_identifier(
-                            value,
+                            metadata,
                             "document_id",
                             "doc_id",
                             "token",
                             "id",
                             fallback="doc",
                         ),
-                        "metadata": value,
+                        "metadata": dict(metadata),
                         "payload": value if content is not None else None,
                         "content": content,
+                        "title": _search_hit_title(value),
                     }
                 )
         result: list[dict[str, object]] = []
@@ -1038,6 +1350,7 @@ class FeishuFetchService(ContextFetchService):
                     "metadata": dict(discovered_metadata),
                     "payload": discovered.get("payload"),
                     "content": content,
+                    "title": discovered.get("title"),
                     "query": source.get("query"),
                 },
             )
@@ -1107,11 +1420,14 @@ class FeishuFetchService(ContextFetchService):
                 )
                 fetched_metadata, content = _content_from_payload(payload)
                 metadata = fetched_metadata
+            # A search hit's own title is the only place its name survives: the document
+            # fetch replaces ``metadata`` with the fetched body, which carries no title.
+            title = str(candidate.get("title") or "").strip() or _title(metadata, f"Feishu doc {document_id}")
             return _make_upsert(
                 logical_id=logical_id,
                 resource="docs",
                 payload=payload,
-                title=_title(metadata, f"Feishu doc {document_id}"),
+                title=title,
                 content=content,
                 original_ref=locator,
                 revision_id=revision_id,

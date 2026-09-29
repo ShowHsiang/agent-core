@@ -129,7 +129,7 @@ class _SpawnToolBase(TeamTool, ABC):
             error=None if result.ok else result.reason,
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to spawn member"
         d = output.data
@@ -374,7 +374,7 @@ class CheckpointTool(TeamTool):
             data={"name": name, "message_count": count},
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to save checkpoint"
         d = output.data
@@ -411,7 +411,7 @@ class ListCheckpointsTool(TeamTool):
             data={"checkpoints": items, "count": len(items)},
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to list checkpoints"
         checkpoints = output.data["checkpoints"]
@@ -480,6 +480,63 @@ class SpawnHumanAgentTool(_SpawnToolBase):
             member_name=member_name,
             display_name=display_name,
             role_type="human_agent",
+        )
+
+
+class SpawnPassiveHumanTool(_SpawnToolBase):
+    """Spawn a passive human member (``role_type='passive_human'``).
+
+    A passive human has no avatar — no harness, no LLM, no prompt — just
+    a READY roster identity plus a message-bus address. The controlling
+    human speaks through the interact channel (messages and tool-call
+    passthrough), so the member can be assigned tasks like any human
+    collaborator. Schema omits ``model_name`` / ``prompt`` for the same
+    reason as ``SpawnHumanAgentTool``; the HITT check below is a
+    defensive backstop (the tool is not wired when HITT is disabled).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_passive_human")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_passive_human", "desc")},
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        if not self.team.hitt_enabled():
+            return self._fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team). "
+                "Enable HITT in the team spec or use spawn_teammate instead."
+            )
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_passive_human(
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc", ""),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="passive_human",
         )
 
 
@@ -830,7 +887,7 @@ class ShutdownMemberTool(TeamTool):
             error=None if result.ok else result.reason,
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to shutdown member"
         return f"Member shutdown: member_name={output.data['member_name']}"
@@ -878,7 +935,7 @@ class ApprovePlanTool(TeamTool):
             error=None if success else "Failed to approve/reject plan",
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to approve/reject plan"
         d = output.data
@@ -930,7 +987,7 @@ class ApproveToolCallTool(TeamTool):
             error=None if success else "Failed to approve/reject tool call",
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to approve/reject tool call"
         d = output.data
@@ -960,7 +1017,7 @@ class ListMembersTool(TeamTool):
             success=True, data={"members": [member.model_dump() for member in members], "count": len(members)}
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to list members"
         members = output.data["members"]

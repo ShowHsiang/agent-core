@@ -25,10 +25,11 @@ class ContextFetchService(ABC):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         """Return the complete in-memory candidate list for one run."""
 
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         return ()
 
     @abstractmethod
@@ -39,7 +40,12 @@ class ContextFetchService(ABC):
         cursor: dict[str, object] | None,
         candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
-        """Read and yield batches only for the prepared candidates."""
+        """Yield complete batches in prepared-candidate order.
+
+        Every non-empty batch must consume the next contiguous candidate
+        prefix.  Core uses that boundary to retain completed batches and
+        advance only their matching cursor when an active run is stopped.
+        """
 
         del run_id, cursor, candidates
         if False:

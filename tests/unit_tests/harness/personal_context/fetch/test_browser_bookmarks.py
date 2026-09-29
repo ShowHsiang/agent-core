@@ -156,6 +156,29 @@ def test_browser_bookmarks_reads_edge_json_and_filters_folders(tmp_path: Path):
     assert items[0].metadata["folder_path"] == "收藏夹栏/AI"
 
 
+def test_browser_bookmarks_accepts_short_name_for_favorites_bar(tmp_path: Path):
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "Example", "https://example.com/")])
+    service = BrowserBookmarksFetchService(
+        _config(path, folders=["收藏栏"]),
+        home=tmp_path / "home",
+    )
+
+    assert [item.title for item in _items(asyncio.run(_batches(service)))] == ["Example"]
+
+
+@pytest.mark.parametrize("separator", [",", "，"])
+def test_browser_bookmarks_reads_existing_comma_separated_folder_config(tmp_path: Path, separator: str):
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "Example", "https://example.com/")])
+    service = BrowserBookmarksFetchService(
+        _config(path, folders=[f"收藏栏{separator}收藏栏"]),
+        home=tmp_path / "home",
+    )
+
+    assert [item.title for item in _items(asyncio.run(_batches(service)))] == ["Example"]
+
+
 def test_browser_bookmarks_retries_transient_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "Bookmarks"
     _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])
@@ -414,10 +437,68 @@ def test_browser_bookmarks_page_fetch_failure_is_warning_upsert(tmp_path: Path, 
         home=tmp_path / "home",
     )
 
-    item = _items(asyncio.run(_batches(service)))[0]
+    batches = asyncio.run(_batches(service))
+    item = _items(batches)[0]
     assert item.operation == "upsert"
     assert item.metadata["page_fetch_status"] == "warning"
     assert item.metadata["page_fetch_error"] == "timeout"
+    assert batches[0].success_offsets == (0,)
+    assert batches[0].failures == ()
+
+
+def test_browser_bookmarks_isolates_item_construction_failure_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(
+        path,
+        [
+            _bookmark("1", "Broken", "https://example.com/broken", date_added="13200000000000002"),
+            _bookmark("2", "Good", "https://example.com/good", date_added="13200000000000001"),
+        ],
+    )
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+    candidates = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    original = browser_bookmarks._bookmark_item
+
+    def build_item(bookmark, *, profile, page):
+        if bookmark["title"] == "Broken":
+            raise ValueError("secret item payload")
+        return original(bookmark, profile=profile, page=page)
+
+    monkeypatch.setattr(browser_bookmarks, "_bookmark_item", build_item)
+
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.title for item in batch.items] == ["Good"]
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": candidates[0]["stable_id"],
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+def test_browser_bookmarks_rejects_corrupt_candidate_instead_of_quarantining(tmp_path: Path) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+
+    with pytest.raises(BaseError):
+        asyncio.run(
+            service.fetch(
+                run_id="run-1",
+                cursor=None,
+                candidates=({"stable_id": "broken"},),
+            ).__anext__()
+        )
 
 
 def test_browser_bookmarks_unsafe_url_is_not_fetched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -850,3 +931,35 @@ def test_browser_bookmarks_new_overflow_stays_ahead_of_history(tmp_path: Path):
         ["new-6", "new-5"],
         ["new-4", "base-1"],
     ]
+
+
+def test_browser_bookmarks_bookmark_without_date_added_is_skipped_not_fatal(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "BrokenDateBookmarks"
+    run_started_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    _write_bookmarks(
+        path,
+        [
+            _bookmark("broken", "broken", "https://example.com/broken", date_added=""),
+            _bookmark("kept", "kept", "https://example.com/kept", date_added=_edge_timestamp(run_started_at)),
+        ],
+    )
+    filtered = BrowserBookmarksFetchService(
+        _config(path, time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path / "filtered-home",
+    )
+
+    with caplog.at_level("WARNING", logger=browser_bookmarks.__name__):
+        filtered_batches = asyncio.run(_batches(filtered, run_started_at=run_started_at))
+
+    assert [item.title for item in _items(filtered_batches)] == ["kept"]
+    assert "broken" in caplog.text
+
+    unfiltered = BrowserBookmarksFetchService(_config(path), home=tmp_path / "unfiltered-home")
+    candidates = asyncio.run(unfiltered.prepare_run(run_id="run-1", run_started_at=run_started_at, cursor=None))
+    assert {candidate["locator"]: candidate["candidate_time"] for candidate in candidates} == {
+        "https://example.com/kept": run_started_at.isoformat().replace("+00:00", "Z"),
+        "https://example.com/broken": "1970-01-01T00:00:00Z",
+    }

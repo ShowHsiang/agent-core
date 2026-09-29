@@ -107,11 +107,23 @@ class TeamRole(str, Enum):
     aliasing it onto the plain ``TEAMMATE`` label. Role-driven dispatch
     (CLI-vs-DeepAgent) is gated on the ``cli_agent`` registry, not on this
     role value.
+
+    ``PASSIVE_HUMAN`` is a human member with **no avatar at all** — no
+    harness, no LLM, no coordination loop. It exists as a roster identity
+    plus a message-bus address: team-side messages and task assignments
+    are relayed straight to the controlling human through the SDK's HITT
+    inbound callback, and the human acts back through the interact channel
+    — natural-language messages via the ``$name`` grammar, and structured
+    tool calls via the ``HumanAgentToolCall`` passthrough payload, which
+    the runtime executes under this member's identity. It may hold and
+    complete tasks; it is never a coordinated member (no startup /
+    restart / recovery path may spawn a runtime for it).
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    PASSIVE_HUMAN = "passive_human"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
     EXTERNAL_CLI = "external_cli"
@@ -204,6 +216,7 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
+        TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
 
 
@@ -285,6 +298,14 @@ class ExternalCliAgentSpec(BaseModel):
     This is passed to ``spawn_member(cli_agent=...)``. See
     ``agent_teams/external/cli_agent``."""
 
+    skills: list[str | dict[str, Any]] = Field(default_factory=list)
+    """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
+    skill_conflict: Literal["skip", "replace"] = "skip"
+    """Keep or replace project skills with the same name."""
+
+    system_prompt_mode: Literal["append", "replace"] | None = None
+    """Prompt policy for Claude/Codex; None keeps each provider's default."""
+
     command: Optional[list[str]] = None
     """Full launch argv overriding an adapter backend's built-in command.
 
@@ -362,6 +383,19 @@ class ExternalCliAgentSpec(BaseModel):
     of hanging forever.
     """
 
+    claude_max_buffer_size: int | None = Field(default=None, ge=1)
+    """Optional per-line stdout buffer ceiling (bytes) for the Claude SDK
+    transport; ``None`` keeps the harness default (32 MiB).
+
+    The SDK reads NDJSON (one message per line) and rejects any single line
+    beyond this bound with a decode error, killing the turn. Tool results
+    that embed large payloads (a base64 image read via the CLI Read tool is
+    roughly 4/3 of the file size) blow past the SDK's 1 MiB default, which is
+    why the effective default is raised far above it. The buffer is a
+    transient per-line string, so the memory cost only appears while a large
+    message is in flight.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -417,6 +451,8 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
         if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
             raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
+        if self.cli_agent != "claude" and self.claude_max_buffer_size is not None:
+            raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
