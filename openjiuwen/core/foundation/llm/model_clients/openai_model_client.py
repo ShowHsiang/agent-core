@@ -4,32 +4,35 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import httpx
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ModelError, build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
-    AudioGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import (
-    BaseMessage,
-    AssistantMessage,
-    UsageMetadata,
-    UserMessage
-)
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import (
+    BaseModelClient,
+)
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.reasoning import (
     UNSET_REASONING,
     apply_reasoning_plan,
@@ -37,7 +40,11 @@ from openjiuwen.core.foundation.llm.reasoning import (
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.schema import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
     LLMAuthMode,
@@ -45,13 +52,28 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    BaseMessage,
+    UsageMetadata,
+    UserMessage,
+)
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
     _deepseek_reasoning_content,
     apply_message_transforms,
     model_requires_reasoning_content,
 )
-from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import (
+    json_arguments,
+    sanitize_chat_request,
+)
+from openjiuwen.core.foundation.llm.utils.responses_transport import (
+    OpenAIAccountResponsesTransport,
+)
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -622,7 +644,7 @@ class OpenAIModelClient(BaseModelClient):
                     "index": tc.get("index"),
                     "function": {
                         "name": func.get("name", ""),
-                        "arguments": func.get("arguments", ""),
+                        "arguments": json_arguments(func.get("arguments", "")),
                     },
                 })
             msg["tool_calls"] = cleaned
@@ -986,7 +1008,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_openrouter_profile(params)
 
-        return params
+        return sanitize_chat_request(params)
 
     def _apply_openrouter_profile(self, params: dict) -> None:
         if self._endpoint_profile_name() != "openrouter":
