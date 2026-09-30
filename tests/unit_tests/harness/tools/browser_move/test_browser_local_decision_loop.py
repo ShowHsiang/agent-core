@@ -38,7 +38,7 @@ LOCAL_TOOLS = [*TOOLS, {"name": "browser_page_action"}]
 
 
 def page_operations(runtime):
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.decision_snapshot["page_guard"] = {"document": "doc-a", "history_length": 1}
     return page
 
@@ -122,7 +122,7 @@ async def test_concise_phase_allows_decision_for_long_parent_goal_without_resett
     policy, llm, client, runtime, context, captured = setup_policy(goal="complex objective " * 800)
     state = context.get_session_ref().get_state(PHASE)
     deadline = state["deadline_at"]
-    set_phase(state, {"objective": "点击销量排序"}, runtime._ensure_page_state().export_decision_targets())
+    set_phase(state, {"objective": "点击销量排序"}, runtime.ensure_page_state().export_decision_targets())
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert result.tool_calls and state["deadline_at"] == deadline
     assert len(json.dumps(client.evaluate.call_args.args[0]["state"])) < 6000
@@ -176,12 +176,12 @@ def metadata(url="https://example.test/search?q=widget", capture="capture-post",
 async def test_sort_receipt_and_post_action_cards_share_revision_but_later_change_invalidates():
     runtime = _make_bare_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://example.test/search?q=widget")
     runtime._invalidate_changed_listing(metadata(selected="默认"))
     page.mark_interaction()
     admitted_revision = page.interaction_revision
-    runtime._capture_browser_metadata = AsyncMock(return_value=(metadata(), None))
+    runtime.capture_browser_metadata = AsyncMock(return_value=(metadata(), None))
     observation = await runtime.capture_reconciliation_browser_state(action_group_id="sort", include_decision=True)
     assert observation["page_state"]["interaction_revision"] == admitted_revision
     page.register_cards({"url": page.url, "cards": [{"title": "Widget", "primary_link": "https://example.test/1"}]})
@@ -195,20 +195,20 @@ async def test_sort_receipt_and_post_action_cards_share_revision_but_later_chang
 async def test_combined_rpc_reuses_facts_once_and_never_after_another_action():
     runtime = _make_bare_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock()
-    runtime._call_playwright_run_code_unsafe = AsyncMock(return_value={
+    runtime.call_playwright_tool = AsyncMock()
+    runtime.call_playwright_run_code_unsafe = AsyncMock(return_value={
         "ok": True, "url": metadata()["url"], "_runtime_observation": metadata(),
     })
-    result = await runtime._call_fixed_with_observation("async page => ({ok:true,url:page.url()})")
+    result = await runtime.call_fixed_with_observation("async page => ({ok:true,url:page.url()})")
     assert result["ok"] and "_runtime_observation" not in result
     captured = await runtime.capture_browser_state(action_group_id="action", include_decision=True)
     assert captured["decision_observation"]["capture_id"] == "capture-post"
     assert captured["tabs"][0]["current"] and captured["page_position"]["pixels_below"] == 300
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
-    runtime._call_playwright_tool.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.call_playwright_tool.assert_not_awaited()
     assert not runtime._has_post_observation()
-    await runtime._call_fixed_with_observation("async page => ({ok:true})")
-    runtime._ensure_page_state().mark_interaction()
+    await runtime.call_fixed_with_observation("async page => ({ok:true})")
+    runtime.ensure_page_state().mark_interaction()
     assert not runtime._has_post_observation()
 
 
@@ -216,9 +216,9 @@ async def test_combined_rpc_reuses_facts_once_and_never_after_another_action():
 async def test_fixed_text_read_joins_existing_evidence_without_cart_mutation():
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(allowed_tool_names=None)
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://shop.test/cart")
-    runtime._call_fixed_with_observation = AsyncMock(return_value={
+    runtime.call_fixed_with_observation = AsyncMock(return_value={
         "ok": True, "url": page.url, "title": "Cart", "text": "Cart has three products", "read_only": True,
     })
     state = Rail._build_phase_state("Read the cart product count")
@@ -262,7 +262,7 @@ async def test_llm_stream_total_timeout_closes_producer_without_replaying_partia
             assert not chunk.tool_calls
     assert closed == [True]
     client.evaluate.assert_not_awaited()
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 def test_replan_count_is_consecutive_and_progress_does_not_replenish_action_budget():
@@ -377,15 +377,15 @@ def test_fixed_action_probe_in_one_rpc_keeps_receipt_when_probe_fails(dom_page, 
 async def test_tab_selection_does_not_dispatch_after_observed_index_is_reused():
     runtime = _make_bare_runtime()
     runtime._service = SimpleNamespace(allowed_tool_names=("browser_tabs",))
-    runtime._capture_browser_metadata = AsyncMock(return_value=({
+    runtime.capture_browser_metadata = AsyncMock(return_value=({
         "tabs": [{"index": 1, "url": "https://different.test/"}],
     }, None))
-    runtime._call_playwright_tool = AsyncMock()
+    runtime.call_playwright_tool = AsyncMock()
     result = await BrowserPageActionTool(runtime).invoke({
         "generation_id": runtime.generation_id, "op": "select_tab", "index": 1, "url": "https://observed.test/",
     })
     assert not result.success and result.data["executed"] is False
-    runtime._call_playwright_tool.assert_not_awaited()
+    runtime.call_playwright_tool.assert_not_awaited()
 
 
 def test_page_capability_and_long_option_list_cannot_hide_fixed_readers():
@@ -464,7 +464,7 @@ def test_fixed_reader_tolerates_layout_change_but_rejects_another_document(dom_p
             scripts.append(script)
             return {"ok": True}
 
-        runtime._call_playwright_run_code_unsafe.side_effect = inspect
+        runtime.call_playwright_run_code_unsafe.side_effect = inspect
         await policy.validate_tool_call(inputs, context.get_session_ref())
 
     # Playwright's synchronous fixture owns the main thread's event loop.
@@ -573,7 +573,7 @@ async def test_debug_logs_are_opt_in_and_cannot_change_the_route(monkeypatch):
     await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert records == []  # Payloads carry task text; default logs never do.
     monkeypatch.setenv("OPENJIUWEN_BROWSER_POLICY_DEBUG_LOG", "1")
-    runtime._ensure_page_state().decision_snapshot["capture_id"] = "capture-b"
+    runtime.ensure_page_state().decision_snapshot["capture_id"] = "capture-b"
     captured = {**captured, "semantic_state": {"result_count": 1}}
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     call = result.tool_calls[0]
@@ -663,7 +663,7 @@ async def test_finish_is_offered_only_once_no_task_fact_is_missing():
     assert "HANDOFF" in payload["questions"]["action"]["criteria"]
     assert result.metadata["browser_policy"]["excluded"]["finish_requirements_missing"] == 1
     phase["field_coverage"] = ["exchange_rate"]
-    runtime._ensure_page_state().decision_snapshot["capture_id"] = "capture-found"
+    runtime.ensure_page_state().decision_snapshot["capture_id"] = "capture-found"
     await policy.invoke(await messages_for(policy, context, {**captured, "semantic_state": {"result_count": 1}}),
                         tools=TOOLS)
     payload = client.evaluate.call_args.args[0]
@@ -722,7 +722,7 @@ async def test_rewritten_intent_still_gets_the_users_search_term_on_the_menu():
 async def test_jev_is_told_when_its_view_of_the_page_is_partial(length, truncated):
     # In live runs Jev never chose a reader where the LLM read; it did not know page_text was cut.
     policy, llm, client, runtime, context, captured = setup_policy()
-    runtime._ensure_page_state().read_observation = {"text": "x" * length}
+    runtime.ensure_page_state().read_observation = {"text": "x" * length}
     choose_operation(client, "HANDOFF")
     await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     state = client.evaluate.call_args.args[0]["state"]

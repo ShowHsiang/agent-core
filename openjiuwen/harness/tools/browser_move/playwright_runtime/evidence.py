@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from itertools import chain
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -39,16 +40,20 @@ def observed_sort(source: str, value: Any = "") -> str:
         params = parse_qs(urlsplit(source).query)
     except ValueError:
         return ""
-    url_sort = next((sort_value(v) for key in ("order", "sort", "sortType") for v in params.get(key, [])
-                     if sort_value(v)), "")
+    url_values = chain.from_iterable(params.get(key, []) for key in ("order", "sort", "sortType"))
+    url_sort = next(filter(None, map(sort_value, url_values)), "")
     selected = sort_value(value)
     return "" if selected and url_sort and selected != url_sort else selected or url_sort
 
 
+def _is_first_organic(card: dict[str, Any]) -> bool:
+    if card.get("result_index") != 1 or card.get("order_known") is not True or card.get("is_ad"):
+        return False
+    return bool(card.get("title")) and card.get("region") in {"main_result", "primary_result", "main_results"}
+
+
 def first_organic_result(cards: list[dict[str, Any]]) -> dict[str, Any] | None:
-    candidates = [card for card in cards if card.get("result_index") == 1 and card.get("order_known") is True
-                  and not card.get("is_ad") and card.get("title")
-                  and card.get("region") in {"main_result", "primary_result", "main_results"}]
+    candidates = [card for card in cards if _is_first_organic(card)]
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -58,6 +63,23 @@ def _same_observation_scope(left: dict[str, Any], right: dict[str, Any]) -> bool
                 and type(a.get("interaction_revision")) is int
                 and left.get("query_id") == right.get("query_id")
                 and left.get("source") == right.get("source"))
+
+
+def _corroborates_sort(record: dict[str, Any], witness: dict[str, Any], expected: str) -> bool:
+    if record.get("kind") not in {"card_probe", "ordered_results"} or not _same_observation_scope(record, witness):
+        return False
+    sort_state = (record.get("cards") or [{}])[0].get("sort_state")
+    if sort_value(sort_state) not in {"", expected}:
+        return False
+    return observed_sort(str(record.get("source") or ""), sort_state) in {"", expected}
+
+
+def _is_observed_field(slot: dict[str, Any], field: str, task_id: str) -> bool:
+    if slot.get("field") != field or slot.get("query_id") != task_id or slot.get("status") != "present":
+        return False
+    if slot.get("observation_status") == "not_observed" or not evidence_subject(slot.get("source")):
+        return False
+    return slot.get("value") not in (None, "", "unknown")
 
 
 def explicit_acceptance(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -118,11 +140,7 @@ def explicit_acceptance(state: dict[str, Any]) -> list[dict[str, Any]]:
             selected = []
             for witness in matches:
                 associated = [witness["record"], *[
-                    record for record in records if record.get("kind") in {"card_probe", "ordered_results"}
-                    and _same_observation_scope(record, witness["record"])
-                    and sort_value((record.get("cards") or [{}])[0].get("sort_state")) in {"", expected}
-                    and observed_sort(str(record.get("source") or ""),
-                                      ((record.get("cards") or [{}])[0].get("sort_state"))) in {"", expected}
+                    record for record in records if _corroborates_sort(record, witness["record"], expected)
                 ]]
                 for record in associated:
                     card = first_organic_result(record.get("cards") or [])
@@ -138,10 +156,7 @@ def explicit_acceptance(state: dict[str, Any]) -> list[dict[str, Any]]:
                            ("shop_rating", r"店铺评分|卖家评分|shop rating|seller rating|store rating")):
         if not any(re.search(pattern, part) for part in clauses):
             continue
-        slots = [s for s in state.get("evidence_slots", []) if s.get("field") == field
-                 and s.get("query_id") == task_id and s.get("status") == "present"
-                 and s.get("observation_status") != "not_observed" and evidence_subject(s.get("source"))
-                 and s.get("value") not in (None, "", "unknown")]
+        slots = [s for s in state.get("evidence_slots", []) if _is_observed_field(s, field, task_id)]
         result.append({"id": f"field:{field}", "kind": "field", "expected": field,
                        "status": "satisfied" if slots else "unknown",
                        "evidence_ref": {k: slots[-1].get(k) for k in ("source", "entity_source", "value")}
@@ -170,13 +185,18 @@ def retain_acceptance(state: dict[str, Any]) -> None:
             saved[item["id"]] = {"query_id": task_id, "evidence_ref": item["evidence_ref"]}
 
 
+def _is_selected_sort(control: dict[str, Any]) -> bool:
+    if control.get("selected") is not True or not str(control.get("kind") or "").startswith("sort"):
+        return False
+    return bool(sort_value(observed_label(control)))
+
+
 def observe_acceptance(state: dict[str, Any], observation: dict[str, Any]) -> None:
     """Consume the existing fresh capture; no extra browser or model call."""
     source = observation.get("url") or ""
     if not observation.get("capture_id") or not evidence_subject(source):
         return
-    selected = [c for c in observation.get("controls", []) if c.get("selected") is True
-                and str(c.get("kind") or "").startswith("sort") and sort_value(observed_label(c))]
+    selected = [c for c in observation.get("controls", []) if _is_selected_sort(c)]
     label = observed_label(selected[0]) if len(selected) == 1 else ""
     if observed_sort(source, label):
         record = {"kind": "sort_observation", "source": source, "values": {"sort_state": label},

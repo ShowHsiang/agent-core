@@ -25,7 +25,7 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 
-from ..playwright_runtime.browser_logging import _env_bool, browser_agent_log_info
+from ..playwright_runtime.browser_logging import _env_bool, browser_agent_log_info, browser_agent_log_warning
 from ..playwright_runtime.browser_working_context import BrowserWorkingContextStore
 from ..playwright_runtime.model_usage import finish_model_call, mark_policy_window, start_model_call
 from ..playwright_runtime.phase_contract import (
@@ -46,6 +46,19 @@ CONTEXT_KEY = "browser_policy_observation"
 # Opt-in: these records carry task text and bound values, which default logs never contain.
 _DEBUG_LOG_ENV = "OPENJIUWEN_BROWSER_POLICY_DEBUG_LOG"
 _PHASE_KEY = "__browser_phase_budget_state__"
+_RECENT_RESULT_KEYS = (
+    "seq",
+    "phase",
+    "action_class",
+    "outcome_status",
+    "semantic_delta",
+    "new_evidence_fields",
+    "elapsed_ms",
+)
+
+
+def _pick(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: source.get(key) for key in keys}
 
 
 @dataclass
@@ -194,7 +207,7 @@ class BrowserPolicyModel(Model):
                 return [project(item) for item in value]
             return value
 
-        return project(BrowserWorkingContextStore._project_task_state(phase))
+        return project(BrowserWorkingContextStore.project_task_state(phase))
 
     @staticmethod
     def _fingerprint(observation: _Observation, *, effect: bool = False) -> str:
@@ -278,7 +291,7 @@ class BrowserPolicyModel(Model):
                     raise DecisionUnavailable("insufficient_decision_time")
                 if not snapshot.get("capture_id") or snapshot.get("url") != captured.get("url"):
                     raise DecisionUnavailable("decision_observation_unavailable")
-                current = self.runtime._ensure_page_state()
+                current = self.runtime.ensure_page_state()
                 page = dict(snapshot.get("page") or {})
                 if (
                     page.get("page_id") != current.page_id
@@ -288,13 +301,11 @@ class BrowserPolicyModel(Model):
                     raise DecisionUnavailable("observation_generation_changed")
                 controls = snapshot.get("controls") or []
                 omitted = int(snapshot.get("omitted_count") or 0)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 # Observation failure belongs to the policy, never to the existing LLM task.
                 error = "decision_observation_unavailable"
         page["page_guard"] = snapshot.get("page_guard") or {}
-        public_page = self.runtime._ensure_page_state().export()
+        public_page = self.runtime.ensure_page_state().export()
         page.update({k: public_page.get(k) for k in ("cards", "cards_observed", "listing_stale")})
         page["page_position"] = captured.get("page_position") or {}
         page["tabs"] = captured.get("tabs") or snapshot.get("tabs") or []
@@ -327,7 +338,7 @@ class BrowserPolicyModel(Model):
         queries, values = task_literals(goal, intent)
         intent_ambiguous = len(queries) > 1 or (not queries and len(values) > 1)
         progress_view = self._policy_progress(phase)
-        page_text = str(self.runtime._ensure_page_state().read_observation.get("text")
+        page_text = str(self.runtime.ensure_page_state().read_observation.get("text")
                         or snapshot.get("page_text") or "")
         state = {
             "verification_only": bool(phase.get("action_budget_exhausted")),
@@ -355,7 +366,7 @@ class BrowserPolicyModel(Model):
             "llm_recent_actions": copy.deepcopy(task.llm_actions),
             "page": {k: page.get(k) for k in ("page_id", "generation_id", "url", "title")},
             "read_observation": hashlib.sha256(canonical_arguments(
-                self.runtime._ensure_page_state().read_observation).encode()).hexdigest()[:24],
+                self.runtime.ensure_page_state().read_observation).encode()).hexdigest()[:24],
             "page_text": page_text[:2200],
             # Jev otherwise treats a partial view as the whole page and picks FINISH or a guessed CLICK.
             "page_text_truncated": len(page_text) > 2200,
@@ -368,19 +379,7 @@ class BrowserPolicyModel(Model):
             "observed_at_ms": snapshot.get("observed_at_ms"),
             "visibility": snapshot.get("visibility"),
             "recent_results": [
-                {
-                    key: action.get(key)
-                    for key in (
-                        "seq",
-                        "phase",
-                        "action_class",
-                        "outcome_status",
-                        "semantic_delta",
-                        "new_evidence_fields",
-                        "elapsed_ms",
-                    )
-                }
-                for action in (phase.get("recent_actions") or [])[-6:]
+                _pick(action, _RECENT_RESULT_KEYS) for action in (phase.get("recent_actions") or [])[-6:]
             ],
             "no_progress": int(progress.get("consecutive_no_progress") or 0),
             "omitted_count": omitted,
@@ -405,7 +404,8 @@ class BrowserPolicyModel(Model):
             task.failed_actions.clear()
             self._observations[token].state["failed_actions"] = {}
         task.pending["observation_state"] = observed_state
-        if refresh and not error and task.receipts and task.pending.get("capture_id") != snapshot.get("capture_id"):
+        new_capture = task.receipts and task.pending.get("capture_id") != snapshot.get("capture_id")
+        if refresh and not error and new_capture:
             receipt = task.receipts[-1]
             if receipt.get("postcondition") == "awaiting_observation":
                 changed = self._fingerprint(self._observations[token], effect=True) != task.pending.get("state")
@@ -624,8 +624,8 @@ class BrowserPolicyModel(Model):
                 menu.criteria.pop("FINISH", None)
                 menu.excluded["finish_requirements_missing"] = 1
             phase_view = observation.state.get("phase") or {}
-            if (has_phase_tool and phase_view.get("version") and phase_view.get("missing_conditions")
-                    and phase_view.get("status") != "verified"):
+            unverified = phase_view.get("missing_conditions") and phase_view.get("status") != "verified"
+            if has_phase_tool and phase_view.get("version") and unverified:
                 menu.criteria["VERIFY"] = (
                     "READ and VERIFY current phase conditions using the runtime; never certify by guessing."
                 )
@@ -651,14 +651,14 @@ class BrowserPolicyModel(Model):
                 raise DecisionUnavailable(task.fallback_reason or "already_evaluated_state")
             reentering = task.fallback_scope == "segment"
             task.fallback_reason, task.fallback_scope, task.blocked_state = "", "", ""
+            menu_targets = {step.get("target_id") for step in menu.steps.values()}
             state = {
                 **{k: v for k, v in observation.state.items() if k != "failed_actions"},
                 "suppressed_actions": menu.excluded.get("failed_target", 0),
                 "candidate_count": len(menu.steps),
                 "omitted_count": diagnostic["omitted_count"],
-                "controls": [{k: c.get(k) for k in ("target_id", "label", "role", "kind", "selected")}
-                             for c in observation.controls if c.get("target_id") in
-                             {step.get("target_id") for step in menu.steps.values()}],
+                "controls": [_pick(c, ("target_id", "label", "role", "kind", "selected"))
+                             for c in observation.controls if c.get("target_id") in menu_targets],
                 # Covered controls explain a stall; they are never menu targets.
                 "blocked_controls": [
                     {"label": observed_label(c)[:120], "role": c.get("role"),
@@ -671,8 +671,8 @@ class BrowserPolicyModel(Model):
                 if _env_bool(_DEBUG_LOG_ENV):
                     browser_agent_log_info("[BROWSER_POLICY_PAYLOAD] %s", json.dumps(
                         {"decision_id": decision_id, "payload": payload}, ensure_ascii=False, default=str))
-            except Exception:
-                pass
+            except Exception as exc:
+                browser_agent_log_warning("[BROWSER_POLICY_PAYLOAD] diagnostic log skipped: %s", type(exc).__name__)
             task.decisions += 1
             task.evaluated_states.append(fingerprint)
             diagnostic.update(evaluated=True, decisions=task.decisions)
@@ -765,8 +765,8 @@ class BrowserPolicyModel(Model):
                         "target_top3": [[k, str(menu.criteria.get(k, ""))[:120], round(p, 3)]
                                         for k, p in _top3(target_answer.get("probabilities"))],
                     }, ensure_ascii=False))
-            except Exception:
-                pass
+            except Exception as exc:
+                browser_agent_log_warning("[BROWSER_POLICY_RESPONSE] diagnostic log skipped: %s", type(exc).__name__)
             choice, selected_answer = validate_action(
                 result.get("answers"), payload["questions"], self.decision_config.min_confidence
             )
@@ -962,29 +962,29 @@ class BrowserPolicyModel(Model):
             facts = entry.get("steps", [])
             self._record_llm_actions(inputs, task, outcome, facts)
             if outcome.get("success") and not outcome.get("denied"):
-                from ..playwright_runtime.execution_journal import _control, arguments
+                from ..playwright_runtime.execution_journal import arguments, step_control
 
                 args = arguments(inputs)
                 for step in (args.get("steps", []) if str(inputs.tool_name).endswith("browser_batch_interact")
                              else [{**args, "op": str(inputs.tool_name).rsplit("browser_", 1)[-1]}]):
-                    control = _control(self.runtime, step) if isinstance(step, dict) else {}
+                    control = step_control(self.runtime, step) if isinstance(step, dict) else {}
                     if control:
                         self._target_failures(owner).pop(self._target_key(self._compiled(step), control), None)
             if not outcome.get("success") and not outcome.get("denied"):
-                from ..playwright_runtime.execution_journal import arguments, _control
+                from ..playwright_runtime.execution_journal import arguments, step_control
 
                 args = arguments(inputs)
                 raw_steps = args.get("steps", []) if str(inputs.tool_name).endswith("browser_batch_interact") else [
                     {**args, "op": str(inputs.tool_name).rsplit("browser_", 1)[-1]}
                 ]
-                page = self.runtime._ensure_page_state()
+                page = self.runtime.ensure_page_state()
                 observation = _Observation(self._task_key(session, phase), session.get_session_id(),
                                            float(phase.get("deadline_at", 0)),
                                            {"current_intent": self.current_intent}, [], page.export_summary())
                 for index, step in enumerate(raw_steps):
                     if index < len(facts) and facts[index].get("execution_state") in {"acknowledged", "verified"}:
                         continue
-                    control = _control(self.runtime, step)
+                    control = step_control(self.runtime, step)
                     if not control:
                         continue
                     compiled = self._compiled(step)
@@ -1054,7 +1054,7 @@ class BrowserPolicyModel(Model):
         self, inputs: Any, task: _TaskPolicy, outcome: dict[str, Any], facts: list[dict[str, Any]]
     ) -> None:
         """Keep the LLM's last browser steps so Jev sees what was already tried."""
-        from ..playwright_runtime.execution_journal import _control, arguments
+        from ..playwright_runtime.execution_journal import arguments, step_control
 
         args = arguments(inputs)
         name = str(getattr(inputs, "tool_name", ""))
@@ -1069,7 +1069,7 @@ class BrowserPolicyModel(Model):
             state = facts[index].get("execution_state") if call_result == "failed" and index < len(facts) else None
             result = ("ok" if state in {"acknowledged", "verified"} else
                       "not_run" if state in {"not_started", "rejected_before_dispatch"} else call_result)
-            control = _control(self.runtime, step)
+            control = step_control(self.runtime, step)
             label = observed_label(control)[:120]
             if control.get("region"):
                 label += f" [region: {str(control['region'])[:60]}]"
@@ -1085,8 +1085,8 @@ class BrowserPolicyModel(Model):
                 parts = urlsplit(step["url"])  # Host and path only: queries can carry search terms or tokens.
                 item["url"] = (parts.netloc + parts.path)[:120]
             value = step.get("text", step.get("value"))
-            if (step.get("op") in {"fill", "type"} and control
-                    and not (control.get("decision_state") or {}).get("sensitive") and isinstance(value, str)):
+            typed_text = step.get("op") in {"fill", "type"} and isinstance(value, str)
+            if typed_text and control and not (control.get("decision_state") or {}).get("sensitive"):
                 item["value"] = value[:80]
             task.llm_actions = [*task.llm_actions, item][-6:]
 
@@ -1118,7 +1118,7 @@ class BrowserPolicyModel(Model):
             if name.endswith("browser_batch_interact")
             else ([{**args, "op": "fill", "value": args.get("text")}] if name.endswith("browser_type") else [])
         )
-        page = self.runtime._ensure_page_state()
+        page = self.runtime.ensure_page_state()
         for index, step in enumerate(steps):
             if completed is not None and index not in completed:
                 continue
@@ -1135,7 +1135,8 @@ class BrowserPolicyModel(Model):
                 matched = step.get("target_id") == control["target_id"] or (
                     bool(locator) and locator in {target.selector, target.ref}
                 )
-                if not matched or not details.get("search_like") or details.get("sensitive") or not guard:
+                searchable = details.get("search_like") and not details.get("sensitive")
+                if not matched or not searchable or not guard:
                     continue
                 binding = {
                     "document": guard.get("document"),
@@ -1270,14 +1271,14 @@ class BrowserPolicyModel(Model):
     def _log_llm_action(self, inputs: Any, session: Any, call_id: str) -> None:
         """Log the LLM's first acted target for shadow comparison. Never raises."""
         try:
-            from ..playwright_runtime.execution_journal import _control, arguments
+            from ..playwright_runtime.execution_journal import arguments, step_control
 
             tool = str(getattr(inputs, "tool_name", ""))
             args = arguments(inputs)
             steps = args.get("steps") if isinstance(args.get("steps"), list) else [args]
             first = next((s for s in steps if isinstance(s, dict) and not str(s.get("op", "")).startswith("wait")),
                          steps[0] if steps else {})
-            control = _control(self.runtime, first) if isinstance(first, dict) else {}
+            control = step_control(self.runtime, first) if isinstance(first, dict) else {}
             label = str(control.get("name") or control.get("text") or "")[:120]
             region = str(control.get("region") or "")[:60]
             phase = session.get_state(_PHASE_KEY) if session is not None else None
@@ -1289,8 +1290,8 @@ class BrowserPolicyModel(Model):
                 "target_resolved": bool(control), "step_count": len(steps),
                 "ops": [s.get("op") for s in steps if isinstance(s, dict)][:8],
             }, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as exc:
+            browser_agent_log_warning("[BROWSER_LLM_ACTION] diagnostic log skipped: %s", type(exc).__name__)
 
     async def validate_tool_call(self, inputs: Any, session: Any, *, actual_arguments: Any = None) -> None:
         call_id = str(getattr(getattr(inputs, "tool_call", None), "id", "") or "")
@@ -1318,8 +1319,6 @@ class BrowserPolicyModel(Model):
                 validate_guard(self.runtime, guard, inputs, session),
                 timeout=min(remaining, self.decision_config.request_timeout_ms / 1000),
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             task = self._task(guard.task_key)
             task.fallback_reason, task.fallback_scope = "runtime_recovery_required", "segment"

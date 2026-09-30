@@ -10,13 +10,14 @@ import json
 import time
 from typing import Any, Dict
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from openjiuwen.core.context_engine import ContextEngine, ContextWindow, ModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
 )
-from pydantic import BaseModel, ConfigDict, Field
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 from .browser_working_context import BrowserWorkingContextStore

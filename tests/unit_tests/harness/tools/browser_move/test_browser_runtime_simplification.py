@@ -51,7 +51,7 @@ def ui_runtime(*controls):
     page = SimpleNamespace(
         export_decision_targets=lambda: list(controls), get_target=lambda _: SimpleNamespace(selector=None, ref=None)
     )
-    return SimpleNamespace(_ensure_page_state=lambda: page)
+    return SimpleNamespace(ensure_page_state=lambda: page)
 
 
 def record(session, inputs, result, runtime=None, *, success=False):
@@ -215,7 +215,7 @@ async def test_cart_precondition_rejected_before_budget_in_both_modes(mode):
     observed = control("add", "Add to cart", 1)
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.decision_policy = None
-    runtime._ensure_page_state.return_value = ui_runtime(observed)._ensure_page_state()
+    runtime.ensure_page_state.return_value = ui_runtime(observed).ensure_page_state()
     runtime.normalize_model_batch_steps.side_effect = lambda s: s
     runtime.export_page_state.return_value = {}
     runtime.semantic_progress = {}
@@ -242,16 +242,16 @@ async def test_cart_unknown_effect_auto_reconciles_without_phase_verify_or_polic
     record(session, call(), {"executed": None}, runtime)
     assert unresolved_writes(state)
     state["phase_requirements"].append({**copy.deepcopy(condition), "id": "unrelated-old-cart-reader"})
-    runtime._call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
+    runtime.call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
     captured = {"ok": True, "decision_observation": {"capture_id": "after-cart", "url": "https://shop.test/cart"}}
     await observe_runtime(runtime, session, captured)
     assert not unresolved_writes(state)
     assert state["execution_journal"][0]["execution_state"] == "verified"
     assert condition["status"] == "unsatisfied"  # Keyboard still required.
-    assert runtime._call_playwright_run_code_unsafe.await_count == 2  # Baseline + one relevant effect read.
-    count = runtime._call_playwright_run_code_unsafe.await_count
+    assert runtime.call_playwright_run_code_unsafe.await_count == 2  # Baseline + one relevant effect read.
+    count = runtime.call_playwright_run_code_unsafe.await_count
     await observe_runtime(runtime, session, captured)
-    assert runtime._call_playwright_run_code_unsafe.await_count == count
+    assert runtime.call_playwright_run_code_unsafe.await_count == count
 
 
 @pytest.mark.parametrize("mode", ["llm", "hybrid"])
@@ -269,7 +269,7 @@ def test_positive_empty_cart_proof_uses_real_dom(dom_page):  # noqa: F811
     )
     assert data["coverage_count"] == 0 and data["complete"]
     runtime = cart_runtime({})
-    runtime._call_playwright_run_code_unsafe.return_value = data
+    runtime.call_playwright_run_code_unsafe.return_value = data
     # Playwright's synchronous fixture owns a running loop in this thread.
     from concurrent.futures import ThreadPoolExecutor
 
@@ -295,7 +295,7 @@ async def test_target_only_scope_does_not_waive_explicit_whole_cart_requirement(
     condition = state["phase_requirements"][0]
     runtime = cart_runtime({"old-item": 2})
     await read_cart(runtime, condition, state, baseline=True)
-    runtime._call_playwright_run_code_unsafe.return_value["items"] = {"old-item": 3, "mouse-black": 1, "keyboard-us": 1}
+    runtime.call_playwright_run_code_unsafe.return_value["items"] = {"old-item": 3, "mouse-black": 1, "keyboard-us": 1}
     await read_cart(runtime, condition, state, baseline=False)
     assert condition["status"] == "satisfied"
 
@@ -385,7 +385,7 @@ async def test_cart_reader_failure_keeps_unknown_effect_and_available_llm_contex
     runtime = cart_runtime({"mouse-black": 1})
     await read_cart(runtime, condition, state, baseline=True)
     record(session, call(), {"executed": None}, runtime)
-    runtime._call_playwright_run_code_unsafe.side_effect = OSError("offline")
+    runtime.call_playwright_run_code_unsafe.side_effect = OSError("offline")
     await observe_runtime(
         runtime, session, {"ok": True, "decision_observation": {"capture_id": "fresh", "url": "https://shop.test/cart"}}
     )
@@ -400,7 +400,7 @@ def test_native_ax_search_fill_is_local_without_jev_target_registry():
     inputs = call("native-search", "mcp_playwright-official_browser_type")
     inputs.tool_args = {"target": "f1e1", "text": "mouse"}
     state = new_state()
-    record(session_for(state), inputs, {"ok": True}, SimpleNamespace(_ensure_page_state=lambda: page), success=True)
+    record(session_for(state), inputs, {"ok": True}, SimpleNamespace(ensure_page_state=lambda: page), success=True)
     assert state["execution_journal"][0]["impact"] == "local_ui"
     assert not state.get("cart_baseline_closed")
 

@@ -115,7 +115,7 @@ async def test_openrouter_success_compiles_through_the_existing_policy(monkeypat
     assert result.tool_calls[0].name == "browser_batch_interact"
     llm.invoke.assert_not_awaited()
     llm.stream.assert_not_called()
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio

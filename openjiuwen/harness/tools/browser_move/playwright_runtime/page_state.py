@@ -242,6 +242,7 @@ class BrowserPageState:
         self._ref_targets: Dict[str, str] = {}
         self._selector_targets: Dict[tuple[int, str], str] = {}
         self._interactive_target_ids: list[str] = []
+        self._decision_target_ids: list[str] = []
         self.decision_omitted = 0
         self.decision_snapshot: dict[str, Any] = {}
         self._cards: list[Dict[str, Any]] = []
@@ -713,12 +714,12 @@ class BrowserPageState:
 
     def export_decision_targets(self) -> list[dict[str, Any]]:
         """Local policy projection; node guards are never part of public PageState."""
-        return [
-            {**target.compact_index(), "decision_state": target.decision_state}
-            for target_id in getattr(self, "_decision_target_ids", [])
-            if (target := self._targets.get(target_id)) is not None
-            and target.generation == self.generation
-        ]
+        exported = []
+        for target_id in getattr(self, "_decision_target_ids", []):
+            target = self._targets.get(target_id)
+            if target is not None and target.generation == self.generation:
+                exported.append({**target.compact_index(), "decision_state": target.decision_state})
+        return exported
 
     def export_decision_observation(self) -> dict[str, Any]:
         if not self.decision_snapshot:

@@ -88,7 +88,7 @@ async def test_typed_response_cannot_coerce_bad_values_into_executable_decisions
     assert len(requests) == 1
     assert llm.invoke.await_count == 2
     assert not policy._guards
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio

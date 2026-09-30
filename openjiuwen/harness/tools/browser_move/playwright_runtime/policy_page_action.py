@@ -93,11 +93,12 @@ class BrowserPageActionTool(Tool):
                      "select_tab": {"index", "url"}, "hover": {"target_id"}, "wait": {"ms"}}.get(op, set())
             if set(inputs) != {"generation_id", "op"} | extra:
                 raise ValueError("invalid_page_operation_arguments")
-            page = self._runtime._ensure_page_state()
+            page = self._runtime.ensure_page_state()
             page.validate_generation(inputs["generation_id"])
             if op in {"navigate", "select_tab"}:
                 url = urlsplit(inputs["url"])
-                if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+                has_credentials = url.username or url.password
+                if url.scheme not in {"http", "https"} or not url.hostname or has_credentials:
                     raise ValueError("invalid_page_navigation_url")
             if op == "scroll" and inputs["direction"] not in {"up", "down"}:
                 raise ValueError("invalid_scroll_direction")
@@ -108,7 +109,8 @@ class BrowserPageActionTool(Tool):
             if op == "select_tab" and (type(inputs["index"]) is not int or inputs["index"] < 0):
                 raise ValueError("invalid_tab_index")
             target = page.get_target(inputs["target_id"]) if op == "hover" else None
-            if op == "hover" and (target is None or target.generation_id != page.generation_id or not target.selector):
+            stale_target = target is None or target.generation_id != page.generation_id or not target.selector
+            if op == "hover" and stale_target:
                 raise ValueError("stale_hover_target")
             callback = getattr(kwargs.get("_tool_callback_context"), "inputs", None)
             call_id = str(getattr(getattr(callback, "tool_call", None), "id", "") or "")
@@ -128,7 +130,7 @@ class BrowserPageActionTool(Tool):
                         raise ValueError("browser_policy_unavailable_at_execution")
                     await policy.validate_tool_call(callback, session, actual_arguments=inputs)
                 if op == "select_tab":
-                    metadata, error = await self._runtime._capture_browser_metadata()
+                    metadata, error = await self._runtime.capture_browser_metadata()
                     tabs = [t for t in metadata.get("tabs", []) if t.get("index") == inputs["index"]]
                     if error or len(tabs) != 1 or tabs[0].get("url") != inputs["url"]:
                         raise ValueError("observed_tab_changed")
@@ -136,21 +138,21 @@ class BrowserPageActionTool(Tool):
                     dispatched = True
                     mark_dispatched()
                     if op in {"read_text", "find"}:
-                        raw = await self._runtime._call_fixed_with_observation(
+                        raw = await self._runtime.call_fixed_with_observation(
                             fixed_text_script(inputs.get("query", "")),
                         )
                         from ..utils.parsing import decode_mcp_result
                         result = decode_mcp_result(raw)
                         if not isinstance(result, dict) or not isinstance(result.get("text"), str):
                             raise ValueError("invalid_fixed_read_result")
-                        self._runtime._observe_page_url(result.get("url"))
+                        self._runtime.observe_page_url(result.get("url"))
                         page.observe(title=result.get("title"))
                         page.read_observation = {"operation": op, "query": inputs.get("query"),
                                                  "text": result["text"], "url": page.url,
                                                  "interaction_revision": page.interaction_revision}
                     elif op == "scroll":
                         sign = 1 if inputs["direction"] == "down" else -1
-                        result = await self._runtime._call_fixed_with_observation(
+                        result = await self._runtime.call_fixed_with_observation(
                             "async (page) => await page.evaluate(() => {"
                             f"window.scrollBy(0, {sign} * Math.max(1, Math.floor(window.innerHeight * 0.8)));"
                             "return {ok:true,scroll_x:window.scrollX,scroll_y:window.scrollY};})"
@@ -164,7 +166,7 @@ class BrowserPageActionTool(Tool):
                                 {"action": "list"} if op == "tabs" else
                                 {"target": target.selector, "element": target.name or target.text or "observed target"}
                                 if op == "hover" else {})
-                        result = await self._runtime._call_playwright_tool(native, args)
+                        result = await self._runtime.call_playwright_tool(native, args)
                 if not self._runtime.classify_tool_result(result)["success"]:
                     raise RuntimeError("page_operation_failed")
                 if op not in {"read_text", "find", "wait"}:
@@ -175,13 +177,13 @@ class BrowserPageActionTool(Tool):
                     # Native snapshots/tabs already carry useful output. Add only
                     # compact capabilities, never another AX or a replay of the action.
                     try:
-                        self._runtime._post_observation = None
+                        self._runtime.clear_post_observation()
                         probe_time = min(2.0, observation_deadline - time.monotonic())
                         if probe_time > 0:
                             async with asyncio.timeout(probe_time):
-                                metadata, error = await self._runtime._capture_browser_metadata(include_decision=True)
+                                metadata, error = await self._runtime.capture_browser_metadata(include_decision=True)
                             if not error:
-                                self._runtime._retain_post_observation({"_runtime_observation": metadata})
+                                self._runtime.retain_post_observation({"_runtime_observation": metadata})
                     except Exception:
                         pass  # Context capture can recover; the action receipt remains valid.
                 observed = bool(getattr(self._runtime, "_has_post_observation", lambda: False)())

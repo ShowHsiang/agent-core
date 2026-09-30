@@ -62,10 +62,10 @@ def _id(inputs: Any) -> str:
     return str(getattr(getattr(inputs, "tool_call", None), "id", "") or "")
 
 
-def _control(runtime: Any, step: dict[str, Any]) -> dict[str, Any]:
+def step_control(runtime: Any, step: dict[str, Any]) -> dict[str, Any]:
     if runtime is None:
         return {}
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     export = getattr(page, "export_decision_targets", None)
     if not callable(export):
         return {}
@@ -96,29 +96,41 @@ def _control(runtime: Any, step: dict[str, Any]) -> dict[str, Any]:
     return {**target.compact_index(), "decision_state": target.decision_state} if target is not None else {}
 
 
+def _is_dismiss_click(op: str, control: dict[str, Any], details: dict[str, Any]) -> bool:
+    if op != "click" or not details.get("node_guard") or details.get("effect"):
+        return False
+    if control.get("role") != "button" or details.get("input_type") == "submit":
+        return False
+    return bool(re.fullmatch(r"close|dismiss|关闭|关闭弹窗|收起", observed_label(control), re.I))
+
+
+def _is_observed_local_ui(op: str, control: dict[str, Any], details: dict[str, Any]) -> bool:
+    text_field = details.get("tag") in {"input", "textarea"} or control.get("role") in {
+        "textbox", "searchbox", "combobox"
+    }
+    if op in {"fill", "type"} and text_field and not details.get("sensitive"):
+        return True
+    if op in {"click", "press", "press_key"} and (details.get("search_like") or control.get("kind") == "search"):
+        return True
+    if op == "click" and (control.get("href") or details.get("href")):
+        return True
+    kind = str(control.get("kind", ""))
+    return op in {"click", "select_option", "set_checked"} and kind.startswith(
+        ("sort", "filter", "rating_filter", "calendar_date")
+    )
+
+
 def _impact(op: str, control: dict[str, Any]) -> str:
     if op in _READ_OPS or op.startswith("wait"):
         return "read"
     details = control.get("decision_state") or {}
     if op in {"hover", "navigate", "navigate_back", "scroll", "select_tab"}:
         return "local_ui"  # Reveals UI; never certifies a business effect.
-    if (op == "click" and details.get("node_guard") and not details.get("effect")
-            and control.get("role") == "button" and details.get("input_type") != "submit"
-            and re.fullmatch(r"close|dismiss|关闭|关闭弹窗|收起", observed_label(control), re.I)):
+    if _is_dismiss_click(op, control, details):
         return "local_ui"
     # Only observed UI capabilities qualify; unrecognized submit/save/scripts
     # remain unknown. User-supplied safety declarations cannot lower this class.
-    if control and (
-        op in {"fill", "type"}
-        and (details.get("tag") in {"input", "textarea"} or control.get("role") in {"textbox", "searchbox", "combobox"})
-        and not details.get("sensitive")
-        or op in {"click", "press", "press_key"}
-        and (details.get("search_like") or control.get("kind") == "search")
-        or op == "click"
-        and (control.get("href") or details.get("href"))
-        or op in {"click", "select_option", "set_checked"}
-        and str(control.get("kind", "")).startswith(("sort", "filter", "rating_filter", "calendar_date"))
-    ):
+    if control and _is_observed_local_ui(op, control, details):
         return "local_ui"
     return "unknown"
 
@@ -138,7 +150,7 @@ def prepare(session: Any, inputs: Any, runtime: Any = None, *, effect_adapter: A
     raw_steps = args.get("steps") if tool.endswith("browser_batch_interact") else None
     native_op = tool.rsplit("browser_", 1)[-1]
     for index, raw in enumerate(raw_steps if isinstance(raw_steps, list) else [{**args, "op": native_op}]):
-        control = _control(runtime, raw)
+        control = step_control(runtime, raw)
         op = str(raw.get("op") or "")
         step = {
             "index": index,
@@ -154,9 +166,8 @@ def prepare(session: Any, inputs: Any, runtime: Any = None, *, effect_adapter: A
         if op in {"fill", "type", "select_option"}:
             step["expected_value"] = raw.get("value", raw.get("text"))
         query = (control.get("decision_state") or {}).get("search_query") or {}
-        if step["impact"] == "local_ui" and query and (
-            op == "click" or op in {"press", "press_key"} and raw.get("key") == "Enter"
-        ):
+        submits = op == "click" or op in {"press", "press_key"} and raw.get("key") == "Enter"
+        if step["impact"] == "local_ui" and query and submits:
             expected = query.get("value")
             for preceding in steps:
                 if preceding["op"] in {"fill", "type"} and same_node(query, preceding.get("control") or {}):
@@ -172,7 +183,7 @@ def prepare(session: Any, inputs: Any, runtime: Any = None, *, effect_adapter: A
         "tool": tool,
         "model_source": "jev" if call_id.startswith("jev_") else "llm",
         "phase_version": phase.get("version", 0),
-        "source": str(getattr(runtime._ensure_page_state(), "url", "") or "") if runtime is not None else "",
+        "source": str(getattr(runtime.ensure_page_state(), "url", "") or "") if runtime is not None else "",
         "condition_ids": list(phase.get("condition_ids", [])),
         "execution_state": "prepared",
         "prepared_at": time.time(),
@@ -197,7 +208,7 @@ def prepare(session: Any, inputs: Any, runtime: Any = None, *, effect_adapter: A
     if len(pending) >= 63:
         raise ValueError("browser_pending_effect_budget_exhausted")
     settled = [e for e in journal if e["call_id"] not in pending_ids]
-    state["execution_journal"] = [*pending, *settled[-(63 - len(pending)) :], entry]
+    state["execution_journal"] = [*pending, *settled[-(63 - len(pending)):], entry]
     save(session, state)
     return entry
 
@@ -328,7 +339,8 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         elif received is not None:
             ok = received.get("ok") is True
             ran = True if ok else received.get("executed")
-            if not ok and ran is not False and lean_guards() and _never_performed(received.get("error")):
+            maybe_ran = not ok and ran is not False
+            if maybe_ran and lean_guards() and _never_performed(received.get("error")):
                 ran = False  # Timed out before the action was sent: not a write, nothing to reconcile.
             step.update(
                 execution_state="acknowledged"
@@ -414,44 +426,41 @@ def reconcile_observation(state: dict[str, Any], observation: dict[str, Any]) ->
             _log(state, entry)
 
 
+_PROJECTED_ENTRY_KEYS = (
+    "call_id",
+    "tool",
+    "model_source",
+    "phase_version",
+    "execution_state",
+    "executed",
+    "impact",
+    "requires_verification",
+    "evidence_ref",
+    "source",
+)
+_PROJECTED_STEP_KEYS = (
+    "index",
+    "op",
+    "target_name",
+    "impact",
+    "execution_state",
+    "executed",
+    "effect_domain",
+    "effect_verified",
+    "error",
+    "evidence_ref",
+    "observed_feedback",
+)
+
+
+def _project_keys(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {k: copy.deepcopy(source[k]) for k in keys if k in source}
+
+
 def project_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
-        **{
-            k: copy.deepcopy(entry[k])
-            for k in (
-                "call_id",
-                "tool",
-                "model_source",
-                "phase_version",
-                "execution_state",
-                "executed",
-                "impact",
-                "requires_verification",
-                "evidence_ref",
-                "source",
-            )
-            if k in entry
-        },
-        "steps": [
-            {
-                k: copy.deepcopy(s[k])
-                for k in (
-                    "index",
-                    "op",
-                    "target_name",
-                    "impact",
-                    "execution_state",
-                    "executed",
-                    "effect_domain",
-                    "effect_verified",
-                    "error",
-                    "evidence_ref",
-                    "observed_feedback",
-                )
-                if k in s
-            }
-            for s in entry.get("steps", [])
-        ],
+        **_project_keys(entry, _PROJECTED_ENTRY_KEYS),
+        "steps": [_project_keys(s, _PROJECTED_STEP_KEYS) for s in entry.get("steps", [])],
     }
 
 

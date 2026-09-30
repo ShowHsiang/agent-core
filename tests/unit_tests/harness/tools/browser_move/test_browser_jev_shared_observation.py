@@ -182,10 +182,10 @@ def test_runtime_capabilities_include_hidden_and_unnamed_controls_without_promot
 @pytest.mark.asyncio
 async def test_pure_llm_metadata_captures_shared_control_facts_without_extra_rpc():
     runtime = _make_bare_runtime()
-    runtime._call_playwright_run_code_unsafe = AsyncMock(return_value={"ok": True})
-    await runtime._capture_browser_metadata(include_decision=True)
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
-    script = runtime._call_playwright_run_code_unsafe.call_args.args[0]
+    runtime.call_playwright_run_code_unsafe = AsyncMock(return_value={"ok": True})
+    await runtime.capture_browser_metadata(include_decision=True)
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
+    script = runtime.call_playwright_run_code_unsafe.call_args.args[0]
     assert '"decision_mode": true' in script and '"max_items": 100' in script
 
 
@@ -193,7 +193,7 @@ async def test_pure_llm_metadata_captures_shared_control_facts_without_extra_rpc
 @pytest.mark.parametrize("model_source", ["call_01a0d2ff7a7b77b38f023f67", "jev_search"])
 async def test_exact_native_target_enrichment_breaks_search_timeout_deadlock_for_either_model(model_source):
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://www.baidu.com/")
     page.register_ax_snapshot('- button "百度一下" [ref=e12]')
     target = next(t for t in page._targets.values() if t.ref == "e12")
@@ -203,7 +203,7 @@ async def test_exact_native_target_enrichment_breaks_search_timeout_deadlock_for
         return value
 
     runtime._materialize_ax_target = AsyncMock(side_effect=materialize)
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value={
             "ok": True,
             "url": page.url,
@@ -233,7 +233,7 @@ async def test_exact_native_target_enrichment_breaks_search_timeout_deadlock_for
     assert not unresolved_writes(state)
     assert state["execution_journal"][0]["execution_state"] == "dispatched_unknown"  # Never fabricate success.
     await runtime.enrich_action_capabilities(inputs)
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()  # Already captured facts are reused.
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()  # Already captured facts are reused.
 
 
 def evidence_pair():
@@ -452,7 +452,7 @@ def test_first_result_never_compiles_second_result_click_and_reads_when_order_mi
 async def test_fixed_read_then_first_navigation_stays_in_one_guarded_loop():
     policy, llm, client, runtime, context, captured = setup_policy(goal="打开第一条搜索结果")
     runtime.decision_policy = policy
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://www.baidu.com/s?wd=清华大学")
     page.decision_snapshot["page_guard"] = {"document": "doc"}
     tools = [{"name": name} for name in ("browser_probe_cards", "browser_page_action")]
@@ -473,10 +473,10 @@ async def test_fixed_read_then_first_navigation_stays_in_one_guarded_loop():
     call = result.tool_calls[0]
     assert call.name == "browser_page_action"
     assert policy._guards[call.id].first_result["href"] == first_card()["primary_link"]
-    runtime._call_playwright_run_code_unsafe.return_value = {"ok": False}  # Result order changed before dispatch.
+    runtime.call_playwright_run_code_unsafe.return_value = {"ok": False}  # Result order changed before dispatch.
     with pytest.raises(ValueError, match="browser_policy_target_changed"):
         await policy.validate_tool_call(invoke_args(call.name, call.arguments, call.id), context.get_session_ref())
-    assert "first.length === 1" in runtime._call_playwright_run_code_unsafe.call_args.args[0]
+    assert "first.length === 1" in runtime.call_playwright_run_code_unsafe.call_args.args[0]
     llm.invoke.assert_not_awaited()
 
 
@@ -485,7 +485,7 @@ async def test_fixed_read_then_first_navigation_stays_in_one_guarded_loop():
 async def test_read_coverage_preserves_late_guards_llm_fallback_and_cancellation(failure):
     policy, llm, client, runtime, context, captured = setup_policy(goal="打开第一条搜索结果")
     runtime.decision_policy = policy
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.decision_snapshot["page_guard"] = {"document": "doc"}
     choose_matching(client, "READ ordered result")
     tools = [{"name": "browser_probe_cards"}]
@@ -534,7 +534,7 @@ def test_post_fill_search_expectation_uses_the_same_observed_form_field():
             ]
         },
     )
-    journal.prepare(session_for(state), inputs, SimpleNamespace(_ensure_page_state=lambda: page))
+    journal.prepare(session_for(state), inputs, SimpleNamespace(ensure_page_state=lambda: page))
     assert state["execution_journal"][0]["steps"][1]["expected_query"] == "new"
 
 
@@ -557,7 +557,7 @@ def test_first_result_late_guard_runs_real_dom_and_rejects_reordered_results(dom
     cards = dom_page.evaluate(run_code, build_card_probe_js(site_profiles=site_profiles_for_url(source)))
     first = next(c for c in cards["cards"] if c["result_index"] == 1 and c["order_known"])
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.register_interactives(observed)
     args = {"generation_id": page.generation_id, "op": "navigate", "url": first["primary_link"]}
     state = {"query_id": "q", "task_id": "t", "deadline_started_at": 1}
@@ -575,14 +575,14 @@ def test_first_result_late_guard_runs_real_dom_and_rejects_reordered_results(dom
         tool_name="browser_page_action",
         first_result={"title": first["title"], "href": first["primary_link"]},
     )
-    runtime._call_playwright_run_code_unsafe = AsyncMock(return_value={"ok": True})
+    runtime.call_playwright_run_code_unsafe = AsyncMock(return_value={"ok": True})
     # The synchronous Playwright fixture owns a greenlet event loop. Compile the
     # async guard with a stub transport off that loop, then execute its real JS here.
     with ThreadPoolExecutor(max_workers=1) as worker:
         worker.submit(
             asyncio.run, validate_guard(runtime, guard, invoke_args("browser_page_action", args), session)
         ).result()
-    script = runtime._call_playwright_run_code_unsafe.call_args.args[0]
+    script = runtime.call_playwright_run_code_unsafe.call_args.args[0]
     assert dom_page.evaluate(run_code, script)["ok"]
     dom_page.evaluate("document.querySelector('#content_left').append(document.querySelector('.result'))")
     after = dom_page.evaluate(run_code, build_card_probe_js(site_profiles=site_profiles_for_url(source)))

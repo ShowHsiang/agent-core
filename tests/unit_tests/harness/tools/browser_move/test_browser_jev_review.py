@@ -58,7 +58,7 @@ async def test_shadow_does_not_wait_for_provider_and_bounds_background_work(stre
         assert len(policy._shadow_tasks) == 1
         assert client.evaluate.await_count == 1
         assert not policy._guards
-        runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+        runtime.call_playwright_run_code_unsafe.assert_not_awaited()
     finally:
         await policy.release_task_resources()
     assert cancelled.is_set()
@@ -110,9 +110,9 @@ async def test_ability_manager_dispatch_checks_target_after_permission(monkeypat
     session = context.get_session_ref()
     policy.check_tool_call_binding(inputs, session)
     assert policy._guards  # The early rail cannot consume the final execution guard.
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
     if changed_after_permission:
-        runtime._call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
+        runtime.call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
     runtime.decision_policy = policy
     runtime.batch_interact = AsyncMock(return_value={"ok": True, "executed": True})
     tool = BrowserBatchInteractTool(runtime)
@@ -121,7 +121,7 @@ async def test_ability_manager_dispatch_checks_target_after_permission(monkeypat
     monkeypatch.setattr(Runner.resource_mgr, "get_tool", lambda **kwargs: tool)
     result, message = await manager._execute_single_tool_call(call, session, callback_context=callback)
     assert result.success is not changed_after_permission
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
     assert not policy._guards
     if changed_after_permission:
         runtime.batch_interact.assert_not_awaited()
@@ -147,7 +147,7 @@ async def test_tool_rejects_arguments_changed_after_rails():
     )
     assert result.success is False
     runtime.batch_interact.assert_not_awaited()
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -156,7 +156,7 @@ async def test_runtime_never_rebinds_a_stale_jev_target():
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     arguments = json.loads(result.tool_calls[0].arguments)
     runtime = _make_runtime()
-    runtime._page_state = fake._ensure_page_state()
+    runtime._page_state = fake.ensure_page_state()
     runtime._page_state.generation += 1
     runtime._refresh_stale_batch_targets = AsyncMock()
     runtime.ensure_runtime_ready = AsyncMock()
@@ -174,13 +174,13 @@ async def test_runtime_registers_the_coherent_projection_in_its_existing_metadat
     runtime = _make_runtime()
     runtime.decision_policy = policy
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock(return_value='- button "销量" [ref=e3]')
-    source = fake._ensure_page_state()
+    runtime.call_playwright_tool = AsyncMock(return_value='- button "销量" [ref=e3]')
+    source = fake.ensure_page_state()
     element = {"selector_hint": "#sales", "selector_hint_validated": True, "match_count": 1,
                "role": "button", "accessible_name": "销量", "text": "销量", "visible": True,
                "enabled": True, "actionable": True, "clickable": True,
                "decision_state": source.export_decision_targets()[0]["decision_state"]}
-    runtime._call_playwright_run_code_unsafe = AsyncMock(return_value={
+    runtime.call_playwright_run_code_unsafe = AsyncMock(return_value={
         "ok": True, "url": source.url, "title": source.title,
         "decision_probe": {"ok": True, "url": source.url if probe_valid else "https://other.test/",
                            "elements": [element], "decision_snapshot": source.decision_snapshot},
@@ -191,8 +191,8 @@ async def test_runtime_registers_the_coherent_projection_in_its_existing_metadat
         assert observed["decision_observation"]["capture_id"] == "capture-a"
         assert observed["decision_observation"]["controls"][0]["decision_state"]["node_guard"]
     assert "node_guard" not in json.dumps(observed["page_state"])
-    runtime._call_playwright_tool.assert_awaited_once_with("browser_snapshot", {})
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.call_playwright_tool.assert_awaited_once_with("browser_snapshot", {})
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -202,7 +202,7 @@ async def test_local_execution_guards_are_excluded_from_public_tool_results_and_
     runtime.decision_policy = policy
     runtime.ensure_runtime_ready = AsyncMock()
     runtime._code_executor = AsyncMock()
-    source = fake._ensure_page_state()
+    source = fake.ensure_page_state()
     element = {"selector_hint": "#sales", "selector_hint_validated": True, "match_count": 1,
                "role": "button", "accessible_name": "销量", "visible": True,
                "enabled": True, "actionable": True, "clickable": True,
@@ -213,7 +213,7 @@ async def test_local_execution_guards_are_excluded_from_public_tool_results_and_
     result = await runtime.probe_interactives()
     assert "node_guard" not in json.dumps(result)
     assert "decision_snapshot" not in json.dumps(result)
-    assert runtime._ensure_page_state().export_decision_observation()["controls"][0]["decision_state"]["node_guard"]
+    assert runtime.ensure_page_state().export_decision_observation()["controls"][0]["decision_state"]["node_guard"]
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,7 @@ async def test_strict_runtime_keeps_click_semantics_instead_of_navigation_rewrit
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     arguments = json.loads(result.tool_calls[0].arguments)
     runtime = _make_runtime()
-    runtime._page_state = fake._ensure_page_state()
+    runtime._page_state = fake.ensure_page_state()
     runtime.ensure_runtime_ready = AsyncMock()
     runtime._resolve_batch_steps = AsyncMock(side_effect=ValueError("stop before mutation"))
     result = await BrowserAgentRuntime.batch_interact(runtime, **arguments, allow_stale_recovery=False)

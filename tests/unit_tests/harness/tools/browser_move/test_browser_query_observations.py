@@ -56,7 +56,7 @@ def test_targeted_probe_keeps_matches_not_global_ax_index():
         "ok": True, "elements": [_interactive(f"#breakfast-{i}", f"Breakfast {i}") for i in range(15)],
         "total_candidates": 15,
     }, None, 0))
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.register_ax_snapshot("\n".join(f'- textbox "Global menu {i}" [ref=e{i}]' for i in range(25)))
     result = asyncio.run(runtime.probe_interactives(query="Breakfast", max_items=30))
     assert [item["text"] for item in result["elements"]] == [f"Breakfast {i}" for i in range(15)]
@@ -78,7 +78,7 @@ def test_targeted_probe_without_actionable_matches_does_not_return_unrelated_con
 
 def test_current_tab_metadata_is_atomic_and_ignores_other_tab_titles():
     runtime = _make_bare_runtime()
-    runtime._ensure_page_state().observe(url="https://search.test/", title="Search homepage")
+    runtime.ensure_page_state().observe(url="https://search.test/", title="Search homepage")
     result = {"result": "### Result\n- 0: [Other](https://search.test/?q=university)\n"
                         "- 1: (current) [University](https://university.test/)"}
     runtime.record_tool_reference_state(tool_name="browser_tabs", tool_args={"action": "select"}, tool_result=result)
@@ -171,7 +171,7 @@ def test_snapshot_filename_keeps_native_target_and_inline_content_contract():
 
 def test_find_result_links_are_not_current_page_metadata():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://search.test/?q=university", title="Search")
     runtime.record_tool_reference_state(tool_name="browser_find", tool_args={}, tool_result={
         "result": '- link "University" [ref=e1]:\n  - /url: https://university.test/',
@@ -257,7 +257,7 @@ def test_early_empty_lookup_is_not_confirmed_absence_and_real_rating_absence_sta
     state = _state("返回商品评分", ["product_rating"])
     _record(state, {"product_rating": None})
     assert state["evidence_slots"][0]["observation_status"] == "not_observed"
-    projection = BrowserWorkingContextStore._project_task_state(state)
+    projection = BrowserWorkingContextStore.project_task_state(state)
     assert projection["requirements"]["missing"]
     assert not projection["requirements"]["unavailable"]
     _record(state, {"fields": {"product_rating": {

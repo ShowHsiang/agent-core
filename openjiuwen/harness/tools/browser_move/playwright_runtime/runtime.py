@@ -471,6 +471,7 @@ class BrowserAgentRuntime:
         self._last_observed_url = ""
         self._semantic_state_tracker = SemanticStateTracker()
         self._task_turn = None
+        self._post_observation: Optional[Dict[str, Any]] = None
         _ACTIVE_BROWSER_RUNTIMES.add(self)
 
     @property
@@ -505,7 +506,7 @@ class BrowserAgentRuntime:
     def code_executor(self) -> Any:
         return self._code_executor
 
-    def _ensure_page_state(self) -> BrowserPageState:
+    def ensure_page_state(self) -> BrowserPageState:
         """Create PageState lazily for compatibility with lightweight test runtimes."""
         page_state = getattr(self, "_page_state", None)
         if isinstance(page_state, BrowserPageState):
@@ -522,24 +523,24 @@ class BrowserAgentRuntime:
 
     @property
     def page_id(self) -> str:
-        return self._ensure_page_state().page_id
+        return self.ensure_page_state().page_id
 
     @property
     def generation_id(self) -> str:
-        return self._ensure_page_state().generation_id
+        return self.ensure_page_state().generation_id
 
     def export_page_state(self) -> Dict[str, Any]:
-        return self._ensure_page_state().export()
+        return self.ensure_page_state().export()
 
     def set_task_requested_fields(self, fields: Iterable[str]) -> None:
         """Keep PageState projection scoped to fields requested by this task."""
 
-        self._ensure_page_state().set_requested_fields(fields)
+        self.ensure_page_state().set_requested_fields(fields)
 
     def resolve_model_target_id(self, target_id: str) -> BrowserTarget:
         """Resolve or safely refresh a runtime-owned model target."""
 
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         normalized = str(target_id or "").strip()
         target = page_state.get_target(normalized)
         if target is None:
@@ -559,18 +560,18 @@ class BrowserAgentRuntime:
     def target_recovery_state(self, target_id: str) -> Dict[str, Any]:
         """Return bounded current-generation recovery details for one target."""
 
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         return {
             "current_generation": page_state.generation_id,
             "candidate_fresh_targets": page_state.recovery_candidates(target_id, limit=5),
         }
 
     def _advance_page_generation(self) -> None:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         page_state.advance()
         self._page_generation = page_state.generation
 
-    def _observe_page_url(self, url: Any, *, force_navigation: bool = False) -> None:
+    def observe_page_url(self, url: Any, *, force_navigation: bool = False) -> None:
         normalized = str(url or "").strip()
         changed = bool(
             normalized
@@ -581,7 +582,7 @@ class BrowserAgentRuntime:
         )
         if force_navigation or changed:
             self._advance_page_generation()
-        self._ensure_page_state().observe(url=normalized)
+        self.ensure_page_state().observe(url=normalized)
         if normalized:
             self._last_observed_url = normalized
 
@@ -718,7 +719,7 @@ class BrowserAgentRuntime:
         return bool(cls.classify_tool_result(value)["success"])
 
     def _register_snapshot_refs(self, value: Any, *, replace: bool = False) -> None:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         registered = page_state.replace_ax_snapshot(value) if replace else page_state.register_ax_snapshot(value)
         if registered:
             return
@@ -728,7 +729,7 @@ class BrowserAgentRuntime:
             page_state.reference_generations[str(ref_value)] = page_state.generation
 
     def validate_reference_values(self, values: Iterable[str]) -> None:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         stale_values: set[str] = set()
         for ref_value in values:
             ref_generation = page_state.reference_generations.get(ref_value)
@@ -774,8 +775,8 @@ class BrowserAgentRuntime:
                 "select",
                 "close",
             }
-        self._observe_page_url(result_url, force_navigation=navigation_like)
-        self._ensure_page_state().observe(url=result_url, title=result_title)
+        self.observe_page_url(result_url, force_navigation=navigation_like)
+        self.ensure_page_state().observe(url=result_url, title=result_title)
         if "browser_snapshot" in normalized_name or "browser_find" in normalized_name:
             self._register_snapshot_refs(tool_result)
 
@@ -790,7 +791,7 @@ class BrowserAgentRuntime:
                 self._annotate_probe_generation(nested)
 
     def register_card_primary_links(self, result: Dict[str, Any]) -> None:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         cards = result.get("cards")
         if not isinstance(cards, list):
             return
@@ -833,11 +834,11 @@ class BrowserAgentRuntime:
                 return target.navigation_url
         explicit = str(parsed.get("primary_link") or parsed.get("href") or parsed.get("url") or "").strip()
         if explicit:
-            return navigation_destination(explicit, self._ensure_page_state().url)
+            return navigation_destination(explicit, self.ensure_page_state().url)
         for key in ("selector", "target"):
             selector = str(parsed.get(key) or "").strip()
             generation_and_href = self._selector_primary_links.get(selector)
-            if generation_and_href and generation_and_href[0] == self._ensure_page_state().generation:
+            if generation_and_href and generation_and_href[0] == self.ensure_page_state().generation:
                 return generation_and_href[1]
         return ""
 
@@ -903,11 +904,11 @@ class BrowserAgentRuntime:
         return result
 
     @staticmethod
-    def _unwrap_mcp_text_result(raw: Any) -> Any:
+    def unwrap_mcp_text_result(raw: Any) -> Any:
         """Extract text payload from common MCP tool-result shapes."""
         if isinstance(raw, dict):
             if raw.get("__browser_compact_rpc__") is True:
-                return BrowserAgentRuntime._unwrap_mcp_text_result(raw.get("payload"))
+                return BrowserAgentRuntime.unwrap_mcp_text_result(raw.get("payload"))
 
             content = raw.get("content")
             if isinstance(content, list):
@@ -1048,7 +1049,7 @@ class BrowserAgentRuntime:
 
         return await self._get_playwright_mcp_tool("browser_run_code"), "browser_run_code"
 
-    async def _call_playwright_run_code_unsafe(self, js_code: str) -> Any:
+    async def call_playwright_run_code_unsafe(self, js_code: str) -> Any:
         """Execute a compact runtime RPC over the registered Playwright transport."""
         total_started_at = time.perf_counter()
         resolution_started_at = time.perf_counter()
@@ -1085,7 +1086,7 @@ class BrowserAgentRuntime:
             },
         }
 
-    async def _call_playwright_tool(self, tool_name: str, inputs: Dict[str, Any]) -> Any:
+    async def call_playwright_tool(self, tool_name: str, inputs: Dict[str, Any]) -> Any:
         """Invoke one registered Playwright MCP tool and unwrap its result data."""
         tool = await self._get_playwright_mcp_tool(tool_name)
         result = await tool.invoke(inputs)
@@ -1108,8 +1109,8 @@ class BrowserAgentRuntime:
 
         async def _direct_code_executor(js_code: str):
             if execution_journal.active_policy_call("browser_batch_interact"):
-                return await self._call_fixed_with_observation(js_code)
-            return await self._call_playwright_run_code_unsafe(js_code)
+                return await self.call_fixed_with_observation(js_code)
+            return await self.call_playwright_run_code_unsafe(js_code)
 
         self._code_executor = _direct_code_executor
         self._controller.bind_code_executor(_direct_code_executor)
@@ -1130,8 +1131,8 @@ class BrowserAgentRuntime:
         snapshot_captured = False
         snapshot_audit: Dict[str, Any] = {}
         try:
-            raw_snapshot = await self._call_playwright_tool("browser_snapshot", {})
-            raw_snapshot = self._unwrap_mcp_text_result(raw_snapshot)
+            raw_snapshot = await self.call_playwright_tool("browser_snapshot", {})
+            raw_snapshot = self.unwrap_mcp_text_result(raw_snapshot)
             snapshot_audit = write_browser_agent_audit_artifact("ax_snapshot", raw_snapshot)
             snapshot_captured = True
             dom = decode_ax_text(raw_snapshot)
@@ -1144,21 +1145,21 @@ class BrowserAgentRuntime:
             )
 
         if include_decision:
-            metadata, metadata_error = await self._capture_browser_metadata(include_decision=True)
+            metadata, metadata_error = await self.capture_browser_metadata(include_decision=True)
         else:
-            metadata, metadata_error = await self._capture_browser_metadata()
+            metadata, metadata_error = await self.capture_browser_metadata()
 
-        self._observe_page_url(metadata.get("url"))
-        self._ensure_page_state().observe(title=metadata.get("title"))
+        self.observe_page_url(metadata.get("url"))
+        self.ensure_page_state().observe(title=metadata.get("title"))
         self._invalidate_changed_listing(metadata)
         if snapshot_captured:
             self._register_snapshot_refs(dom, replace=True)
         decision_probe = metadata.pop("decision_probe", None)
         if include_decision:
-            self._ensure_page_state().decision_snapshot = {}
+            self.ensure_page_state().decision_snapshot = {}
             if (isinstance(decision_probe, dict) and decision_probe.get("ok") is True
                     and decision_probe.get("url") == metadata.get("url")):
-                self._ensure_page_state().register_interactives(decision_probe)
+                self.ensure_page_state().register_interactives(decision_probe)
         page_state = self.export_page_state()
 
         errors = [error for error in (dom_error, metadata_error) if error]
@@ -1168,7 +1169,7 @@ class BrowserAgentRuntime:
         semantic_state.update(
             {
                 "url": metadata.get("url") or "",
-                "field_coverage": sorted(self._ensure_page_state().field_coverage),
+                "field_coverage": sorted(self.ensure_page_state().field_coverage),
             }
         )
         semantic_tracker = self._ensure_semantic_state_tracker()
@@ -1204,12 +1205,12 @@ class BrowserAgentRuntime:
             "dom": await self.project_native_observation(dom, "browser_snapshot"),
             "dom_error": dom_error,
             "audit": {"ax_snapshot": snapshot_audit} if snapshot_audit else {},
-            "decision_observation": self._ensure_page_state().export_decision_observation() if include_decision else {},
+            "decision_observation": self.ensure_page_state().export_decision_observation() if include_decision else {},
         }
 
     def _invalidate_changed_listing(self, metadata: Dict[str, Any]) -> None:
         current = metadata.get("semantic_state") or {}
-        page = self._ensure_page_state()
+        page = self.ensure_page_state()
         before = page.observed_selected_filters
         if before is None:
             before = self._ensure_semantic_state_tracker().current_state.get("selected_filters")
@@ -1260,16 +1261,16 @@ class BrowserAgentRuntime:
 
         await self.ensure_runtime_ready()
         decision_kwargs = {"include_decision": True} if include_decision else {}
-        metadata, metadata_error = await self._capture_browser_metadata(**decision_kwargs)
-        self._observe_page_url(metadata.get("url"))
-        self._ensure_page_state().observe(title=metadata.get("title"))
+        metadata, metadata_error = await self.capture_browser_metadata(**decision_kwargs)
+        self.observe_page_url(metadata.get("url"))
+        self.ensure_page_state().observe(title=metadata.get("title"))
         self._invalidate_changed_listing(metadata)
         decision_probe = metadata.pop("decision_probe", None)
         if include_decision:
-            self._ensure_page_state().decision_snapshot = {}
+            self.ensure_page_state().decision_snapshot = {}
             if (isinstance(decision_probe, dict) and decision_probe.get("ok") is True
                     and decision_probe.get("url") == metadata.get("url")):
-                self._ensure_page_state().register_interactives(decision_probe)
+                self.ensure_page_state().register_interactives(decision_probe)
         page_state = self.export_page_state()
         semantic_state = metadata.get("semantic_state")
         if not isinstance(semantic_state, dict):
@@ -1311,7 +1312,7 @@ class BrowserAgentRuntime:
             "dom_error": None,
             "reconciliation_only": True,
             "capture_source": metadata.get("capture_source", "reconciliation_rpc"),
-            "decision_observation": self._ensure_page_state().export_decision_observation() if include_decision else {},
+            "decision_observation": self.ensure_page_state().export_decision_observation() if include_decision else {},
         }
 
     async def capture_compact_browser_state(self, *, action_group_id: str) -> Dict[str, Any]:
@@ -1342,15 +1343,15 @@ class BrowserAgentRuntime:
             "error": None,
             "url": page_state.get("url") or "",
             "title": page_state.get("title") or "",
-            "tabs": self._ensure_page_state().observation_metadata.get("tabs") or [],
-            "page_position": self._ensure_page_state().observation_metadata.get("page_position") or {},
+            "tabs": self.ensure_page_state().observation_metadata.get("tabs") or [],
+            "page_position": self.ensure_page_state().observation_metadata.get("page_position") or {},
             "semantic_state": semantic_state,
             "semantic_progress": semantic_progress,
             "field_coverage": semantic_state["field_coverage"],
             "page_state": page_state,
             "dom": "",
             "dom_error": None,
-            "decision_observation": self._ensure_page_state().export_decision_observation(),
+            "decision_observation": self.ensure_page_state().export_decision_observation(),
         }
 
     def _with_semantic_provenance(
@@ -1365,7 +1366,7 @@ class BrowserAgentRuntime:
         semantic_progress["semantic_state"] = semantic_state
         return semantic_state
 
-    async def _capture_browser_metadata(
+    async def capture_browser_metadata(
         self, *, include_decision: bool = False
     ) -> tuple[Dict[str, Any], Optional[str]]:
         """Capture the bounded metadata used for semantic reconciliation."""
@@ -1380,12 +1381,12 @@ class BrowserAgentRuntime:
                     max_items=100,
                     generation_id=self.generation_id, decision_mode=True,
                     intent=getattr(getattr(self, "decision_policy", None), "current_intent", ""),
-                    site_profiles=site_profiles_for_url(self._ensure_page_state().url),
+                    site_profiles=site_profiles_for_url(self.ensure_page_state().url),
                 )
-            raw_metadata = await self._call_playwright_run_code_unsafe(
+            raw_metadata = await self.call_playwright_run_code_unsafe(
                 build_browser_state_metadata_js(decision_probe=decision_probe)
             )
-            raw_metadata = self._unwrap_mcp_text_result(raw_metadata)
+            raw_metadata = self.unwrap_mcp_text_result(raw_metadata)
             metadata = extract_json_object(raw_metadata)
             if not metadata:
                 return {}, "Could not parse browser state metadata result JSON"
@@ -1402,11 +1403,14 @@ class BrowserAgentRuntime:
 
     def _has_post_observation(self) -> bool:
         cached = getattr(self, "_post_observation", None)
-        page = self._ensure_page_state()
+        page = self.ensure_page_state()
         return bool(cached and time.monotonic() - cached["at"] <= 5
                     and cached["scope"] == (page.page_id, page.generation_id, page.interaction_revision, page.url))
 
-    def _retain_post_observation(self, parsed: Dict[str, Any]) -> None:
+    def clear_post_observation(self) -> None:
+        self._post_observation = None
+
+    def retain_post_observation(self, parsed: Dict[str, Any]) -> None:
         metadata = parsed.pop("_runtime_observation", None)
         if not isinstance(metadata, dict) or metadata.get("ok") is False:
             return
@@ -1415,8 +1419,8 @@ class BrowserAgentRuntime:
         probe = metadata.get("decision_probe") or {}
         if not probe.get("ok") or probe.get("url") != metadata.get("url"):
             return
-        self._observe_page_url(metadata.get("url"))
-        page = self._ensure_page_state()
+        self.observe_page_url(metadata.get("url"))
+        page = self.ensure_page_state()
         page.observe(title=metadata.get("title"))
         self._invalidate_changed_listing(metadata)
         page.register_interactives(probe)
@@ -1429,7 +1433,7 @@ class BrowserAgentRuntime:
         probe = "" if reuse_probe else build_interactive_probe_js(
             max_items=100, generation_id=self.generation_id, decision_mode=True,
             intent=getattr(getattr(self, "decision_policy", None), "current_intent", ""),
-            site_profiles=site_profiles_for_url(self._ensure_page_state().url),
+            site_profiles=site_profiles_for_url(self.ensure_page_state().url),
         )
         metadata = build_browser_state_metadata_js(decision_probe=probe)
         # Only runtime-owned operations enter here, after ordinary admission.
@@ -1441,12 +1445,12 @@ class BrowserAgentRuntime:
                 "new Promise(resolve => {timer = setTimeout(() => resolve(null), 2000);})]); "
                 "} finally {clearTimeout(timer);} } } catch (_) {} return result; }")
 
-    async def _call_fixed_with_observation(self, js_code: str) -> Any:
+    async def call_fixed_with_observation(self, js_code: str) -> Any:
         self._post_observation = None
-        raw = await self._call_playwright_run_code_unsafe(self._fixed_observation_script(js_code))
+        raw = await self.call_playwright_run_code_unsafe(self._fixed_observation_script(js_code))
         parsed = decode_mcp_result(raw)
         if isinstance(parsed, dict) and "_runtime_observation" in parsed:
-            self._retain_post_observation(parsed)
+            self.retain_post_observation(parsed)
             if isinstance(raw, dict) and raw.get("__browser_compact_rpc__"):
                 return {**raw, "payload": parsed}
             return parsed
@@ -1463,7 +1467,7 @@ class BrowserAgentRuntime:
         if not execution_journal.is_write(tool, args):
             return
         steps = args.get("steps") if tool.endswith("browser_batch_interact") else [args]
-        page = self._ensure_page_state()
+        page = self.ensure_page_state()
         generation = page.generation_id
         targets = {}
         try:
@@ -1482,11 +1486,11 @@ class BrowserAgentRuntime:
                     targets[target.selector] = target
             if not targets:
                 return
-            raw = await self._call_playwright_run_code_unsafe(build_interactive_probe_js(
+            raw = await self.call_playwright_run_code_unsafe(build_interactive_probe_js(
                 generation_id=generation, decision_mode=True, target_selectors=list(targets),
                 site_profiles=site_profiles_for_url(page.url),
             ))
-            data = extract_json_object(self._unwrap_mcp_text_result(raw))
+            data = extract_json_object(self.unwrap_mcp_text_result(raw))
             if page.generation_id != generation or data.get("url") != page.url:
                 return
             for item in data.get("capabilities") or []:
@@ -1612,7 +1616,7 @@ class BrowserAgentRuntime:
             error = str(outcome["error"] or "").strip()
             raise ValueError(error or f"Failed to resolve AX ref {ref_value} for batch execution")
         selector = f'[{attribute}="{marker_value}"]'
-        self._ensure_page_state().update_target_locator(
+        self.ensure_page_state().update_target_locator(
             target.target_id,
             {"selector": selector},
         )
@@ -1626,7 +1630,7 @@ class BrowserAgentRuntime:
         option: bool = False,
         allow_navigation_rewrite: bool = False,
     ) -> None:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         prefix = "option_" if option else ""
         target_id = str(
             step.get(f"{prefix}target_id") or (step.get("choose_target_id") if option else "") or ""
@@ -1750,7 +1754,7 @@ class BrowserAgentRuntime:
     ) -> tuple[list[Dict[str, Any]], str]:
         """Refresh stale Probe target IDs without reviving refs or CSS."""
 
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         refreshed_steps = [dict(step) for step in steps]
         for step in refreshed_steps:
             step.pop("_target_error", None)
@@ -1835,7 +1839,7 @@ class BrowserAgentRuntime:
         require_actionable: bool,
     ) -> str:
         """Refresh a stable Probe locator after observation-only generation churn."""
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         stale = page_state.get_target(target_id)
         if stale is None:
             raise ValueError(f"Unknown PageState target_id: {target_id}")
@@ -1871,8 +1875,8 @@ class BrowserAgentRuntime:
           const actionable = Boolean(visible && enabled && hit && (hit === element || element.contains(hit)));
           return JSON.stringify({{ok: true, match_count: nodes.length, visible, enabled, actionable}});
         }}"""
-        raw = await self._call_playwright_run_code_unsafe(script)
-        validation = extract_json_object(self._unwrap_mcp_text_result(raw))
+        raw = await self.call_playwright_run_code_unsafe(script)
+        validation = extract_json_object(self.unwrap_mcp_text_result(raw))
         valid = (
             (
                 validation.get("ok") is True
@@ -1896,7 +1900,7 @@ class BrowserAgentRuntime:
         )
 
     def _batch_recovery_candidates(self, steps: Any) -> list[Dict[str, Any]]:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         candidates: list[Dict[str, Any]] = []
         seen: set[str] = set()
         for step in steps if isinstance(steps, list) else []:
@@ -2069,7 +2073,7 @@ class BrowserAgentRuntime:
         request_id: str = "",
         allow_stale_recovery: bool = True,
     ) -> Dict[str, Any]:
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         steps = self.normalize_model_batch_steps(steps)
         validation_errors = validate_batch_steps(steps)
         validation_errors.extend(self._validate_batch_target_contract(steps))
@@ -2141,7 +2145,7 @@ class BrowserAgentRuntime:
             if isinstance(binding, dict) and binding.get("tab_switched"):
                 # bringToFront alone does not select the MCP session's active tab.
                 try:
-                    selected = await self._call_playwright_tool(
+                    selected = await self.call_playwright_tool(
                         "browser_tabs", {"action": "select", "index": binding.get("tab_index")},
                     )
                 except Exception as exc:
@@ -2159,14 +2163,14 @@ class BrowserAgentRuntime:
                     **binding, "url": str(runtime_page.get("url") or ""), "mcp_current_url": runtime_url,
                 }
             if result.get("execution_mode") != "primitive":
-                self._observe_page_url(runtime_url)
-            self._ensure_page_state().observe(
+                self.observe_page_url(runtime_url)
+            self.ensure_page_state().observe(
                 url=runtime_url,
                 title=runtime_title,
             )
             extracted = result.get("extracted")
             if isinstance(extracted, dict):
-                self._ensure_page_state().add_field_coverage(extracted.keys())
+                self.ensure_page_state().add_field_coverage(extracted.keys())
             result["generation_id"] = self.generation_id
             if recovered_generation:
                 result["generation_recovered_from"] = recovered_generation
@@ -2250,14 +2254,14 @@ class BrowserAgentRuntime:
             last_raw = await self._code_executor(code)
             if not self.tool_result_succeeded(last_raw):
                 return (
-                    {"ok": False, "error": str(self._unwrap_mcp_text_result(last_raw))[:1_000]},
+                    {"ok": False, "error": str(self.unwrap_mcp_text_result(last_raw))[:1_000]},
                     write_browser_agent_audit_artifact(artifact_kind, last_raw),
                     attempt,
                 )
-            last_raw = self._unwrap_mcp_text_result(last_raw)
+            last_raw = self.unwrap_mcp_text_result(last_raw)
             parsed = extract_json_object(last_raw)
             if parsed:
-                self._retain_post_observation(parsed)
+                self.retain_post_observation(parsed)
                 return (
                     parsed,
                     write_browser_agent_audit_artifact(artifact_kind, last_raw),
@@ -2292,7 +2296,7 @@ class BrowserAgentRuntime:
             max_items=effective_max_items,
             viewport_only=viewport_only,
             query=query,
-            site_profiles=site_profiles_for_url(self._ensure_page_state().url),
+            site_profiles=site_profiles_for_url(self.ensure_page_state().url),
             generation_id=self.generation_id,
             decision_mode=True,
         )
@@ -2316,15 +2320,15 @@ class BrowserAgentRuntime:
                 "error": parsed.get("error") or "Could not parse browser_probe_interactives result JSON",
                 "audit": raw_audit,
                 "elements": [],
-                "page_state": self._ensure_page_state().export_summary(),
+                "page_state": self.ensure_page_state().export_summary(),
             }
 
         parsed.setdefault("ok", True)
         parsed.setdefault("error", None)
         parsed.setdefault("elements", [])
-        self._observe_page_url(parsed.get("url"))
+        self.observe_page_url(parsed.get("url"))
         self._annotate_probe_generation(parsed)
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         matches = page_state.register_interactives(parsed)
         exported = page_state.export()
         # Node identity/fingerprints belong to the executor, including on recall.
@@ -2383,7 +2387,7 @@ class BrowserAgentRuntime:
                 "page_state": self.export_page_state(),
             }
 
-        site_profiles = site_profiles_for_url(self._ensure_page_state().url)
+        site_profiles = site_profiles_for_url(self.ensure_page_state().url)
         selector_cache = get_selector_cache()
         selector_cache_records = selector_cache.export_for_probe()
 
@@ -2417,16 +2421,16 @@ class BrowserAgentRuntime:
                 "error": parsed.get("error") or "Could not parse browser_probe_cards result JSON",
                 "audit": raw_audit,
                 "cards": [],
-                "page_state": self._ensure_page_state().export_summary(),
+                "page_state": self.ensure_page_state().export_summary(),
             }
 
         parsed.setdefault("ok", True)
         parsed.setdefault("error", None)
         parsed.setdefault("cards", [])
-        self._observe_page_url(parsed.get("url"))
+        self.observe_page_url(parsed.get("url"))
         self._annotate_probe_generation(parsed)
         normalize_card_probe_payload(parsed)
-        page_state = self._ensure_page_state()
+        page_state = self.ensure_page_state()
         cards = page_state.register_cards(parsed)
         self.register_card_primary_links(parsed)
         parsed["page_state"] = page_state.export()
@@ -2891,8 +2895,8 @@ class BrowserRuntimeRail(AgentRail):
         state = ctx.session.get_state(_BROWSER_PHASE_STATE_KEY) if getattr(ctx, "session", None) is not None else {}
         state = state if isinstance(state, dict) else {}
         first_chunk_timeout = isinstance(exception, TimeoutError) or "first_chunk" in str(exception).lower()
-        if (ctx.retry_attempt < _BROWSER_MODEL_RETRY_LIMIT and remaining_s > 20.0
-                and not first_chunk_timeout and not unresolved_writes(state)):
+        retry_budget = ctx.retry_attempt < _BROWSER_MODEL_RETRY_LIMIT and remaining_s > 20.0
+        if retry_budget and not first_chunk_timeout and not unresolved_writes(state):
             ctx.request_retry(delay_seconds=min(0.5, max(0.0, remaining_s - 5.0)))
             return
         ctx.request_force_finish(self._structured_model_failure(ctx, exception))
@@ -3297,12 +3301,13 @@ class BrowserRuntimeRail(AgentRail):
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
         if isinstance(state, dict) and state.get("replan_trial_pending") and group.get("read_only"):
             group["trial_admitted"] = True
-        if tool_name != "browser_phase" and (
-            execution_journal.is_write(tool_name, self._coerce_tool_args(normalized_args))
-            or not self._is_read_only_recovery(tool_name, normalized_args)
-            or (tool_name.endswith("browser_tabs") and self._coerce_tool_args(normalized_args).get("action") == "select")
-        ):
-            page = self._runtime._ensure_page_state()
+        coerced_args = self._coerce_tool_args(normalized_args)
+        interacts = execution_journal.is_write(tool_name, coerced_args) or not self._is_read_only_recovery(
+            tool_name, normalized_args
+        )
+        tab_select = tool_name.endswith("browser_tabs") and coerced_args.get("action") == "select"
+        if tool_name != "browser_phase" and (interacts or tab_select):
+            page = self._runtime.ensure_page_state()
             if callable(getattr(page, "mark_interaction", None)):
                 page.mark_interaction()
         extra = getattr(ctx, "extra", None)
@@ -3556,7 +3561,7 @@ class BrowserRuntimeRail(AgentRail):
         for step in steps:
             if step.get("op") != "click":
                 continue
-            control = execution_journal._control(self._runtime, step)
+            control = execution_journal.step_control(self._runtime, step)
             if control.get("href"):
                 links.append(str(control["href"]))
         return links[0] if len(links) == 1 else ""
@@ -5437,11 +5442,11 @@ class BrowserRuntimeRail(AgentRail):
             session.update_state({_BROWSER_PHASE_STATE_KEY: state})
             raise ValueError("action_budget_exhausted: up to three verification reads remain; return partial facts")
         pending_effects = unresolved_writes(state)
-        if (pending_effects and tool_name == "browser_phase" and phase_reads) or (
-            state.get("replan_trial_pending") and not pending_effects
-            and cls._is_read_only_recovery(tool_name, tool_args)
-            and (tool_name != "browser_phase" or phase_reads)
-        ):
+        verifying_effects = pending_effects and tool_name == "browser_phase" and phase_reads
+        trial_pending = state.get("replan_trial_pending") and not pending_effects
+        trial_tool = tool_name != "browser_phase" or phase_reads
+        read_only_trial = trial_pending and trial_tool and cls._is_read_only_recovery(tool_name, tool_args)
+        if verifying_effects or read_only_trial:
             keys = ["effects:" + str(entry["call_id"]) for entry in pending_effects] if pending_effects else [
                 str((state.get("execution_journal") or [{}])[-1].get("call_id", "task"))
             ]
@@ -6139,9 +6144,12 @@ class BrowserRuntimeRail(AgentRail):
         # evidence window; long reading loops must not resurrect its old gate.
         phase_version = (state.get("active_phase_contract") or {}).get("version", 0)
         query_id = str(state.get("query_id") or state.get("task_id") or "")
-        destination = next((item for item in reversed(stored_evidence)
-                            if item.get("destination_verified") and item.get("phase_version", 0) == phase_version
-                            and item.get("query_id", query_id) == query_id), None)
+        destination = None
+        for item in reversed(stored_evidence):
+            same_task = item.get("phase_version", 0) == phase_version and item.get("query_id", query_id) == query_id
+            if item.get("destination_verified") and same_task:
+                destination = item
+                break
         if destination and destination not in stored_evidence[-20:]:
             stored_evidence[:] = [destination, *stored_evidence[-19:]]
         else:
@@ -6181,8 +6189,9 @@ class BrowserRuntimeRail(AgentRail):
             and (result.get("metrics") or {}).get("tool_name") == "browser_navigate"
         ) or (tool_name == "browser_page_action" and tool_args.get("op") in {"navigate", "navigate_back"})
         binding = result.get("page_binding") or {}
-        if (tool_name == "browser_batch_interact" and result.get("execution_mode") == "compact_rpc"
-                and binding.get("tab_switched") and binding.get("mcp_selected") is not True):
+        compact_rpc = tool_name == "browser_batch_interact" and result.get("execution_mode") == "compact_rpc"
+        unbound_popup = binding.get("tab_switched") and binding.get("mcp_selected") is not True
+        if compact_rpc and unbound_popup:
             return {}  # An unbound popup cannot certify the current shared page.
         compact_navigation = (
             tool_name == "browser_batch_interact" and result.get("execution_mode") == "compact_rpc"

@@ -102,11 +102,11 @@ def test_page_identity_preserves_content_parameters_and_fragments(url, same):
     BrowserWorkingContextStore._merge_semantic_observation(state, {"semantic_state": {"url": url}})
     assert state["last_page"]["title"] == ("Item" if same else "")
     runtime = _make_bare_runtime()
-    runtime._observe_page_url(original)
-    runtime._ensure_page_state().observe(title="Item")
+    runtime.observe_page_url(original)
+    runtime.ensure_page_state().observe(title="Item")
     original_generation = runtime.generation_id
-    runtime._observe_page_url(url)
-    assert runtime._ensure_page_state().title == ("Item" if same else "")
+    runtime.observe_page_url(url)
+    assert runtime.ensure_page_state().title == ("Item" if same else "")
     assert (runtime.generation_id == original_generation) is same
 
 
@@ -311,7 +311,7 @@ def test_popup_binding_synchronizes_native_current_tab_without_replaying_steps(m
         }},
     })
     selected_url = "https://example.test/popup" if mode == "selected" else "https://example.test/old"
-    runtime._call_playwright_tool = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock(
         return_value=f"### Result\n- 2: (current) [Popup]({selected_url})",
         side_effect=RuntimeError("selection failed") if mode == "exception" else None,
     )
@@ -320,7 +320,7 @@ def test_popup_binding_synchronizes_native_current_tab_without_replaying_steps(m
         {"op": "wait_for_url", "url_contains": "/popup"},
     ], generation_id=runtime.generation_id))
     runtime._controller.run_action.assert_awaited_once()
-    runtime._call_playwright_tool.assert_awaited_once_with("browser_tabs", {"action": "select", "index": 2})
+    runtime.call_playwright_tool.assert_awaited_once_with("browser_tabs", {"action": "select", "index": 2})
     assert result["ok"] is (mode == "selected")
     assert result["steps"][0]["executed"]
     assert result["page_binding"]["mcp_selected"] is (mode == "selected")

@@ -139,7 +139,7 @@ def test_evaluate_does_not_repeat_cached_cards():
 
 def test_changed_sort_invalidates_cards_without_invalidating_controls():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     payload = {"elements": [{**_interactive("#sales", "Sales"), "kind": "sort_tab"}]}
     page.register_interactives(payload)
     cards = {"cards": [{**_interactive("#old-item", "Old item"), "title": "Old item",
@@ -156,7 +156,7 @@ def test_changed_sort_invalidates_cards_without_invalidating_controls():
 
 def test_sort_wait_repair_uses_only_a_known_preceding_sort_control():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     payload = {"elements": [{**_interactive("#sales", "Sales"), "kind": "sort_tab"}]}
     page.register_interactives(payload)
     target = payload["elements"][0]["target_id"]
