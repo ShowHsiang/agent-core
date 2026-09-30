@@ -10,6 +10,8 @@ import uuid
 from typing import Any, Iterable, Optional, Union
 
 import httpx
+from pydantic import BaseModel
+
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
@@ -22,7 +24,6 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provider_error_text
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 from openjiuwen.core.foundation.tool import ToolInfo
-from pydantic import BaseModel
 
 
 class OpenAIAccountResponsesError(Exception):

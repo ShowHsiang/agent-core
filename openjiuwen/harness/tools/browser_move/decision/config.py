@@ -40,7 +40,8 @@ class BrowserDecisionConfig:
         ):
             raise ValueError("OpenRouter requires a typesafe/jev version or ~typesafe/jev-latest")
         address = urlsplit(self.api_base)
-        if address.scheme != "https" or not address.hostname or address.username or address.password:
+        has_credentials = address.username or address.password
+        if address.scheme != "https" or not address.hostname or has_credentials:
             raise ValueError("browser.decision.api_base requires an HTTPS origin without credentials")
         if address.query or address.fragment:
             raise ValueError("browser.decision.api_base must not contain query or fragment")

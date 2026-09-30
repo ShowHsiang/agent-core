@@ -177,7 +177,7 @@ def test_values_do_not_cross_fields_or_use_output_titles_as_input():
 async def test_phase_progress_and_executable_state_reach_jev_without_local_guards():
     policy, _, client, runtime, context, captured = setup_policy()
     state = context.get_session_ref().get_state(PHASE_KEY)
-    controls = runtime._ensure_page_state().export_decision_targets()
+    controls = runtime.ensure_page_state().export_decision_targets()
     set_phase(
         state,
         {
@@ -210,7 +210,7 @@ async def test_finish_reentry_preserves_budget_deadline_and_does_not_repeat_same
     assert client.evaluate.await_count == 1
     state = context.get_session_ref().get_state(PHASE_KEY)
     deadline = state["deadline_at"]
-    controls = runtime._ensure_page_state().export_decision_targets()
+    controls = runtime.ensure_page_state().export_decision_targets()
     set_phase(
         state,
         {
@@ -274,11 +274,11 @@ def cart_runtime(items):
     page = SimpleNamespace(export_decision_targets=lambda: controls,
                            get_target=lambda _: SimpleNamespace(selector=None, ref=None))
     return SimpleNamespace(
-        _ensure_page_state=lambda: page,
-        _call_playwright_run_code_unsafe=AsyncMock(
+        ensure_page_state=lambda: page,
+        call_playwright_run_code_unsafe=AsyncMock(
             return_value={"ok": True, "complete": True, "items": items, "url": "https://shop.test/cart"}
         ),
-        _unwrap_mcp_text_result=lambda x: x,
+        unwrap_mcp_text_result=lambda x: x,
     )
 
 
@@ -302,7 +302,7 @@ async def test_add_timeout_blocks_both_models_until_actual_partial_delta_is_read
     # An unrelated snapshot is not proof of either cart addition.
     observe_conditions(state, {"capture_id": "fresh", "url": "https://shop.test/cart"})
     assert unresolved_writes(state)
-    runtime._call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
+    runtime.call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
     await read_cart(runtime, condition, state, baseline=False)
     assert not unresolved_writes(state)
     assert condition["status"] == "unsatisfied"  # Keyboard still missing; not full completion.
@@ -327,7 +327,7 @@ async def test_cart_business_postconditions_reject_tool_ok_and_nonempty_cart(obs
     state, condition = cart_state()
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await read_cart(runtime, condition, state, baseline=True)
-    runtime._call_playwright_run_code_unsafe.return_value["items"] = observed
+    runtime.call_playwright_run_code_unsafe.return_value["items"] = observed
     await read_cart(runtime, condition, state, baseline=False)
     assert condition["status"] == "unsatisfied"
     state.update(requirements_source="inferred", evidence_slots=[{"value": "cart is nonempty"}])
@@ -350,7 +350,7 @@ async def test_cart_verified_delta_preserves_initial_baseline_and_original_items
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await read_cart(runtime, condition, state, baseline=True)
     baseline = copy.deepcopy(condition["baseline"])
-    runtime._call_playwright_run_code_unsafe.return_value["items"] = {
+    runtime.call_playwright_run_code_unsafe.return_value["items"] = {
         "old-item": 2,
         "mouse-black": 2,
         "keyboard-us": 1,
@@ -513,7 +513,7 @@ async def test_phase_revision_invalidates_previously_compiled_action_before_disp
     policy, _, _, runtime, context, captured = setup_policy()
     response = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     compiled = response.tool_calls[0]
-    controls = runtime._ensure_page_state().export_decision_targets()
+    controls = runtime.ensure_page_state().export_decision_targets()
     set_phase(
         context.get_session_ref().get_state(PHASE_KEY),
         {
@@ -528,14 +528,14 @@ async def test_phase_revision_invalidates_previously_compiled_action_before_disp
             SimpleNamespace(tool_call=compiled, tool_name=compiled.name, tool_args=compiled.arguments),
             context.get_session_ref(),
         )
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_jev_can_request_bounded_verification_through_normal_tool_binding():
     policy, _, client, runtime, context, captured = setup_policy()
     state = context.get_session_ref().get_state(PHASE_KEY)
-    controls = runtime._ensure_page_state().export_decision_targets()
+    controls = runtime.ensure_page_state().export_decision_targets()
     set_phase(
         state,
         {
@@ -560,7 +560,7 @@ async def test_jev_can_request_bounded_verification_through_normal_tool_binding(
     policy.check_tool_call_binding(inputs, context.get_session_ref())
     runtime.decision_policy = policy
     runtime.capture_reconciliation_browser_state = AsyncMock(
-        return_value={"ok": True, "decision_observation": runtime._ensure_page_state().export_decision_observation()}
+        return_value={"ok": True, "decision_observation": runtime.ensure_page_state().export_decision_observation()}
     )
     output = await BrowserPhaseTool(runtime).invoke(
         json.loads(compiled.arguments),
@@ -570,7 +570,7 @@ async def test_jev_can_request_bounded_verification_through_normal_tool_binding(
     assert output.success and output.data["phase"]["status"] == "in_progress"
     assert not policy._guards  # A verification request consumes its capability too.
     runtime.capture_reconciliation_browser_state.assert_awaited_once()
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -585,7 +585,7 @@ async def test_unknown_multi_write_batch_cannot_resume_from_only_an_intermediate
     with journal.execution_scope(session, inputs):
         journal.mark_dispatched()
     journal.record_result(session, inputs, {"success": False}, {"executed": None})
-    runtime._call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
+    runtime.call_playwright_run_code_unsafe.return_value["items"]["mouse-black"] = 2
     await read_cart(runtime, condition, state, baseline=False)
     assert unresolved_writes(state)  # The remote batch may still be executing its later step.
 
@@ -596,7 +596,7 @@ async def test_verified_cart_quantities_do_not_prove_a_requested_total():
     state["goal"] += "并给出当前合计"
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await read_cart(runtime, condition, state, baseline=True)
-    runtime._call_playwright_run_code_unsafe.return_value["items"] = {"old-item": 2, "mouse-black": 2, "keyboard-us": 1}
+    runtime.call_playwright_run_code_unsafe.return_value["items"] = {"old-item": 2, "mouse-black": 2, "keyboard-us": 1}
     await read_cart(runtime, condition, state, baseline=False)
     state.update(requirements_source="inferred", evidence_slots=[{"value": "cart nonempty"}])
     session = session_for(state)
@@ -617,14 +617,14 @@ async def test_decision_cannot_cross_task_with_same_session_page_and_phase_versi
             SimpleNamespace(tool_call=compiled, tool_name=compiled.name, tool_args=compiled.arguments),
             context.get_session_ref(),
         )
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_phase_verification_refreshes_url_and_failed_read_cannot_recertify_cached_capture():
     _, _, _, runtime, context, _ = setup_policy()
     session = context.get_session_ref()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     current = page.export_decision_observation()
     args = {
         "op": "set",

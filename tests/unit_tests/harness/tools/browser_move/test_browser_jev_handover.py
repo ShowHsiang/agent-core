@@ -75,7 +75,7 @@ async def test_tools_becoming_available_can_unlock_a_local_gate_without_wasting_
 @pytest.mark.asyncio
 async def test_long_task_url_is_never_compiled_from_a_truncated_state():
     policy, llm, client, runtime, context, captured = setup_policy(goal="打开 https://example.test/" + "a" * 4100)
-    runtime._ensure_page_state().decision_snapshot["page_guard"] = {"document": "d"}
+    runtime.ensure_page_state().decision_snapshot["page_guard"] = {"document": "d"}
     result = await policy.invoke(await messages_for(policy, context, captured),
                                  tools=[{"name": "browser_page_action"}])
     assert result.metadata["browser_policy"]["reason"] == "task_intent_truncated"
@@ -142,7 +142,7 @@ async def test_soft_fallback_reenters_only_after_meaningful_change_and_survives_
     session = SimpleNamespace(get_session_id=lambda: "recreated-child", get_state=lambda _: phase)
     context = SimpleNamespace(get_session_ref=lambda: session)
     policy = BrowserPolicyModel(llm, policy.decision_config, runtime, client=client)
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.decision_snapshot.update(capture_id="fresh-clock-only", observed_at_ms=99999)
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert result.metadata["browser_policy"]["cached_fallback"]
@@ -227,7 +227,7 @@ async def test_execution_receipts_postconditions_and_no_automatic_replay():
     inputs = SimpleNamespace(tool_call=call, tool_name=call.name, tool_args=call.arguments)
     policy.record_execution(inputs, context.get_session_ref(), {"success": True, "executed": True})
     policy.record_execution(inputs, context.get_session_ref(), {"success": True, "executed": True})
-    runtime._ensure_page_state().decision_snapshot["capture_id"] = "post-action-capture"
+    runtime.ensure_page_state().decision_snapshot["capture_id"] = "post-action-capture"
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     state = context.get_session_ref().get_state(PHASE)["decision_policy"]
     assert state["counters"]["executions_ok"] == 1
@@ -236,7 +236,7 @@ async def test_execution_receipts_postconditions_and_no_automatic_replay():
     assert client.evaluate.await_count == 2
     second = result.tool_calls[0]
     policy.record_execution(SimpleNamespace(tool_call=second), context.get_session_ref(), {"success": True})
-    runtime._ensure_page_state().decision_snapshot["capture_id"] = "second-noop"
+    runtime.ensure_page_state().decision_snapshot["capture_id"] = "second-noop"
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert result.metadata["browser_policy"]["reason"] == "no_supported_actions"
     assert client.evaluate.await_count == 2  # This button cannot consume further decisions.
@@ -274,7 +274,7 @@ def test_unsupported_controls_are_removed_before_candidate_budget():
 @pytest.mark.parametrize("successful_fill", [False, True])
 async def test_llm_supplied_search_value_is_bound_to_its_observed_node_only(successful_fill):
     policy, llm, client, runtime, context, captured = setup_policy(goal="查汇率")
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     target = page.get_target(page.export_decision_targets()[0]["target_id"])
     target.role, target.name = "combobox", "搜索"
     target.decision_state.update(tag="input", input_type="search", search_like=True, current_value="")
@@ -405,7 +405,7 @@ def test_page_actions_require_observed_capabilities_and_explicit_urls():
 @pytest.mark.parametrize("mutation", [None, "arguments", "node", "capability", "timeout"])
 async def test_page_dispatch_uses_ability_manager_late_guard_and_never_retries(monkeypatch, mutation):
     policy, llm, client, runtime, context, captured = setup_policy(goal="打开 https://destination.test/")
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.decision_snapshot["page_guard"] = {"document": "doc-a", "history_length": 1}
     choose_operation(client, "NAVIGATE")
     # Only the authorized page helper is supplied.
@@ -418,24 +418,24 @@ async def test_page_dispatch_uses_ability_manager_late_guard_and_never_retries(m
     runtime.service = SimpleNamespace(allowed_tool_names=("browser_navigate",))
     runtime.classify_tool_result = BrowserAgentRuntime.classify_tool_result
     runtime.record_tool_reference_state = MagicMock()
-    runtime._call_playwright_tool = AsyncMock(return_value={"ok": True})
+    runtime.call_playwright_tool = AsyncMock(return_value={"ok": True})
     policy.check_tool_call_binding(inputs, session)
     if mutation == "node":
-        runtime._call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
+        runtime.call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
     elif mutation == "capability":
         runtime.service.allowed_tool_names = ()
     elif mutation == "arguments":
         inputs.tool_args["url"] = "https://changed.test/"
         call.arguments = json.dumps(inputs.tool_args)
     elif mutation == "timeout":
-        runtime._call_playwright_tool.side_effect = TimeoutError()
+        runtime.call_playwright_tool.side_effect = TimeoutError()
     tool = BrowserPageActionTool(runtime)
     manager = AbilityManager(owner_id="jev-page-dispatch")
     manager.add(tool.card)
     monkeypatch.setattr(Runner.resource_mgr, "get_tool", lambda **kwargs: tool)
     output, _ = await manager._execute_single_tool_call(call, session, callback_context=callback)
     assert output.success is (mutation is None)
-    assert runtime._call_playwright_tool.await_count == (1 if mutation in {None, "timeout"} else 0)
+    assert runtime.call_playwright_tool.await_count == (1 if mutation in {None, "timeout"} else 0)
     if mutation == "timeout":
         assert output.data["executed"] is None and output.data["error"] == "page_action_uncertain"
         assert output.data["execution_state"] == "dispatched_unknown"
@@ -487,9 +487,9 @@ async def test_recovery_metadata_includes_fresh_decision_targets_without_extra_a
     runtime = _make_runtime()
     runtime.decision_policy = policy
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock()
-    page = fake._ensure_page_state()
-    runtime._capture_browser_metadata = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock()
+    page = fake.ensure_page_state()
+    runtime.capture_browser_metadata = AsyncMock(
         return_value=(
             {
                 "url": page.url,
@@ -522,8 +522,8 @@ async def test_recovery_metadata_includes_fresh_decision_targets_without_extra_a
     )
     assert observed["decision_observation"]["controls"]
     assert observed["reconciliation_only"] and observed["dom"] == ""
-    runtime._capture_browser_metadata.assert_awaited_once_with(include_decision=True)
-    runtime._call_playwright_tool.assert_not_awaited()
+    runtime.capture_browser_metadata.assert_awaited_once_with(include_decision=True)
+    runtime.call_playwright_tool.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -535,7 +535,7 @@ async def test_failed_dispatch_leaves_other_fresh_local_choices_available():
         SimpleNamespace(tool_call=call), context.get_session_ref(), {"success": False, "executed": None}
     )
     assert not policy._guards
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.get_target(page.export_decision_targets()[0]["target_id"]).name = "new control"
     failed = ToolMessage(tool_call_id=call.id, content='{"ok":false}', metadata={"success": False})
     result = await policy.invoke([failed, *await messages_for(policy, context, captured)], tools=TOOLS)

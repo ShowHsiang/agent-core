@@ -124,7 +124,7 @@ def test_navigation_destination_distinguishes_links_and_state_controls(href, rol
 
 def test_gebiz_match_any_link_is_clickable_and_not_rewritten():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://gebiz.test/BOListing.xhtml")
     control = {**_interactive("#match-any", "Match Any"), "role": "link",
                "href": "https://gebiz.test/BOListing.xhtml#"}
@@ -154,7 +154,7 @@ def test_bing_type_text_is_normalized_before_both_validators():
 
 def test_sort_wait_consumes_the_same_runtime_target_and_preserves_observed_source():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     payload = {"elements": [{**_interactive("#sales", "Sales"), "role": "tab", "kind": "sort_tab"}]}
     page.register_interactives(payload)
     target = payload["elements"][0]["target_id"]
@@ -173,7 +173,7 @@ def test_sort_wait_consumes_the_same_runtime_target_and_preserves_observed_sourc
 
 def test_ax_materialization_error_does_not_publish_a_fake_selector():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.register_ax_snapshot('- textbox "Search" [ref=e1]')
     tool = SimpleNamespace(invoke=AsyncMock(return_value={"result": "### Error\nRef e1 not found"}))
     runtime._get_playwright_mcp_tool = AsyncMock(return_value=tool)
@@ -186,7 +186,7 @@ def test_ax_materialization_error_does_not_publish_a_fake_selector():
 @pytest.mark.parametrize("ref", ["e1", "ref=e1", "[ref=e1]"])
 def test_native_ax_ref_aliases_use_the_same_batch_resolver(ref):
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.register_ax_snapshot('- textbox "Search" [ref=e1]')
     tool = SimpleNamespace(invoke=AsyncMock(return_value={"result": True}))
     runtime._get_playwright_mcp_tool = AsyncMock(return_value=tool)
@@ -344,7 +344,7 @@ def test_corrected_entity_replaces_old_product_link_as_well_as_title_and_price()
 
 def test_evaluated_link_and_title_do_not_impersonate_navigation_metadata():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     page.observe(url="https://www.bing.com/search?q=tsinghua", title="Bing results")
     runtime.record_tool_reference_state(
         tool_name="browser_evaluate", tool_args={},

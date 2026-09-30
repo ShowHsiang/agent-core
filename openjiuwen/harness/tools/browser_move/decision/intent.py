@@ -15,33 +15,30 @@ _ENVELOPE_PREFIXES = ("你收到一条消息：", "You receive a new message:")
 _QUOTES = re.compile(r'"([^"\n]*)"|“([^”\n]*)”|「([^」\n]*)」|『([^』\n]*)』')
 
 
+def _is_user_message(value: dict) -> bool:
+    from_user = value.get("type") == "user input" or value.get("origin_kind") == "external_user_authored"
+    return "source" in value and from_user
+
+
 def normalize_goal(value: Any) -> str:
     """Unwrap only the host's recognized user-message envelope, never arbitrary JSON."""
     for _ in range(3):
         if isinstance(value, dict):
-            if (
-                isinstance(value.get("content"), str)
-                and "source" in value
-                and (value.get("type") == "user input" or value.get("origin_kind") == "external_user_authored")
-            ):
+            if isinstance(value.get("content"), str) and _is_user_message(value):
                 value = value["content"]
                 continue
             return ""
         text = clean_unicode(str(value or "")).strip()
         prefix = next((item for item in _ENVELOPE_PREFIXES if text.startswith(item)), "")
         wrapped = bool(prefix)
-        candidate = text[len(prefix) :].strip() if wrapped else text
+        candidate = text[len(prefix):].strip() if wrapped else text
         if candidate.startswith("{"):
             try:
                 parsed = json.loads(candidate)
             except ValueError:
                 # A truncated host envelope must not produce metadata fill values.
                 return "" if wrapped else text
-            if (
-                isinstance(parsed, dict)
-                and "source" in parsed
-                and (parsed.get("type") == "user input" or parsed.get("origin_kind") == "external_user_authored")
-            ):
+            if isinstance(parsed, dict) and _is_user_message(parsed):
                 value = parsed
                 continue
         return text
@@ -94,7 +91,10 @@ def search_values(goal: str) -> list[str]:
             values.append(next(part for part in quoted.groups() if part is not None))
             rest = tail[quoted.end():]
             # Two search literals joined by a conjunction remain ambiguous.
-            while conjunction := re.match(r"\s*(?:和|以及|、|and|or)\s*", rest, re.I):
+            while True:
+                conjunction = re.match(r"\s*(?:和|以及|、|and|or)\s*", rest, re.I)
+                if not conjunction:
+                    break
                 rest = rest[conjunction.end():]
                 quoted = _QUOTES.match(rest)
                 if not quoted:

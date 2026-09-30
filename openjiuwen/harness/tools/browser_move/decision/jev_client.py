@@ -47,8 +47,8 @@ def validate_choice(answer: Any, criteria: dict[str, str], threshold: float) -> 
         raise DecisionUnavailable("invalid_choice_type")
     probabilities = answer.get("probabilities")
     chosen, confidence = answer.get("choice"), answer.get("confidence")
-    if (not isinstance(chosen, str) or chosen not in criteria or not isinstance(probabilities, dict)
-            or set(probabilities) != set(criteria)):
+    known_choice = isinstance(chosen, str) and chosen in criteria
+    if not known_choice or not isinstance(probabilities, dict) or set(probabilities) != set(criteria):
         raise DecisionUnavailable("invalid_choice_options")
     values = [confidence, *probabilities.values()]
     if any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) or not 0 <= v <= 1

@@ -279,14 +279,15 @@ class BrowserSubagentStatusLogger:
         inputs = getattr(ctx, "inputs", None)
         response = _mapping_get(inputs, "response", None)
         elapsed_ms = self._finish_model_window(ctx, response=response)
+        metadata = _mapping_get(response, "metadata", {}) or {}
         self._emit(
             "model_end",
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
                 "elapsed_ms": elapsed_ms,
-                "model_source": (_mapping_get(response, "metadata", {}) or {}).get("browser_policy", {}).get("route", "llm"),
-                "browser_policy": (_mapping_get(response, "metadata", {}) or {}).get("browser_policy"),
+                "model_source": metadata.get("browser_policy", {}).get("route", "llm"),
+                "browser_policy": metadata.get("browser_policy"),
                 "response_summary": self._summarize_model_response(response),
             },
         )

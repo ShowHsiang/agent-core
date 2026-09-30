@@ -85,7 +85,7 @@ def validate_binding(runtime: Any, guard: DecisionGuard, inputs: Any, session: A
         raise ValueError("browser_policy_phase_changed")
     if inputs.tool_name != guard.tool_name or canonical_arguments(inputs.tool_args) != guard.arguments:
         raise ValueError("browser_policy_arguments_changed")
-    state = runtime._ensure_page_state()  # Runtime owns this check; never refresh a stale policy target.
+    state = runtime.ensure_page_state()  # Runtime owns this check; never refresh a stale policy target.
     if state.page_id != guard.page_id or state.generation_id != guard.generation_id or state.url != guard.url:
         raise ValueError("browser_policy_stale_page")
     if not guard.target_id and guard.tool_name in {
@@ -125,7 +125,8 @@ async def validate_guard(runtime: Any, guard: DecisionGuard, inputs: Any, sessio
             from ..playwright_runtime.site_profiles import site_profiles_for_url
 
             probe = build_card_probe_js(max_cards=12, viewport_only=False, include_buttons=False,
-                                        site_profiles=site_profiles_for_url(guard.url), generation_id=guard.generation_id)
+                                        site_profiles=site_profiles_for_url(guard.url),
+                                        generation_id=guard.generation_id)
             expected = json.dumps(guard.first_result, ensure_ascii=True)
             script = """async (page) => {
               const pageCheck = await (PAGE_CHECK)(page);
@@ -157,8 +158,8 @@ async def validate_guard(runtime: Any, guard: DecisionGuard, inputs: Any, sessio
 
 
 async def _validate_script(runtime: Any, script: str) -> None:
-    result = await runtime._call_playwright_run_code_unsafe(script)
-    result = runtime._unwrap_mcp_text_result(result)
+    result = await runtime.call_playwright_run_code_unsafe(script)
+    result = runtime.unwrap_mcp_text_result(result)
     # Use the same transport decoder as runtime observations, not arbitrary JSON mining.
     from ..utils.parsing import decode_mcp_result
 

@@ -90,12 +90,12 @@ PHASE_SCHEMA = _object_schema({
                      "items": _object_schema({"target_id": _TEXT, "value": _TEXT}, ["target_id", "value"])},
     "conditions": {"type": "array", "maxItems": 12, "items": {"oneOf": list(CONDITION_SCHEMAS.values())}},
 }, ["op"])
+_SET_ONLY_FIELDS = ("objective", "allowed_operations", "target_ids", "bound_values", "conditions")
 PHASE_SCHEMA["oneOf"] = [
     {"properties": {"op": {"const": "set"}}, "required": ["objective"],
      "not": {"anyOf": [{"required": ["phase_version"]}, {"required": ["inspect_cart"]}]}},
     {"properties": {"op": {"const": "verify"}},
-     "not": {"anyOf": [{"required": [k]} for k in ("objective", "allowed_operations", "target_ids",
-                                                    "bound_values", "conditions")]}},
+     "not": {"anyOf": [{"required": [k]} for k in _SET_ONLY_FIELDS]}},
 ]
 
 
@@ -125,14 +125,21 @@ def validate_request(args: dict[str, Any]) -> None:
                               'verify: {"op":"verify"} (optional phase_version or inspect_cart:true).')
 
 
+def _is_bindable(control: dict[str, Any], counts: dict[str, int]) -> bool:
+    key = control.get("target_id")
+    if not key or counts[key] != 1:
+        return False
+    identity = node_identity(control)
+    return bool(identity["document"]) and identity["node"] is not None
+
+
 def binding_targets(controls: list[dict[str, Any]], *, limit: int = 30) -> dict[str, Any]:
     """Only publish identities accepted by _control, without local node guards."""
     counts: dict[str, int] = {}
     for control in controls:
         key = control.get("target_id")
         counts[key] = counts.get(key, 0) + 1
-    valid = [c for c in controls if c.get("target_id") and counts[c["target_id"]] == 1
-             and node_identity(c)["document"] and node_identity(c)["node"] is not None]
+    valid = [c for c in controls if _is_bindable(c, counts)]
     return {
         "targets": [{"target_id": c["target_id"], "name": str(c.get("name") or c.get("text") or "")[:120],
                      "role": c.get("role"), "field": (c.get("decision_state") or {}).get("tag")}
@@ -166,17 +173,15 @@ def same_node(binding: dict[str, Any], control: dict[str, Any]) -> bool:
     )
 
 
+def _awaits_resolution(entry: dict[str, Any]) -> bool:
+    in_flight = entry.get("execution_state") in {"prepared", "dispatched", "dispatched_unknown"}
+    if in_flight and entry.get("impact", "unknown") not in {"read", "local_ui"}:
+        return True
+    return bool(entry.get("requires_verification")) and entry.get("execution_state") != "verified"
+
+
 def unresolved_writes(state: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        entry
-        for entry in state.get("execution_journal", [])
-        if (
-            entry.get("execution_state") in {"prepared", "dispatched", "dispatched_unknown"}
-            and entry.get("impact", "unknown") not in {"read", "local_ui"}
-        )
-        or entry.get("requires_verification")
-        and entry.get("execution_state") != "verified"
-    ]
+    return [entry for entry in state.get("execution_journal", []) if _awaits_resolution(entry)]
 
 
 def missing_conditions(state: dict[str, Any]) -> list[str]:
@@ -342,7 +347,7 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
                 )
             ):
                 raise ValueError("invalid_cart_deltas")
-            if type(spec.get("preserve_existing", True)) is not bool:
+            if not isinstance(spec.get("preserve_existing", True), bool):
                 raise ValueError("invalid_cart_preservation_scope")
             spec.setdefault("preserve_existing", True)
             if not spec["preserve_existing"] and re.search(
@@ -382,13 +387,12 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
         c["spec"] for c in state.get("phase_requirements", []) if c["id"] in current.get("condition_ids", [])
     ]
     next_specs = [c["spec"] for c in requirements if c["id"] in new_conditions]
-    if (
+    same_intent = (
         current.get("objective") == objective
         and current.get("allowed_operations") == list(dict.fromkeys(operations))
-        and current.get("targets") == target_bindings
-        and current.get("bindings") == bindings
-        and previous_specs == next_specs
-    ):
+    )
+    same_targets = current.get("targets") == target_bindings and current.get("bindings") == bindings
+    if same_intent and same_targets and previous_specs == next_specs:
         return  # Repeating metadata is not a new intent or a policy re-entry.
     if current:
         history = state.setdefault("phase_history", [])
@@ -419,6 +423,31 @@ def set_phase(state: dict[str, Any], args: dict[str, Any], controls: list[dict[s
         "status": "in_progress",
         "started_at": time.time(),
     }
+
+
+def _source_queries(source: str) -> list[str]:
+    queries = []
+    for key, values in parse_qs(urlsplit(source).query).items():
+        if key in {"q", "wd", "query", "keyword", "search_query"}:
+            queries.extend(values)
+    return queries
+
+
+def _evidence_matches(slot: dict[str, Any], spec: dict[str, Any], query_id: str) -> bool:
+    for key in ("field", "variant"):
+        if key in spec and str(slot.get(key, "")) != str(spec[key]):
+            return False
+    if slot.get("query_id") != query_id:
+        return False
+    if spec.get("source") and spec["source"] != slot.get("source"):
+        return False
+    if spec.get("query") and spec["query"] not in _source_queries(str(slot.get("source", ""))):
+        return False
+    if spec.get("entity") and slot.get("entity") != spec["entity"]:
+        return False
+    if not slot.get("source") or slot.get("value") in (None, "", [], {}):
+        return False
+    return slot.get("status") not in {"missing", "unknown"} and slot.get("observation_status") != "not_observed"
 
 
 def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
@@ -464,28 +493,8 @@ def observe_conditions(state: dict[str, Any], observation: dict[str, Any]) -> di
         elif kind == "evidence":
             # These slots are written by runtime extraction, not tool arguments.
             slots = state.get("evidence_slots") or []
-            matching = [
-                slot
-                for slot in slots
-                if all(str(slot.get(key, "")) == str(spec[key]) for key in ("field", "variant") if key in spec)
-                and slot.get("query_id") == str(state.get("query_id") or state.get("task_id") or "")
-                and (not spec.get("source") or spec["source"] == slot.get("source"))
-                and (
-                    not spec.get("query")
-                    or spec["query"]
-                    in [
-                        value
-                        for key, values in parse_qs(urlsplit(str(slot.get("source", ""))).query).items()
-                        if key in {"q", "wd", "query", "keyword", "search_query"}
-                        for value in values
-                    ]
-                )
-                and (not spec.get("entity") or slot.get("entity") == spec["entity"])
-                and slot.get("source")
-                and slot.get("value") not in (None, "", [], {})
-                and slot.get("status") not in {"missing", "unknown"}
-                and slot.get("observation_status") != "not_observed"
-            ]
+            query_id = str(state.get("query_id") or state.get("task_id") or "")
+            matching = [slot for slot in slots if _evidence_matches(slot, spec, query_id)]
             verdict = bool(matching)
             if matching:
                 item["evidence_ref"] = {
@@ -514,13 +523,11 @@ def constrain_actions(menu: Any, state: dict[str, Any], controls: list[dict[str,
     if not phase:
         return
     current = {c.get("target_id"): c for c in controls}
-    selected_targets = [
-        (item["spec"]["target"], item["kind"])
-        for item in state.get("phase_requirements", [])
-        if item["id"] in phase["condition_ids"]
-        and item["status"] == "satisfied"
-        and item["kind"] in {"control_value", "control_selected"}
-    ]
+    selected_targets = []
+    for item in state.get("phase_requirements", []):
+        satisfied = item["id"] in phase["condition_ids"] and item["status"] == "satisfied"
+        if satisfied and item["kind"] in {"control_value", "control_selected"}:
+            selected_targets.append((item["spec"]["target"], item["kind"]))
     sort_applied = any(
         item["id"] in phase["condition_ids"]
         and item["status"] == "satisfied"
@@ -609,25 +616,20 @@ class BrowserPhaseTool(Tool):
             remaining = min(15, deadline - time.time(), float(state.get("invocation_remaining_s", 15)))
             if remaining <= 0:
                 raise ValueError("browser_task_deadline")
-            page = self._runtime._ensure_page_state()
+            page = self._runtime.ensure_page_state()
             observation = page.export_decision_observation()
             op = inputs.get("op")
             callback = getattr(kwargs.get("_tool_callback_context"), "inputs", None)
             call_id = str(getattr(getattr(callback, "tool_call", None), "id", ""))
+            active_version = (state.get("active_phase_contract") or {}).get("version")
+            stale_version = "phase_version" in inputs and inputs["phase_version"] != active_version
             if op == "set":
                 if call_id.startswith("jev_"):
                     raise ValueError("jev_cannot_plan_or_certify")
                 set_phase(state, inputs, observation.get("controls", []))
                 # Persist the accepted contract before an external read can fail.
                 save(session, state)
-            elif (
-                op != "verify"
-                or set(inputs) - {"op", "phase_version", "inspect_cart"}
-                or (
-                    "phase_version" in inputs
-                    and inputs["phase_version"] != (state.get("active_phase_contract") or {}).get("version")
-                )
-            ):
+            elif op != "verify" or set(inputs) - {"op", "phase_version", "inspect_cart"} or stale_version:
                 raise ValueError("stale_or_invalid_phase_request")
             if call_id.startswith("jev_"):
                 policy = getattr(self._runtime, "decision_policy", None)

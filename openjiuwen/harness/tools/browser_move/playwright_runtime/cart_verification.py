@@ -71,8 +71,8 @@ CART_INSPECTOR = """async (page) => await page.evaluate(() => {
 
 
 async def inspect_cart(runtime: Any) -> dict[str, Any]:
-    raw = await runtime._call_playwright_run_code_unsafe(CART_INSPECTOR)
-    data = decode_mcp_result(runtime._unwrap_mcp_text_result(raw))
+    raw = await runtime.call_playwright_run_code_unsafe(CART_INSPECTOR)
+    data = decode_mcp_result(runtime.unwrap_mcp_text_result(raw))
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -88,23 +88,19 @@ async def read_cart(runtime: Any, item: dict[str, Any], state: dict[str, Any], *
 
     spec = item["spec"]
     item["status"] = "unknown"
-    raw = await runtime._call_playwright_run_code_unsafe(CART_READER.replace("__SPEC__", json.dumps(spec)))
-    data = decode_mcp_result(runtime._unwrap_mcp_text_result(raw))
+    raw = await runtime.call_playwright_run_code_unsafe(CART_READER.replace("__SPEC__", json.dumps(spec)))
+    data = decode_mcp_result(runtime.unwrap_mcp_text_result(raw))
     if isinstance(data, str):
         try:
             data = json.loads(data)
         except ValueError:
             data = {}
-    if (
-        not isinstance(data, dict)
-        or not data.get("ok")
-        or data.get("complete") is not True
-        or not isinstance(data.get("items"), dict)
-    ):
+    complete = isinstance(data, dict) and data.get("ok") and data.get("complete") is True
+    if not complete or not isinstance(data.get("items"), dict):
         item["status"] = "unknown"
         item["reason"] = "cart_read_incomplete_or_unrecognized"
         return
-    items = data["items"]
+    items = data.get("items", {})
     if len(items) > 100 or any(
         not isinstance(key, str) or type(value) is not int or value < 0 for key, value in items.items()
     ):
@@ -169,16 +165,12 @@ async def read_cart(runtime: Any, item: dict[str, Any], state: dict[str, Any], *
         monotonic = all(
             (items.get(sku, 0) - previous.get(sku, 0)) * delta >= 0 for sku, delta in spec["deltas"].items()
         )
-        if (
-            within
-            and (
-                entry.get("single_write")
-                or (item["status"] == "satisfied" and entry.get("execution_state") != "dispatched_unknown")
-            )
-            and progressed
-            and monotonic
-            and item["observed_sequence"] > entry.get("dispatch_observation_sequence", float("inf"))
-        ):
+        quantities_ok = within and progressed and monotonic
+        settled = entry.get("single_write") or (
+            item["status"] == "satisfied" and entry.get("execution_state") != "dispatched_unknown"
+        )
+        observed_after = item["observed_sequence"] > entry.get("dispatch_observation_sequence", float("inf"))
+        if quantities_ok and settled and observed_after:
             from .execution_journal import verify_effects
 
             verified_steps = [
@@ -187,6 +179,12 @@ async def read_cart(runtime: Any, item: dict[str, Any], state: dict[str, Any], *
                 if s.get("effect_domain") == "cart" and s.get("executed") is not False
             ]
             verify_effects(state, entry, item["evidence_ref"], verified_steps)
+
+
+def _has_open_baseline(condition: dict[str, Any]) -> bool:
+    if not condition.get("baseline") or "observed_items" not in condition:
+        return False
+    return condition.get("status") == "unsatisfied" and not condition.get("reason")
 
 
 def prepare_effects(entry: dict[str, Any], state: dict[str, Any]) -> None:
@@ -218,17 +216,14 @@ def prepare_effects(entry: dict[str, Any], state: dict[str, Any]) -> None:
                 r"(?:added(?: to (?:the )?cart)?|已加入(?:购物车)?|添加成功)", s.get("expected_feedback", ""), re.I
             ) for s in entry["steps"]
         )
-        if step["impact"] != "read" and (declared_cart or explicit_cart or quantity_change or confirmation):
+        if step["impact"] != "read" and any((declared_cart, explicit_cart, quantity_change, confirmation)):
             step.update(impact="business", effect_domain="cart")
             cart_steps.append(step)
     entry["cart_mutation"] = bool(cart_steps)
     if not cart_steps:
         return
     conditions = [c for c in state.get("phase_requirements", []) if c["kind"] == "cart_delta"]
-    available = [
-        c for c in conditions if c.get("baseline") and "observed_items" in c
-        and c.get("status") == "unsatisfied" and not c.get("reason")
-    ]
+    available = [c for c in conditions if _has_open_baseline(c)]
     if not available:
         raise ValueError(
             "cart_baseline_required_before_write: use browser_phase with a cart_delta reader on the cart page "
@@ -287,9 +282,10 @@ async def observe_cart(runtime: Any, state: dict[str, Any], observation: dict[st
     from .phase_contract import unresolved_writes
 
     capture = observation.get("capture_id")
-    pending_ids = {
-        key for e in unresolved_writes(state) if e.get("cart_mutation") for key in e.get("effect_condition_ids", [])
-    }
+    pending_ids = set()
+    for entry in unresolved_writes(state):
+        if entry.get("cart_mutation"):
+            pending_ids.update(entry.get("effect_condition_ids", []))
     if not capture or not pending_ids:
         return
     deadline = float(state.get("deadline_at") or time.time())

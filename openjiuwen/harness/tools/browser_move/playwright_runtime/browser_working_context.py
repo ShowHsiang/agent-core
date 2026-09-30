@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, Literal, Optional
 
-from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 from .evidence import merge_evidence_slot, same_page_url, task_observation_allowed
@@ -426,7 +427,7 @@ class BrowserWorkingContextStore:
                 "kind": request_kind,
                 "text": _bounded_text(request_text, 1_000),
             },
-            "task": self._project_task_state(task_state),
+            "task": self.project_task_state(task_state),
             "runtime_directive": self._runtime_directive(task_state),
             "recent_actions": list(task_state.get("recent_actions") or [])[-self.config.max_recent_steps:],
         }
@@ -1000,7 +1001,7 @@ class BrowserWorkingContextStore:
         state["next_action_class"] = ""
 
     @staticmethod
-    def _project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    def project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
         from .evidence import explicit_acceptance
         from .execution_journal import project
         from .phase_contract import project_phase

@@ -77,10 +77,10 @@ def setup_policy(mode="hybrid", *, goal="点击销量排序", deadline=None, ses
         "decision_state": {"tag": "button", "node_guard": {"document": "doc-a", "node": 1}},
     }]})
     runtime = SimpleNamespace(
-        _ensure_page_state=lambda: page,
+        ensure_page_state=lambda: page,
         probe_interactives=AsyncMock(return_value={"ok": True, "url": page.url}),
-        _call_playwright_run_code_unsafe=AsyncMock(return_value={"result": {"ok": True}}),
-        _unwrap_mcp_text_result=lambda value: value,
+        call_playwright_run_code_unsafe=AsyncMock(return_value={"result": {"ok": True}}),
+        unwrap_mcp_text_result=lambda value: value,
     )
     phase = {"goal": goal, "task": goal, "task_id": "task-a", "deadline_started_at": 1,
              "deadline_at": deadline or time.time() + 60, "recent_actions": []}
@@ -96,7 +96,7 @@ def setup_policy(mode="hybrid", *, goal="点击销量排序", deadline=None, ses
 
 
 async def messages_for(policy, context, captured, **kwargs):
-    captured = {**captured, "decision_observation": policy.runtime._ensure_page_state().export_decision_observation()}
+    captured = {**captured, "decision_observation": policy.runtime.ensure_page_state().export_decision_observation()}
     from openjiuwen.harness.tools.browser_move.playwright_runtime.phase_contract import observe_runtime
 
     await observe_runtime(policy.runtime, context.get_session_ref(), captured)
@@ -118,11 +118,11 @@ async def test_hybrid_compiles_one_call_then_runtime_validates_and_consumes_it()
     assert result.response_model == "jev-1.13.0"
     assert result.usage_metadata.input_tokens == 30
     llm.invoke.assert_not_awaited()
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
     assert "node_guard" not in json.dumps(client.evaluate.call_args.args[0])
     inputs = SimpleNamespace(tool_name=call.name, tool_args=call.arguments, tool_call=call)
     await policy.validate_tool_call(inputs, context.get_session_ref())
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
     with pytest.raises(ValueError, match="consumed"):
         await policy.validate_tool_call(inputs, context.get_session_ref())
 
@@ -130,7 +130,7 @@ async def test_hybrid_compiles_one_call_then_runtime_validates_and_consumes_it()
 @pytest.mark.asyncio
 async def test_truncated_candidate_coverage_is_visible_to_the_decider():
     policy, llm, client, runtime, context, captured = setup_policy()
-    runtime._ensure_page_state().decision_omitted = 19
+    runtime.ensure_page_state().decision_omitted = 19
     await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert client.evaluate.call_args.args[0]["state"]["omitted_count"] == 19
 
@@ -164,7 +164,7 @@ async def test_finish_handoff_and_invalid_choices_use_original_completion(respon
     assert result.content == "original LLM answer"
     assert not result.tool_calls
     assert not policy._guards
-    runtime._call_playwright_run_code_unsafe.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -225,11 +225,11 @@ async def test_executor_rejects_changed_state_without_dispatching_an_action(muta
     inputs = SimpleNamespace(tool_name=call.name, tool_args=call.arguments, tool_call=call)
     session = context.get_session_ref()
     if mutation == "page":
-        runtime._ensure_page_state().generation += 1
+        runtime.ensure_page_state().generation += 1
     elif mutation == "arguments":
         inputs.tool_args = {"steps": [{"op": "click", "target_id": "attacker"}]}
     elif mutation == "node":
-        runtime._call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
+        runtime.call_playwright_run_code_unsafe.return_value = {"result": {"ok": False}}
     else:
         session = SimpleNamespace(get_session_id=lambda: "other")
     with pytest.raises(ValueError, match="original LLM"):
@@ -333,7 +333,7 @@ def test_invalid_probabilities_are_not_actions(value):
 @pytest.mark.asyncio
 async def test_empty_page_uses_llm_navigation_then_allows_jev():
     policy, llm, client, runtime, context, captured = setup_policy()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     target_ids = page._decision_target_ids
     page._decision_target_ids = []
     assert not (await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)).tool_calls

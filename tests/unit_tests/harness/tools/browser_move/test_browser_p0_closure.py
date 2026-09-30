@@ -103,7 +103,7 @@ async def test_verify_can_refresh_bindable_targets_before_any_phase_exists():
     state = new_state()
     observation = {"capture_id": "fresh", "url": "https://test.example/", "controls": [control("t1", "City", 1)]}
     runtime = SimpleNamespace(
-        _ensure_page_state=lambda: SimpleNamespace(export_decision_observation=lambda: {}),
+        ensure_page_state=lambda: SimpleNamespace(export_decision_observation=lambda: {}),
         capture_reconciliation_browser_state=AsyncMock(return_value={"ok": True, "decision_observation": observation}),
     )
     output = await BrowserPhaseTool(runtime).invoke({"op": "verify"}, session=session_for(state))
@@ -121,7 +121,7 @@ async def test_fallback_instructions_reach_llm_and_local_correction_reenters_jev
     assert "target_id" in handoff.content and "node_guard" not in handoff.content
     assert len(messages) == 1  # Never accumulate synthetic hints in the conversation.
     state = context.get_session_ref().get_state(PHASE_KEY)
-    set_phase(state, {"objective": "点击销量排序"}, runtime._ensure_page_state().export_decision_targets())
+    set_phase(state, {"objective": "点击销量排序"}, runtime.ensure_page_state().export_decision_targets())
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     assert result.tool_calls and result.tool_calls[0].id.startswith("jev_")
     assert client.evaluate.await_count == 1 and llm.invoke.await_count == 1
@@ -262,7 +262,7 @@ async def test_failed_cart_read_cannot_reuse_old_valid_preflight():
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await cart.read_cart(runtime, condition, state, baseline=True)
     baseline = copy.deepcopy(condition["baseline"])
-    runtime._call_playwright_run_code_unsafe.return_value = {"ok": False}
+    runtime.call_playwright_run_code_unsafe.return_value = {"ok": False}
     await cart.read_cart(runtime, condition, state, baseline=False)
     with pytest.raises(ValueError, match="cart_baseline_required"):
         journal.prepare(session_for(state), call(), runtime, effect_adapter=cart.prepare_effects)
@@ -306,7 +306,7 @@ async def test_observed_wrong_sku_cannot_use_another_products_baseline():
     state, item = cart_state()
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await cart.read_cart(runtime, item, state, baseline=True)
-    controls = runtime._ensure_page_state().export_decision_targets()
+    controls = runtime.ensure_page_state().export_decision_targets()
     controls[0]["decision_state"]["effect"] = {
         "domain": "cart",
         "operation": "add",
@@ -442,7 +442,7 @@ async def test_other_requested_sku_increment_cannot_settle_known_mouse_action():
     state, item = cart_state()
     runtime = cart_runtime({"old-item": 2, "mouse-black": 1})
     await cart.read_cart(runtime, item, state, baseline=True)
-    control = runtime._ensure_page_state().export_decision_targets()[0]
+    control = runtime.ensure_page_state().export_decision_targets()[0]
     control["decision_state"]["effect"] = {
         "domain": "cart",
         "operation": "add",
@@ -453,7 +453,7 @@ async def test_other_requested_sku_increment_cannot_settle_known_mouse_action():
     journal.prepare(session, inputs, runtime, effect_adapter=cart.prepare_effects)
     journal.record_result(session, inputs, {"success": False}, {"executed": None})
     cart.record_effects(state, inputs.tool_call.id)
-    runtime._call_playwright_run_code_unsafe.return_value["items"]["keyboard-us"] = 1
+    runtime.call_playwright_run_code_unsafe.return_value["items"]["keyboard-us"] = 1
     await cart.read_cart(runtime, item, state, baseline=False)
     assert journal.unresolved_writes(state)
 
@@ -478,10 +478,10 @@ async def test_cart_inspection_does_not_close_baseline_or_create_proof():
     observation = {"capture_id": "new", "url": "https://shop.test/cart", "controls": []}
     hints = {"ok": True, "reader_candidates": [], "count_candidates": [], "complete": False}
     runtime = SimpleNamespace(
-        _ensure_page_state=lambda: SimpleNamespace(export_decision_observation=lambda: observation),
+        ensure_page_state=lambda: SimpleNamespace(export_decision_observation=lambda: observation),
         capture_reconciliation_browser_state=AsyncMock(return_value={"ok": True, "decision_observation": observation}),
-        _call_playwright_run_code_unsafe=AsyncMock(return_value=hints),
-        _unwrap_mcp_text_result=lambda x: x,
+        call_playwright_run_code_unsafe=AsyncMock(return_value=hints),
+        unwrap_mcp_text_result=lambda x: x,
     )
     args = {"op": "verify", "inspect_cart": True}
     validate_request(args)

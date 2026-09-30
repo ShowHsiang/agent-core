@@ -108,10 +108,11 @@ class JevSystemOneClient:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR, error_msg="max_retries cannot be negative.")
         if retry_backoff < 0:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR, error_msg="retry_backoff cannot be negative.")
+        malformed = (
+            not isinstance(endpoint_path, str) or not endpoint_path.startswith("/") or endpoint_path.startswith("//")
+        )
         if (
-            not isinstance(endpoint_path, str)
-            or not endpoint_path.startswith("/")
-            or endpoint_path.startswith("//")
+            malformed
             or any(char.isspace() or char in "?#\\" for char in endpoint_path)
             or any(part in {".", ".."} for part in endpoint_path.split("/"))
         ):

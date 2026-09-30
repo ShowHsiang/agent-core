@@ -82,6 +82,11 @@ def _value_fits(details: dict[str, Any], value: str) -> bool:
     return True
 
 
+def _is_text_field(control: dict[str, Any]) -> bool:
+    tag = (control.get("decision_state") or {}).get("tag")
+    return tag in {"input", "textarea"} and control.get("role") in {"textbox", "searchbox", "combobox"}
+
+
 def build_menu(
     controls: list[dict[str, Any]],
     goal: str,
@@ -126,12 +131,7 @@ def build_menu(
             excluded[reason] = excluded.get(reason, 0) + 1
         else:
             eligible.append(control)
-    text_fields = [
-        control
-        for control in eligible
-        if (control.get("decision_state") or {}).get("tag") in {"input", "textarea"}
-        and control.get("role") in {"textbox", "searchbox", "combobox"}
-    ]
+    text_fields = [control for control in eligible if _is_text_field(control)]
     # Implicit values are permitted only for an unambiguous input request. Quotes
     # in titles or multi-field prose are not a field binding.
     if (
@@ -175,7 +175,8 @@ def build_menu(
     for control in eligible[:limit]:
         target_id = control.get("target_id")
         name = str(control.get("name") or control.get("text") or "").strip()[:160]
-        if not target_id or not name or not control.get("enabled") or not control.get("actionable"):
+        actionable = control.get("enabled") and control.get("actionable")
+        if not target_id or not name or not actionable:
             omitted += 1
             continue
         # A node guard is required, so incomplete AX-only observations fall back.
@@ -197,7 +198,8 @@ def build_menu(
             search_literal = queries if len(queries) == 1 and details.get("search_like") else []
             field_values = bound if field_bindings else prior[-1:] or search_literal or values
             # Do not overwrite an already populated field from an inferred synonym.
-            if not field_bindings and details.get("current_value") and not prior and not search_literal:
+            inferred_only = not field_bindings and not prior and not search_literal
+            if inferred_only and details.get("current_value"):
                 field_values = [value for value in field_values if value == details["current_value"]]
             for value in field_values:
                 if value != details.get("current_value") and _value_fits(details, value):
@@ -209,7 +211,8 @@ def build_menu(
             llm_bound = any(
                 same_node(binding, control) and binding["value"] == current for binding in search_bindings or []
             )
-            if details.get("search_like") and (current in field_values or (llm_bound and not bound)):
+            submittable = current in field_values or (llm_bound and not bound)
+            if details.get("search_like") and submittable:
                 add(
                     f"SUBMIT SEARCH {name}: press Enter on the observed literal query",
                     {**base, "op": "press", "key": "Enter"},
@@ -290,8 +293,8 @@ def build_menu(
         if "hover" in operations:
             for control in eligible[:limit]:
                 details = control.get("decision_state") or {}
-                if (details.get("node_guard") and not details.get("sensitive")
-                        and (control.get("clickable") or details.get("node_guard", {}).get("expanded") is not None)):
+                guarded = details.get("node_guard") and not details.get("sensitive")
+                if guarded and (control.get("clickable") or details["node_guard"].get("expanded") is not None):
                     add(f"HOVER {observed_label(control)} to reveal local UI",
                         {"op": "hover", "target_id": control["target_id"]})
         if "browser_probe_cards" in probe_tools and not page.get("cards_observed"):

@@ -521,7 +521,7 @@ def test_compact_rpc_wrapper_is_transparent_to_probe_parsing() -> None:
         "rpc_metrics": {"transport_invoke_elapsed_ms": 4},
     }
 
-    assert runtime._unwrap_mcp_text_result(raw) == ('{"ok":true,"elements":[]}')
+    assert runtime.unwrap_mcp_text_result(raw) == ('{"ok":true,"elements":[]}')
 
 
 @pytest.mark.parametrize(
@@ -564,7 +564,7 @@ def test_direct_mcp_target_id_is_resolved_and_runtime_fields_are_removed() -> No
             }
         ]
     }
-    runtime._ensure_page_state().register_interactives(payload)
+    runtime.ensure_page_state().register_interactives(payload)
     target_id = payload["elements"][0]["target_id"]
     rail = BrowserRuntimeRail(runtime)
 
@@ -611,7 +611,7 @@ def test_direct_mcp_target_is_refreshed_when_runtime_identity_is_unique() -> Non
             }
         ]
     }
-    runtime._ensure_page_state().register_interactives(first)
+    runtime.ensure_page_state().register_interactives(first)
     stale_target_id = first["elements"][0]["target_id"]
     runtime._advance_page_generation()
     current = {
@@ -626,7 +626,7 @@ def test_direct_mcp_target_is_refreshed_when_runtime_identity_is_unique() -> Non
             }
         ]
     }
-    runtime._ensure_page_state().register_interactives(current)
+    runtime.ensure_page_state().register_interactives(current)
     rail = BrowserRuntimeRail(runtime)
 
     normalized = rail._normalize_playwright_ref_args(
@@ -649,7 +649,7 @@ def test_primary_link_target_is_rewritten_to_direct_navigation() -> None:
             }
         ]
     }
-    runtime._ensure_page_state().register_cards(payload)
+    runtime.ensure_page_state().register_cards(payload)
     target_id = payload["cards"][0]["primary_link_target_id"]
     rail = BrowserRuntimeRail(runtime)
     ctx = AgentCallbackContext(
