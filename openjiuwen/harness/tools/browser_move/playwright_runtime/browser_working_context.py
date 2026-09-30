@@ -427,7 +427,7 @@ class BrowserWorkingContextStore:
                 "kind": request_kind,
                 "text": _bounded_text(request_text, 1_000),
             },
-            "task": self._project_task_state(task_state),
+            "task": self.project_task_state(task_state),
             "runtime_directive": self._runtime_directive(task_state),
             "recent_actions": list(task_state.get("recent_actions") or [])[-self.config.max_recent_steps:],
         }
@@ -580,8 +580,7 @@ class BrowserWorkingContextStore:
             return False
         progress_name = str(progress.get("progress") or "unknown")
         recovered = bool(
-            state.get("replan_trial_pending")
-            and (progress.get("observable_progress") is True or progress_name == "progress")
+            progress.get("observable_progress") is True or progress_name == "progress"
         )
         recent = state.get("recent_actions") or []
         if recent and recent[-1].get("semantic_delta") == "evidence_added":
@@ -874,7 +873,17 @@ class BrowserWorkingContextStore:
         outcome_status = str(action.get("outcome_status") or "")
         if outcome_status not in {"success", "ambiguous"}:
             return False
-        if outcome_status == "ambiguous":
+        journal = next(
+            (e for e in state.get("execution_journal", []) if e.get("call_id") == action.get("call_id")), None
+        )
+        if journal is not None:
+            action["execution_state"] = journal.get("execution_state")
+            if journal.get("requires_verification") or (
+                journal.get("execution_state") == "dispatched_unknown"
+                and journal.get("impact", "unknown") != "local_ui"
+            ):
+                return False
+        if outcome_status == "ambiguous" and journal is None:
             action["outcome_status"] = "success_after_observation"
             action["outcome"] = "success_after_observation"
         action["semantic_delta"] = "progress"
@@ -985,11 +994,18 @@ class BrowserWorkingContextStore:
         state["blocked_strategy"] = ""
         state["trial_strategy"] = ""
         state["replan_denial_count"] = 0
+        state["replan_count"] = 0
+        state["failed_strategies"] = []
+        state["read_only_recovery_counts"] = {}
         state["status"] = "in_progress"
         state["next_action_class"] = ""
 
     @staticmethod
-    def _project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    def project_task_state(state: Dict[str, Any]) -> Dict[str, Any]:
+        from .evidence import explicit_acceptance
+        from .execution_journal import project
+        from .phase_contract import project_phase
+
         phases = state.get("phases") if isinstance(state.get("phases"), dict) else {}
         current_phase = str(state.get("current_phase") or "")
         current_phase_state = phases.get(current_phase) if isinstance(phases.get(current_phase), dict) else {}
@@ -1049,6 +1065,11 @@ class BrowserWorkingContextStore:
             if slot.get("observation_status") != "not_observed":
                 unavailable_slots.append(slot)
         return {
+            "phase_contract": project_phase(state),
+            "execution": project(state),
+            "acceptance": explicit_acceptance(state),
+            "verification_only": bool(state.get("action_budget_exhausted")),
+            "verification_reads_remaining": max(0, 3 - int(state.get("budget_verification_reads", 0))),
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
             "status": state.get("status", "in_progress"),
