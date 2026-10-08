@@ -267,7 +267,9 @@ def _never_performed(error: Any) -> bool:
     Its call log says "performing <action>" only once the action is actually sent to the page; an
     error without a call log proves nothing and stays uncertain.
     """
-    text = str(error or "")
+    # Playwright formats its own call-log lines with ANSI SGR on some transports.
+    # Strip formatting before parsing entries; never infer dispatch from DOM text.
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error or ""))
     header, separator, call_log = text.partition("Call log:")
     if not separator or not re.search(r"(?:Timeout|TimeoutError).*exceeded", header):
         return False
