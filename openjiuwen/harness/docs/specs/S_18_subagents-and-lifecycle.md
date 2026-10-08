@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-10-07 |
+| 最近一次修订日期 | 2026-10-08 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary |
 
 ## 范围 / 边界
@@ -65,11 +65,10 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
 8. **manifest 侧预设与 `subagents/` 预设同源**：`S_12` 的 `build_*_subagent` 是
    `subagents/` 预设的 catalog 注册形态；二者共享 `SubAgentSpec` 装配语义，不新造预设。
 9. **browser 上下文权威边界**：runtime 负责执行真值、来源归属、明确 blocker 与统一结果传输；
-   模型按原始目标和本任务观察判断业务完成。自动推断的字段/数量/比较槽仅是提取提示，不能因
-    适配器未入账就制造 partial；明确的缺失、反证与外部显式字段契约仍参与校验；模型设置的
-    phase 条件和 acceptance 映射仅作提示，不拥有业务完成否决权（F_17）。模型可见
-   PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。推断字段齐全仅提示
-   `may_finish_if_user_goal_met`，不自动完成或清空工具；明确终态仍由 runtime 统一传输。PageState 的
+   模型按原始目标和本任务观察判断业务完成。默认不推断业务字段/数量/比较槽，也不运行对应认证投影。
+   外部显式字段契约仅校验声明的输出结构；模型设置的 phase 条件不拥有业务完成否决权（F_19）。
+   模型可见 PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。
+   原文未映射、当前仍是搜索 URL 等语义推断不改写完成状态；明确终态仍由 runtime 统一传输。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
 10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据并将
     当前结果投影到既有约 12K 字符预算，再交给 `ToolResultWindowProcessor` 的配置窗口，
@@ -91,21 +90,23 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     Browser query 并限制调用剩余时长。未设置时保持原有任务预算。
     Browser TaskTool 持有显式 child Session，使超时可返回既有证据的 partial；取消保存已读结果
     后继续传播 CancelledError，不能继续网页动作。非 Browser 子代理仍沿用原有派发行为。
-13. **证据属于任务和实体**：沿用现有 slot，绑定 query、entity URL、variant、field 和来源。
+13. **观察属于任务和来源**：沿用现有观察记录，保留 query、来源 URL、generation 和原文。
     初始复用页面不自动证明新任务已完成；同实体同口径纠正旧值，不同商品不能拼接字段，
     不同日期/报价口径保留区分。resume 清除旧的模型摘要，最终使用本次有效结果。
-    同实体详情证据可以替换较弱搜索卡证据；明确作者操作标签、仍停留搜索页等反证只允许
-    在原 query deadline 和既有一次 resume 配额内修正，不创建新验证器或重置任务期限。
-14. **需求不由页面按钮扩张**：原始用户目标通过既有 TaskTool run context 传递；低置信字段
-    仅作提取提示。导航首页不要求商品字段，搜索卡标题不证明已进入详情页，页面按钮枚举不创建比较槽。
+    外部显式输出契约可使用既有 slot 投影；不会根据当前 URL 或字段解释自动撤销 completed 并触发续跑。
+    父层发现明确遗漏时，可显式携带原 resume_task_id 纠正已完成的 worker 判断；不自动触发。
+    定向恢复仍受原 query deadline 和既有 resume 配额约束，不创建新验证器或重置任务期限。
+14. **需求不由页面按钮扩张**：原始用户目标通过既有 TaskTool run context 传递，默认不推断字段。
+    导航首页不要求商品字段，搜索卡标题不证明已进入详情页，页面按钮枚举不创建比较槽。
     未执行的 DSML 工具意图不能认证完成，同 run 至多纠正一次。定向恢复保留原始约束和修复指令，
     不重置共享期限，也不因推断字段适配不完整而强迫普通信息任务重复读取。
     “地点不限”“评分若有”等局部否定/可选条件不生成硬性字段；星级与住客评分分开。
     replan_required 是执行指导，收尾时不能单独制造网页 blocker。原生读取、Card 和 evaluate
     的带来源观察采用同一完成判断，保留 typed evidence 与未结构化观察的区别，不虚构字段覆盖。
-    `unverified_fields` 仅是未映射诊断，不能触发填表式续跑。确有未完成用户目标时，可在收尾一次使用
+    默认不输出 `unverified_fields` 检查表。确有未完成用户目标时，可在收尾一次使用
     现有 browser_progress 文本标注 partial/next_action，不要求逐轮进度或另一个验证模型。
-    支付/登录接管必须有当前页正证据；取消、截止期限和已有明确终态仍保持不变。
+    支付/登录/验证码等页面情况由来源观察和模型判断传递，不靠通用正则推断生成全局阻断。
+    取消、权限、截止期限和已有明确执行终态仍保持不变。
 
 15. **Browser 决策与执行分离**：RuntimeSettings.decision 默认 llm；shadow 后台只记录建议，
     hybrid 使用 BrowserPolicyModel 将 Jev 的有界选择编译为标准工具调用。上下文处理器
@@ -237,20 +238,21 @@ policy receipts 与 recent_actions 为有限投影，终态及父代理交接带
 ## P0 输入、验收与交接闭环（F_11，2026-09-24）
 
 阶段使用分类 schema；绑定投影与验证共用新鲜唯一节点，错误明确缺字段、缺身份或候选不唯一。
-临时条件替换保留有界审计；明确排序和商品/店铺评分要求从原始目标和任务来源证据核对，
-弱 URL 条件不能认证业务目标，工具参数不能自证排序 variant，普通推断字段仍为提示。
+临时条件替换保留有界审计；显式输出契约的提取保留排序口径和商品/店铺评分的来源区分。
+弱 URL 条件不能认证业务目标，工具参数不能自证排序 variant；默认任务不再推断业务字段。
 Jev 回退将当前意图、缺项、执行事实和允许的恢复方式送入本次 LLM 输入；修正后沿既有指纹重新准入。
 
 业务反馈（例如 Added）属于已观察局部事实，不能认证 SKU/数量差。购物车基线保持原始身份，
 已观察能力、原生工具与 Batch 的恢复使用同一适配器。未知修改仍先核对、后续做未完成部分。
-正常终止和模型失败均携带执行、验收、预算摘要；页面 blocker、运行时限制、模型未证实的推断
-分别投影，父代理不得把未观察的未来步骤表述为实际阻断。浏览器模型使用独立的 client 配置，
+正常终止和模型失败均携带执行回执、来源观察、worker 判断与剩余期限；已知运行时阻断和模型报告
+分别传递，阻断列表不是页面障碍的完备枚举，父代理不得把未观察的未来步骤表述为实际阻断。
+浏览器模型使用独立的 client 配置，
 外层等待总计最多 60 秒，首帧后的流空闲最多 15 秒，保留更短 client 配置，且受任务
 剩余时间和交接保留时间约束；不修改父模型配置。超时关闭流，不重放部分动作。
 
 动作额度耗尽后保留三次有界核对读取，禁止新写入；阶段 verify 和购物车读取纳入未知影响
 恢复通道的计数；普通 probe 不占用显式核验额度。计数绑定各个未解决效果，metadata set 不能重置额度。固定 inspect_cart 只提供 reader 线索，不能认证
-完整购物车；reader 重绑保留原始基线和预期增量。评分使用现有实体槽，不跨商品复用旧认证。
+完整购物车；reader 重绑保留原始基线和预期增量。显式输出契约的评分使用现有实体槽，不跨商品复用。
 
 
 ### September 24 shared observation and Jev coverage (F_12)
@@ -311,3 +313,34 @@ mode a cart action is an ordinary click with no cart baseline requirement. A Pla
 whose call log never reaches "performing <action>" is recorded as not dispatched rather than as
 an uncertain write. An action that was performed and then timed out stays uncertain in both
 modes. Task typing recognises buying and booking wording in both modes.
+
+
+## Browser 执行回执与局部连续性（F_18，2026-10-08）
+
+目标 preflight 通过只表示可尝试，不能写 executed=true。执行调用中未获 ACK 为 unknown；
+完整 Playwright Call log（先移除 ANSI 样式）证明未发送时，compact/primitive 共用 journal
+归类为未派发。复合输入已有动作的执行事实不能被后续等待错误抹掉；外层不再重放未知点击。
+
+本地 offload recall 不推进页面版本。同页、同版本、同范围卡片读取可在短观察窗口复用，
+导航、潜在写入、等待或新观察变化使缓存失效。任意脚本保持潜在写入边界。进展指纹只比较
+内容与可执行状态，不把调用历史、观察元数据和卡片重新有效算成进展；新读取记 new_observation。
+
+Jev 候选避免重交页面已经观察到的同一搜索，默认把回到已访问标签页留给 LLM 恢复；新标签仍
+可选。同对象已 ACK 的业务动作由共享 journal 排除自动重放，不新增业务成功证明。新对象、
+已执行的新输入/选择、显式新局部目标可表达后续工作；固定读取和其他局部动作继续开放。
+LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普通查询无需额外阶段调用。
+
+详见 [F_18](../features/F_18_browser-receipts-and-local-continuity.md)。
+
+## Browser 默认观察与结果交接（F_19，当前契约）
+
+默认任务不再从自然语言生成字段、数量、比较槽，不维护对应 acceptance/coverage 认证路径。
+已保存的 inferred 状态在加载/续跑时退出该路径，保留原始观察、journal、局部目标与期限。
+外部明确提供 requirements_source=explicit 的输出契约继续按既有字段形态检查，不能扩张为业务认证。
+当前搜索 URL、未映射字段和推断缺失不自动改写完成状态，也不自动创建修复调用。
+父层可显式用原 resume_task_id 纠正遗漏，受原期限和一次续跑限制；不带续跑请求的重复调用返回已有结果。
+
+统一终态携带 worker 判断、执行回执、来源观察和 summary；字段诊断不替代原文。阻断列表不是完备枚举，
+为空不能证明没有页面障碍。父层与 resume 保留同一结果；模型渲染只展示一次结果，避免三份重复投影。
+常用等待使用已有目标/文本/URL 条件；缺目标仍拒绝，旧目标校验、串行派发、权限和真实未知效果保护保留。
+本节取代 F_17 中继续默认维护 inferred 诊断和语义反证的部分，详见 [F_19](../features/F_19_browser-observation-first-results.md)。
