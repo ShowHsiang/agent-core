@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-07 |
+| 最近一次修订日期 | 2026-10-08 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop |
 
 ## 范围 / 边界
@@ -395,3 +395,34 @@ execution truth. Cart actions need no mandatory baseline. A primitive whose exec
 proves it timed out before performing the action is recorded as not dispatched. Explicit
 executed=true, performed actions, absent/truncated logs and arbitrary scripts remain uncertain
 on failure. Task typing still recognises buying and booking wording.
+
+
+## Browser 执行回执与局部连续性（F_18，2026-10-08）
+
+目标 preflight 通过只表示可尝试，不能写 executed=true。执行调用中未获 ACK 为 unknown；
+完整 Playwright Call log（先移除 ANSI 样式）证明未发送时，compact/primitive 共用 journal
+归类为未派发。复合输入已有动作的执行事实不能被后续等待错误抹掉；外层不再重放未知点击。
+
+本地 offload recall 不推进页面版本。同页、同版本、同范围卡片读取可在短观察窗口复用，
+导航、潜在写入、等待或新观察变化使缓存失效。任意脚本保持潜在写入边界。进展指纹只比较
+内容与可执行状态，不把调用历史、观察元数据和卡片重新有效算成进展；新读取记 new_observation。
+
+Jev 候选避免重交页面已经观察到的同一搜索，默认把回到已访问标签页留给 LLM 恢复；新标签仍
+可选。同对象已 ACK 的业务动作由共享 journal 排除自动重放，不新增业务成功证明。新对象、
+已执行的新输入/选择、显式新局部目标可表达后续工作；固定读取和其他局部动作继续开放。
+LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普通查询无需额外阶段调用。
+
+详见 [F_18](../features/F_18_browser-receipts-and-local-continuity.md)。
+
+## Browser 默认观察与结果交接（F_19，当前契约）
+
+默认任务不再从自然语言生成字段、数量、比较槽，不维护对应 acceptance/coverage 认证路径。
+已保存的 inferred 状态在加载/续跑时退出该路径，保留原始观察、journal、局部目标与期限。
+外部明确提供 requirements_source=explicit 的输出契约继续按既有字段形态检查，不能扩张为业务认证。
+当前搜索 URL、未映射字段和推断缺失不自动改写完成状态，也不自动创建修复调用。
+父层可显式用原 resume_task_id 纠正遗漏，受原期限和一次续跑限制；不带续跑请求的重复调用返回已有结果。
+
+统一终态携带 worker 判断、执行回执、来源观察和 summary；字段诊断不替代原文。阻断列表不是完备枚举，
+为空不能证明没有页面障碍。父层与 resume 保留同一结果；模型渲染只展示一次结果，避免三份重复投影。
+常用等待使用已有目标/文本/URL 条件；缺目标仍拒绝，旧目标校验、串行派发、权限和真实未知效果保护保留。
+本节取代 F_17 中继续默认维护 inferred 诊断和语义反证的部分，详见 [F_19](../features/F_19_browser-observation-first-results.md)。
