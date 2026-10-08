@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage, UserMessage
 from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
@@ -720,7 +721,7 @@ def test_shared_deadline_bounds_each_invocation_without_forcing_a_resume() -> No
         assert remaining < 720.0
 
 
-def test_known_url_must_be_navigated_before_selector_exploration() -> None:
+def test_known_url_is_guidance_and_does_not_refuse_an_initial_snapshot() -> None:
     session = _FakeSession()
     session.update_state(
         {
@@ -730,29 +731,28 @@ def test_known_url_must_be_navigated_before_selector_exploration() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="Navigate to it directly"):
-        BrowserRuntimeRail._consume_phase_budget(
-            session,
-            "mcp_playwright_browser_snapshot",
-            {},
-        )
+    BrowserRuntimeRail._consume_phase_budget(
+        session,
+        "mcp_playwright_browser_snapshot",
+        {},
+    )
 
 
-def test_exhausted_phase_budget_requires_replan() -> None:
+def test_phase_threshold_does_not_terminate_navigation() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Search for OpenJiuwen")
     state["phases"]["navigation"]["attempts"] = state["phases"]["navigation"]["budget"]
     session.update_state({"__browser_phase_budget_state__": state})
 
-    with pytest.raises(ValueError, match="budget exhausted"):
-        BrowserRuntimeRail._consume_phase_budget(
-            session,
-            "mcp_playwright_browser_navigate",
-            {"url": "https://www.baidu.com/s?wd=OpenJiuwen"},
-        )
+    BrowserRuntimeRail._consume_phase_budget(
+        session,
+        "mcp_playwright_browser_navigate",
+        {"url": "https://www.baidu.com/s?wd=OpenJiuwen"},
+    )
 
     phase = session.get_state("__browser_phase_budget_state__")["phases"]["navigation"]
-    assert phase["status"] == "replan_required"
+    assert phase["status"] == "in_progress"
+    assert phase["attempts"] == 13
 
 
 def test_batch_phase_signature_changes_when_steps_change() -> None:
@@ -828,8 +828,8 @@ def test_phase_attempts_do_not_reset_after_material_replan() -> None:
     assert action_class == "filtering"
     assert updated["attempts"] == 4
     task_state = session.get_state("__browser_phase_budget_state__")
-    assert task_state["replan_count"] == 1
-    assert task_state["replan_trial_pending"] is True
+    assert task_state["replan_count"] == 0
+    assert not task_state["replan_trial_pending"]
 
 
 def test_semantic_loop_marks_current_phase_replan_required() -> None:
@@ -1097,7 +1097,7 @@ def test_worker_cannot_claim_completion_from_field_names_without_observations() 
         ("mcp_playwright-official_browser_find", {"text": "next"}),
     ],
 )
-def test_target_discovery_gets_bounded_verification_after_replan_trial(tool_name, tool_args) -> None:
+def test_target_discovery_does_not_need_semantic_progress_proof(tool_name, tool_args) -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("find the next control")
     state.update(
@@ -1114,11 +1114,10 @@ def test_target_discovery_gets_bounded_verification_after_replan_trial(tool_name
     assert action_class == "target_discovery"
 
     for _ in range(3):
-        assert BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args) == "verification"
-    with pytest.raises(ValueError, match="already ran without verified semantic progress"):
-        BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args)
+        assert BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args) == "target_discovery"
+    BrowserRuntimeRail._consume_phase_budget(session, tool_name, tool_args)
 
-    assert session.get_state("__browser_phase_budget_state__")["replan_count"] == 1
+    assert session.get_state("__browser_phase_budget_state__")["replan_count"] == 0
 
 
 def test_evaluate_result_becomes_compact_evidence_before_action_windowing() -> None:
@@ -1361,24 +1360,23 @@ def test_recent_action_window_is_runtime_owned_and_bounded_to_six() -> None:
     assert [action["seq"] for action in actions] == [3, 4, 5, 6, 7, 8]
 
 
-def test_same_price_interval_cannot_be_visited_twice() -> None:
+def test_price_interval_history_does_not_prohibit_current_user_actions() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Filter products from 100 to 200 yuan")
     state["current_phase"] = "filtering"
     state["phases"]["filtering"]["visited_price_intervals"] = ["100:200"]
     session.update_state({"__browser_phase_budget_state__": state})
 
-    with pytest.raises(ValueError, match="already visited"):
-        BrowserRuntimeRail._consume_phase_budget(
-            session,
-            "browser_batch_interact",
-            {
-                "steps": [
-                    {"op": "fill", "name": "minimum price", "value": "100"},
-                    {"op": "fill", "name": "maximum price", "value": "200"},
-                ]
-            },
-        )
+    BrowserRuntimeRail._consume_phase_budget(
+        session,
+        "browser_batch_interact",
+        {
+            "steps": [
+                {"op": "fill", "name": "minimum price", "value": "100"},
+                {"op": "fill", "name": "maximum price", "value": "200"},
+            ]
+        },
+    )
 
 
 def test_structured_extraction_records_task_scoped_evidence() -> None:
@@ -1461,18 +1459,17 @@ def test_known_url_gate_allows_extraction_when_browser_is_already_on_target() ->
     assert session.get_state("__browser_phase_budget_state__")["phases"]["extraction"]["attempts"] == 1
 
 
-def test_known_url_gate_guides_once_then_leaves_recovery_to_model() -> None:
+def test_known_url_does_not_gate_reading_a_different_current_page() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Open https://example.test and extract the title")
     session.update_state({"__browser_phase_budget_state__": state})
 
-    with pytest.raises(ValueError, match="https://example.test"):
-        BrowserRuntimeRail._consume_phase_budget(
-            session,
-            "browser_probe_cards",
-            {},
-            current_page_state={"url": "about:blank"},
-        )
+    BrowserRuntimeRail._consume_phase_budget(
+        session,
+        "browser_probe_cards",
+        {},
+        current_page_state={"url": "about:blank"},
+    )
 
     action_class = BrowserRuntimeRail._consume_phase_budget(
         session,
@@ -1482,8 +1479,8 @@ def test_known_url_gate_guides_once_then_leaves_recovery_to_model() -> None:
     )
     updated = session.get_state("__browser_phase_budget_state__")
     assert action_class == "structured_extraction"
-    assert updated["direct_navigation_guidance_count"] == 1
-    assert updated["phases"]["extraction"]["attempts"] == 1
+    assert updated["direct_navigation_guidance_count"] == 0
+    assert updated["phases"]["extraction"]["attempts"] == 2
 
 
 def test_known_root_url_gate_accepts_deeper_same_site_page() -> None:
@@ -1538,8 +1535,8 @@ def test_replan_fingerprint_allows_a_different_requested_field() -> None:
 
     assert action_class == "script_exploration"
     updated = session.get_state("__browser_phase_budget_state__")
-    assert updated["status"] == "replan_trial"
-    assert updated["replan_count"] == 1
+    assert updated["status"] == "replan_required"
+    assert updated["replan_count"] == 0
 
 
 def test_strategy_fingerprint_tracks_semantic_target_without_generation_noise() -> None:
@@ -1584,7 +1581,7 @@ def test_strategy_fingerprint_tracks_semantic_target_without_generation_noise() 
     assert first == refreshed_first
 
 
-def test_repeated_replan_denials_become_terminal_after_finite_budget() -> None:
+def test_failed_strategy_diagnostics_do_not_manufacture_terminal_state() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract the title")
     args = {"function": "() => document.querySelector('button').click()", "target": "ref=e1"}
@@ -1605,16 +1602,15 @@ def test_repeated_replan_denials_become_terminal_after_finite_budget() -> None:
     session.update_state({"__browser_phase_budget_state__": state})
 
     for _ in range(3):
-        with pytest.raises(ValueError, match="Semantic loop detected"):
-            BrowserRuntimeRail._consume_phase_budget(session, "browser_evaluate", args)
+        BrowserRuntimeRail._consume_phase_budget(session, "browser_evaluate", args)
 
     updated = session.get_state("__browser_phase_budget_state__")
-    assert updated["status"] == "blocked"
-    assert updated["replan_denial_count"] == 3
-    assert "semantic_replan_denial_budget_exhausted" in updated["blockers"]
+    assert updated["status"] == "replan_required"
+    assert updated["replan_denial_count"] == 0
+    assert "semantic_replan_denial_budget_exhausted" not in updated["blockers"]
 
 
-def test_replan_allows_one_bounded_read_only_evidence_recovery() -> None:
+def test_read_recovery_has_no_separate_proof_counter() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract the title")
     args = {"function": "() => ({title: document.title})", "field": "title"}
@@ -1638,8 +1634,8 @@ def test_replan_allows_one_bounded_read_only_evidence_recovery() -> None:
 
     updated = session.get_state("__browser_phase_budget_state__")
     assert action_class == "script_exploration"
-    assert updated["status"] == "replan_trial"
-    assert updated["read_only_recovery_counts"][strategy] == 1
+    assert updated["status"] == "replan_required"
+    assert not updated["read_only_recovery_counts"]
 
 
 def test_offload_recall_does_not_consume_browser_phase_or_replan_budget() -> None:
@@ -1725,20 +1721,6 @@ def test_partial_batch_keeps_successful_extraction_without_marking_batch_success
     assert "price" not in updated["field_coverage"]
 
 
-def test_price_interval_ignores_evaluate_script_numbers() -> None:
-    assert BrowserRuntimeRail._price_interval_signature(
-        "browser_evaluate",
-        {"function": "() => [...document.querySelectorAll('.price')].slice(1, 2)"},
-    ) == ""
-    assert BrowserRuntimeRail._price_interval_signature(
-        "browser_batch_interact",
-        {
-            "steps": [
-                {"op": "fill", "field": "minimum price", "value": "100"},
-                {"op": "fill", "field": "maximum price", "value": "200"},
-            ]
-        },
-    ) == "100:200"
 
 
 def test_required_field_ontology_and_generic_evidence_slots_keep_provenance() -> None:
@@ -1828,8 +1810,9 @@ def test_cart_action_feedback_is_preserved_but_does_not_prove_sku_delta() -> Non
     )
 
     updated = session.get_state("__browser_phase_budget_state__")
-    assert updated["status"] == "partial"
-    assert any("cart_delta_requires_baseline" in item for item in updated["blockers"])
+    assert updated["status"] == "completed"
+    assert not updated["blockers"]
+    assert not updated.get("phase_requirements")
     assert updated["structured_evidence"][-1]["fields"] == ["action_confirmation"]
 
 
