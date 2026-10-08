@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-29 |
+| 最近一次修订日期 | 2026-10-07 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary |
 
 ## 范围 / 边界
@@ -66,7 +66,8 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
    `subagents/` 预设的 catalog 注册形态；二者共享 `SubAgentSpec` 装配语义，不新造预设。
 9. **browser 上下文权威边界**：runtime 负责执行真值、来源归属、明确 blocker 与统一结果传输；
    模型按原始目标和本任务观察判断业务完成。自动推断的字段/数量/比较槽仅是提取提示，不能因
-   适配器未入账就制造 partial；明确的缺失、反证和显式结构化契约仍参与校验。模型可见
+    适配器未入账就制造 partial；明确的缺失、反证与外部显式字段契约仍参与校验；模型设置的
+    phase 条件和 acceptance 映射仅作提示，不拥有业务完成否决权（F_17）。模型可见
    PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。推断字段齐全仅提示
    `may_finish_if_user_goal_met`，不自动完成或清空工具；明确终态仍由 runtime 统一传输。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
@@ -127,6 +128,22 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     流式响应只累计最终累计 usage 一次，不按 chunk 加总。`task_end.elapsed_ms` 保持 invocation
     墙钟耗时，模型耗时合计不含工具并可能含 shadow 重叠。续跑每次单独统计，不能把每段当作任务累计值。
     计量只读写独立 session 统计，不参与策略、预算、工具派发或完成判断。
+
+## Browser 运行时减法（F_17，当前契约）
+
+阶段计数、自然语言验收和可选条件只提供诊断，不阻断一般动作。删除阶段次数上限、
+三次核验读取配额、重规划试探/拒绝终止和价格区间特判。总截止时间、迭代数、单次等待、
+权限、串行派发、精确目标校验及真实未知效果保护保持有效。
+
+cart_delta 仅是可选工具读数，不再要求动作先建立基线，不因成功点击强制进入核验协议，
+普通观察不自动附加购物车 RPC。当前意图替换旧条件；journal 未知效果不会随之消失。
+authoritative_browser_result 保留兼容名，但权威范围限于执行/观察；业务完成由 LLM
+结合原始目标与本任务观察判断。acceptance、missing_conditions 和自动字段缺口是提示，
+不能推导“任务已认证”或“页面被锁住”。工具日志证明动作未发送时记录未派发；真实未知
+效果仍禁止盲重放。该行为同时适用于 llm/hybrid，不再由 strict/lean 切换执行真值。
+
+此前 F_10/F_12/F_13/F_16 中与本节冲突的预算、自动证明和试验开关约定由本节取代。
+详见 [F_17](../features/F_17_browser-runtime-reduction.md)。
 
 ## 接口契约
 

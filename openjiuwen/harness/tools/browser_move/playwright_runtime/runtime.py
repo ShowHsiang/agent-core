@@ -36,6 +36,7 @@ from openjiuwen.harness.rails._multimodal import (
 
 from ..controllers import ActionController, BaseController, validate_batch_steps
 from ..controllers.action import normalize_batch_steps
+from ..decision.intent import explicit_urls
 from ..utils.parsing import decode_mcp_result, extract_json_object
 from . import cart_verification, execution_journal
 from .browser_capabilities import (
@@ -73,7 +74,7 @@ from .probes import (
     build_card_probe_js,
     build_interactive_probe_js,
 )
-from .semantic_state import SemanticStateTracker, price_interval_signature
+from .semantic_state import SemanticStateTracker
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import (
     get_selector_cache,
@@ -99,8 +100,6 @@ _BROWSER_SIMPLE_TASK_DEADLINE_S = 240.0
 _BROWSER_COMPLEX_TASK_DEADLINE_S = 600.0
 _BROWSER_MODEL_RETRY_LIMIT = 1
 _BROWSER_MODEL_PROTOCOL_RETRY_LIMIT = 1
-_BROWSER_REPLAN_DENIAL_LIMIT = 3
-_BROWSER_READ_ONLY_RECOVERY_LIMIT = 1
 _BROWSER_TASK_RESUME_LIMIT = 1
 _BROWSER_TERMINAL_SYNTHESIS_KEY = "terminal_synthesis_started"
 _BROWSER_OBSERVATION_MESSAGE_MAX_CHARS = 12_000
@@ -2776,9 +2775,6 @@ class BrowserRuntimeRail(AgentRail):
         extra.setdefault(_BROWSER_ACTION_GROUP_RESULTS_KEY, {})[action_group_id] = {
             "expected": call_ids,
             "completed": [],
-            "read_only": all(
-                self._is_read_only_recovery(call.name, call.arguments) for call in tool_calls
-            ),
         }
 
     @staticmethod
@@ -3011,6 +3007,8 @@ class BrowserRuntimeRail(AgentRail):
             "observations": cls._task_observations(state)[-3:],
             "execution": execution_journal.project(state),
             "acceptance": acceptance,
+            "verification_scope": "execution_and_observations",
+            "completion_basis": "worker_judgment",
             "observed_blockers": observed_blockers,
             "unconfirmed_blockers": list(state.get("worker_reported_blockers") or []),
             "execution_limits": [b for b in blockers if any(t in b for t in ("budget", "deadline", "replan"))],
@@ -3020,8 +3018,9 @@ class BrowserRuntimeRail(AgentRail):
                 "Report acknowledged/partial steps when a task fails. Feedback is not verified business success. "
                 "Only observed_blockers describe observed boundaries; unconfirmed_blockers are worker claims. "
                 "Execution limits or retryable=false do not mean the page is frozen. Never replay uncertain effects. "
-                "Explain gaps using acceptance.reason and missing_conditions; do not invent a missing snapshot "
-                "or a required before/after comparison when the runtime only lacks an associated result read."
+                "Completed is the worker judgment supported by observations, not business certification. "
+                "Acceptance, missing_conditions and unverified_fields are adapter diagnostics; compare the "
+                "original user goal with source observations. Do not require extra reads just to fill them."
             ),
             "missing_conditions": missing_conditions(state),
             "current_page": dict(state.get("last_page") or {}),
@@ -3052,25 +3051,8 @@ class BrowserRuntimeRail(AgentRail):
 
     @staticmethod
     def _business_missing_requirements(state: Dict[str, Any]) -> list[str]:
-        missing = [r["id"] for r in explicit_acceptance(state) if r["status"] != "satisfied"]
-        missing.extend(missing_conditions(state))
-        if unresolved_writes(state):
-            missing.append("unknown_browser_write")
-        goal = str(state.get("goal") or "")
-        cart_change = bool(re.search(
-            r"加购|加入.{0,15}购物车|购物车.{0,20}(?:增加|减少|数量|保留)|add.{0,30}cart", goal, re.I
-        ))
-        conditions = [c for c in state.get("phase_requirements", []) if c.get("kind") == "cart_delta"]
-        if cart_change and (not conditions or any(c.get("status") != "satisfied" for c in conditions)):
-            missing.append("cart_delta_requires_baseline_and_sku_evidence")
-        if cart_change and re.search(r"总价|合计|总额|\btotal\b", goal, re.I):
-            sources = {c.get("baseline", {}).get("url") for c in conditions if c.get("status") == "satisfied"}
-            if not any(s.get("field") in {"cart_total", "total_price", "total"} and s.get("source") in sources
-                       and s.get("value") not in (None, "", "unknown") and s.get("status") == "present"
-                       and s.get("query_id") == str(state.get("query_id") or state.get("task_id") or "")
-                       for s in state.get("evidence_slots", [])):
-                missing.append("cart_total_requires_observed_evidence")
-        return list(dict.fromkeys(missing))
+        """Only unresolved execution effects are a generic completion veto."""
+        return ["unknown_browser_write"] if unresolved_writes(state) else []
 
     @classmethod
     def _terminal_result_retryable(
@@ -3083,8 +3065,6 @@ class BrowserRuntimeRail(AgentRail):
             return False
         blockers = " ".join(str(item or "").strip().lower() for item in state.get("blockers") or [])
         if any(token in blockers for token in _BROWSER_NON_RETRYABLE_BLOCKER_TOKENS):
-            return False
-        if "phase_budget_exhausted" in blockers:
             return False
         requirements = missing if missing is not None else cls._missing_completion_requirements(state)
         unresolved_slots = cls._missing_evidence_slots(state)
@@ -3277,7 +3257,6 @@ class BrowserRuntimeRail(AgentRail):
         self._validate_model_tool_args(ctx, tool_name, normalized_args)
         session = getattr(ctx, "session", None)
         self._sync_semantic_progress(session)
-        group = self._tool_action_group(ctx)
         enrich = getattr(self._runtime, "enrich_action_capabilities", None)
         if callable(enrich):
             deadline = float(execution_journal.task_state(session).get("deadline_at") or 0)
@@ -3293,14 +3272,10 @@ class BrowserRuntimeRail(AgentRail):
             action_class = self._consume_phase_budget(
                 session, tool_name, normalized_args,
                 current_page_state=self._runtime.export_page_state(),
-                replan_group_admitted=bool(group.get("read_only") and group.get("trial_admitted")),
             )
         except (ValueError, BaseError):
             execution_journal.record_result(session, inputs, {"denied": True}, {"executed": False})
             raise
-        state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
-        if isinstance(state, dict) and state.get("replan_trial_pending") and group.get("read_only"):
-            group["trial_admitted"] = True
         coerced_args = self._coerce_tool_args(normalized_args)
         interacts = execution_journal.is_write(tool_name, coerced_args) or not self._is_read_only_recovery(
             tool_name, normalized_args
@@ -3322,16 +3297,10 @@ class BrowserRuntimeRail(AgentRail):
                 "selected_url": self._selected_navigation_url(tool_name, normalized_args),
             }
 
-    @staticmethod
-    def _tool_action_group(ctx: AgentCallbackContext) -> Dict[str, Any]:
-        extra = getattr(ctx, "extra", None) or {}
-        call_id = BrowserRuntimeRail._tool_call_id(getattr(ctx, "inputs", None))
-        group_id = (extra.get(_BROWSER_ACTION_GROUP_BY_CALL_KEY) or {}).get(call_id)
-        return (extra.get(_BROWSER_ACTION_GROUP_RESULTS_KEY) or {}).get(group_id, {})
 
     @classmethod
     def _validate_model_tool_args(cls, ctx: AgentCallbackContext, tool_name: str, tool_args: Any) -> None:
-        """Validate locally before reserving a browser strategy trial."""
+        """Validate schema and tool availability before dispatch."""
         if tool_name == "browser_phase":
             from .phase_contract import validate_request
 
@@ -4756,9 +4725,10 @@ class BrowserRuntimeRail(AgentRail):
             blocker
             for blocker in state.get("blockers") or []
             if not str(blocker).strip().lower().startswith(recoverable_prefixes)
+            and not str(blocker).strip().lower().endswith("_phase_budget_exhausted")
         ][:10]
         known_urls = list(state.get("known_urls") or [])
-        for url in re.findall(r"https?://[^\s<>\"]+", resume_instruction):
+        for url in explicit_urls(resume_instruction):
             if url not in known_urls:
                 known_urls.append(url)
         state["known_urls"] = known_urls[:4]
@@ -4826,7 +4796,6 @@ class BrowserRuntimeRail(AgentRail):
                 "budget": _BROWSER_PHASE_DEFINITIONS[name]["budget"],
                 "completion_condition": _BROWSER_PHASE_DEFINITIONS[name]["completion_condition"],
                 "blocked_signature": "",
-                "visited_price_intervals": [],
             }
             for name in phase_names
         }
@@ -4847,7 +4816,7 @@ class BrowserRuntimeRail(AgentRail):
             "status": "in_progress",
             "phases": phases,
             "current_phase": phase_names[0],
-            "known_urls": re.findall(r"https?://[^\s<>\"]+", task)[:4],
+            "known_urls": explicit_urls(task),
             "constraints": [],
             "required_fields": required_fields,
             "required_evidence_slots": required_slots,
@@ -5368,10 +5337,6 @@ class BrowserRuntimeRail(AgentRail):
             return "script_inspection"
         return name or "other"
 
-    @staticmethod
-    def _price_interval_signature(tool_name: str, tool_args: Any) -> str:
-        """Delegate cross-site filter normalization to semantic-state logic."""
-        return price_interval_signature(tool_name, tool_args)
 
     @classmethod
     def _classify_action_class(cls, tool_name: str, tool_args: Any, state: Dict[str, Any]) -> str:
@@ -5414,50 +5379,14 @@ class BrowserRuntimeRail(AgentRail):
         tool_args: Any,
         *,
         current_page_state: Optional[Dict[str, Any]] = None,
-        replan_group_admitted: bool = False,
     ) -> str:
+        """Record approximate phase costs; only execution safety/deadlines may veto dispatch."""
         if session is None:
             return "other"
         state = session.get_state(_BROWSER_PHASE_STATE_KEY)
         if not isinstance(state, dict):
             return "other"
         cls._reject_terminal_state(state)
-        phase_args = cls._coerce_tool_args(tool_args) if tool_name == "browser_phase" else {}
-        phase_reads = tool_name == "browser_phase" and (
-            phase_args.get("op") == "verify"
-            or any(c.get("kind") == "cart_delta" for c in phase_args.get("conditions", []) if isinstance(c, dict))
-        )
-        if state.get("action_budget_exhausted"):
-            reading = phase_reads or (
-                tool_name != "browser_phase" and cls._is_read_only_recovery(tool_name, tool_args)
-            )
-            used = int(state.get("budget_verification_reads", 0))
-            if reading and used < 3:
-                state["budget_verification_reads"] = used + 1
-                session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-                return "verification"
-            state["budget_verification_denials"] = int(state.get("budget_verification_denials", 0)) + 1
-            if used >= 3 or state["budget_verification_denials"] >= 2:
-                state["status"] = "partial"
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-            raise ValueError("action_budget_exhausted: up to three verification reads remain; return partial facts")
-        pending_effects = unresolved_writes(state)
-        verifying_effects = pending_effects and tool_name == "browser_phase" and phase_reads
-        trial_pending = state.get("replan_trial_pending") and not pending_effects
-        trial_tool = tool_name != "browser_phase" or phase_reads
-        read_only_trial = trial_pending and trial_tool and cls._is_read_only_recovery(tool_name, tool_args)
-        if verifying_effects or read_only_trial:
-            keys = ["effects:" + str(entry["call_id"]) for entry in pending_effects] if pending_effects else [
-                str((state.get("execution_journal") or [{}])[-1].get("call_id", "task"))
-            ]
-            counts = state.setdefault("verification_recovery_counts", {})
-            if max(int(counts.get(key, 0)) for key in keys) < 3:
-                for key in keys:
-                    counts[key] = int(counts.get(key, 0)) + 1
-                session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-                return "verification"
-            if tool_name == "browser_phase":
-                raise ValueError("verification_recovery_budget_exhausted: retain unknown effects and return partial")
         if tool_name == "browser_phase" or cls._is_replan_exempt_tool(tool_name):
             if tool_name == "browser_phase":
                 return "management"
@@ -5476,43 +5405,6 @@ class BrowserRuntimeRail(AgentRail):
         )
 
         attempts = int(details.get("attempts") or 0)
-        budget = max(1, int(details.get("budget") or 1))
-        if attempts >= budget:
-            details["status"] = "replan_required"
-            details["blocked_signature"] = signature
-            state["current_phase"] = phase
-            state["action_budget_exhausted"] = phase
-            state["blockers"] = [f"{phase}_phase_budget_exhausted"]
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-            raise ValueError(
-                f"Browser {phase} phase budget exhausted ({attempts}/{budget}). "
-                "No further writes; use up to three verification reads under the same deadline, then return partial."
-            )
-
-        cls._reject_revisited_price_interval(details, phase, tool_name, tool_args)
-
-        if cls._direct_navigation_is_required(state, phases, phase, current_page_state):
-            state["direct_navigation_guidance_count"] = int(state.get("direct_navigation_guidance_count") or 0) + 1
-            recommended_url = str((state.get("known_urls") or [""])[0])
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-            raise ValueError(
-                "The task already contains a known URL. Navigate to it directly before selector exploration: "
-                f"{recommended_url}"
-            )
-
-        try:
-            if not replan_group_admitted:
-                cls._consume_replan_gate(
-                    state,
-                    tool_name,
-                    tool_args,
-                    action_class,
-                    strategy_fingerprint,
-                )
-        except ValueError:
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
-            raise
-
         details["attempts"] = attempts + 1
         details["status"] = "in_progress"
         details["last_signature"] = signature
@@ -5524,65 +5416,6 @@ class BrowserRuntimeRail(AgentRail):
         session.update_state({_BROWSER_PHASE_STATE_KEY: state})
         return action_class
 
-    @classmethod
-    def _direct_navigation_is_required(
-        cls,
-        state: Dict[str, Any],
-        phases: Dict[str, Any],
-        phase: str,
-        current_page_state: Optional[Dict[str, Any]],
-    ) -> bool:
-        if (
-            not state.get("known_urls")
-            or phase == "navigation"
-            or int(state.get("direct_navigation_guidance_count") or 0) >= 1
-        ):
-            return False
-        total_attempts = sum(int(item.get("attempts") or 0) for item in phases.values() if isinstance(item, dict))
-        return total_attempts == 0 and not cls._known_url_navigation_satisfied(
-            state,
-            current_page_state,
-        )
-
-    @classmethod
-    def _known_url_navigation_satisfied(
-        cls,
-        state: Dict[str, Any],
-        current_page_state: Optional[Dict[str, Any]],
-    ) -> bool:
-        page_state = current_page_state if isinstance(current_page_state, dict) else {}
-        last_page = state.get("last_page") if isinstance(state.get("last_page"), dict) else {}
-        current_url = str(page_state.get("url") or last_page.get("url") or "").strip()
-        if not current_url:
-            return False
-        current_normalized = cls._normalize_navigation_url(current_url)
-        current_document = cls._normalize_navigation_url(current_url, include_query=False)
-        try:
-            current_parts = urlsplit(current_url)
-        except ValueError:
-            current_parts = None
-        for known_url in state.get("known_urls") or []:
-            known_normalized = cls._normalize_navigation_url(known_url)
-            if known_normalized and known_normalized == current_normalized:
-                return True
-            known_document = cls._normalize_navigation_url(known_url, include_query=False)
-            if known_document and known_document == current_document:
-                return True
-            try:
-                known_parts = urlsplit(str(known_url))
-            except ValueError:
-                known_parts = None
-            if current_parts is None or known_parts is None:
-                continue
-            if current_parts.netloc.lower() != known_parts.netloc.lower():
-                continue
-            known_path = (known_parts.path or "/").rstrip("/") or "/"
-            current_path = (current_parts.path or "/").rstrip("/") or "/"
-            if known_path == "/" and (current_path != "/" or bool(current_parts.query)):
-                return True
-            if known_path != "/" and current_path.startswith(f"{known_path}/"):
-                return True
-        return False
 
     @staticmethod
     def _normalize_navigation_url(value: Any, *, include_query: bool = True) -> str:
@@ -5626,68 +5459,9 @@ class BrowserRuntimeRail(AgentRail):
                 "budget": _BROWSER_PHASE_DEFINITIONS[phase]["budget"],
                 "completion_condition": _BROWSER_PHASE_DEFINITIONS[phase]["completion_condition"],
                 "blocked_signature": "",
-                "visited_price_intervals": [],
             },
         )
 
-    @classmethod
-    def _consume_replan_gate(
-        cls,
-        state: Dict[str, Any],
-        tool_name: str,
-        tool_args: Any,
-        action_class: str,
-        strategy_fingerprint: str = "",
-    ) -> None:
-        cls._reject_terminal_state(state)
-        if not state.get("replan_required"):
-            return
-        if cls._is_replan_exempt_tool(tool_name):
-            return
-        if state.get("replan_trial_pending"):
-            cls._consume_replan_denial(state, "replan_trial_pending")
-            raise ValueError(
-                "A replan trial already ran without verified semantic progress. "
-                "Wait for the runtime observation, or finish partial/blocked instead of trying "
-                "another selector, generation, tool, or phase."
-            )
-        replan_count = int(state.get("replan_count") or 0)
-        if replan_count >= 4:
-            state["status"] = "partial" if cls._has_task_evidence(state) else "blocked"
-            state["blockers"] = ["semantic_replan_budget_exhausted"]
-            state["terminal_reason"] = "semantic_replan_budget_exhausted"
-            state["next_action_class"] = "finish"
-            raise ValueError(
-                "Semantic progress remained blocked after four consecutive replan trials. "
-                "Return blocked or partial with the available structured evidence."
-            )
-        blocked_strategy = str(
-            state.get("blocked_strategy")
-            or state.get("last_strategy_fingerprint")
-            or state.get("last_action_class")
-            or ""
-        )
-        failed_strategies = {str(item) for item in state.get("failed_strategies") or [] if str(item).strip()}
-        if blocked_strategy:
-            failed_strategies.add(blocked_strategy)
-        current_strategy = strategy_fingerprint or action_class
-        if current_strategy in failed_strategies or action_class in failed_strategies:
-            if cls._allow_read_only_recovery(state, tool_name, tool_args, current_strategy):
-                state["replan_count"] = replan_count + 1
-                state["replan_trial_pending"] = True
-                state["trial_strategy"] = current_strategy
-                state["status"] = "replan_trial"
-                return
-            cls._consume_replan_denial(state, "repeated_strategy")
-            raise ValueError(
-                "Semantic loop detected. Changing selector, generation, tool name, or phase does not "
-                f"change the {action_class} target/field/intent strategy. Re-plan materially or finish "
-                "partial/blocked."
-            )
-        state["replan_count"] = replan_count + 1
-        state["replan_trial_pending"] = True
-        state["trial_strategy"] = current_strategy
-        state["status"] = "replan_trial"
 
     @staticmethod
     def _is_replan_exempt_tool(tool_name: str) -> bool:
@@ -5700,22 +5474,6 @@ class BrowserRuntimeRail(AgentRail):
         )
         return _contains_any_token(normalized_name, exempt_tokens)
 
-    @classmethod
-    def _allow_read_only_recovery(
-        cls,
-        state: Dict[str, Any],
-        tool_name: str,
-        tool_args: Any,
-        strategy_fingerprint: str,
-    ) -> bool:
-        if not cls._is_read_only_recovery(tool_name, tool_args):
-            return False
-        counts = state.setdefault("read_only_recovery_counts", {})
-        count = int(counts.get(strategy_fingerprint) or 0)
-        if count >= _BROWSER_READ_ONLY_RECOVERY_LIMIT:
-            return False
-        counts[strategy_fingerprint] = count + 1
-        return True
 
     @classmethod
     def _is_read_only_recovery(cls, tool_name: str, tool_args: Any) -> bool:
@@ -5749,36 +5507,6 @@ class BrowserRuntimeRail(AgentRail):
             for step in steps
         )
 
-    @staticmethod
-    def _consume_replan_denial(state: Dict[str, Any], reason: str) -> None:
-        denial_count = int(state.get("replan_denial_count") or 0) + 1
-        state["replan_denial_count"] = denial_count
-        state["last_denial_reason"] = str(reason or "")[:120]
-        if denial_count < _BROWSER_REPLAN_DENIAL_LIMIT:
-            return
-        blockers = list(state.get("blockers") or [])
-        if "semantic_replan_denial_budget_exhausted" not in blockers:
-            blockers.append("semantic_replan_denial_budget_exhausted")
-        state["blockers"] = blockers[:10]
-        state["status"] = "blocked"
-        state["next_action_class"] = "finish"
-        state["terminal_reason"] = "semantic_replan_denial_budget_exhausted"
-
-    @classmethod
-    def _reject_revisited_price_interval(
-        cls,
-        details: Dict[str, Any],
-        phase: str,
-        tool_name: str,
-        tool_args: Any,
-    ) -> None:
-        price_interval = cls._price_interval_signature(tool_name, tool_args)
-        visited_intervals = details.setdefault("visited_price_intervals", [])
-        if phase == "filtering" and price_interval and price_interval in visited_intervals:
-            raise ValueError(
-                f"Price interval {price_interval} was already visited in this task. "
-                "Use the existing evidence or choose a different interval."
-            )
 
     @classmethod
     def _record_phase_result(
@@ -5833,7 +5561,6 @@ class BrowserRuntimeRail(AgentRail):
         details["last_error"] = ""
         args = cls._coerce_tool_args(tool_args)
         result = tool_result if isinstance(tool_result, dict) else {"result": tool_result}
-        cls._record_price_interval(details, phase, tool_name, args)
         evidence_delta = cls._record_tool_evidence(state, result, tool_name=tool_name, tool_args=args)
         if evidence_delta.get("recovered"):
             BrowserWorkingContextStore.mark_replan_recovered(state)
@@ -6077,20 +5804,6 @@ class BrowserRuntimeRail(AgentRail):
             "recovered": bool(evidence_added or new_evidence_fields),
         }
 
-    @classmethod
-    def _record_price_interval(
-        cls,
-        details: Dict[str, Any],
-        phase: str,
-        tool_name: str,
-        args: Dict[str, Any],
-    ) -> None:
-        price_interval = cls._price_interval_signature(tool_name, args)
-        if phase != "filtering" or not price_interval:
-            return
-        visited_intervals = details.setdefault("visited_price_intervals", [])
-        if price_interval not in visited_intervals:
-            visited_intervals.append(price_interval)
 
     @classmethod
     def _record_structured_evidence(
