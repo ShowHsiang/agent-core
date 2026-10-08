@@ -63,6 +63,7 @@ from tests.unit_tests.harness.tools.browser_move.test_browser_p0_closure import 
 from tests.unit_tests.harness.tools.browser_move.test_browser_page_state import (
     _make_bare_runtime,
 )
+from tests.unit_tests.harness.tools.browser_move.test_browser_runtime_rail import _declare_output
 from tests.unit_tests.harness.tools.browser_move.test_browser_september17_contracts import (
     dom_page as shared_dom_page,
 )
@@ -300,6 +301,7 @@ def test_search_observation_can_reconcile_only_bound_local_effects(impact, url, 
 
 def test_primitive_link_navigation_records_actual_landing_title_after_redirect():
     state = Rail._build_phase_state("打开百度首页，搜索清华大学，进入第一条结果，返回页面标题")
+    _declare_output(state, ['title'], entity='page', variants=('default',))
     source = "https://www.baidu.com/s?wd=清华大学"
     state["last_page"] = {"url": source}
     state["structured_evidence"] = [{"source": source, "cards": [first_card()]}]
@@ -340,16 +342,21 @@ def test_resolving_one_effect_neither_blocks_reads_nor_clears_other_effect():
 
 
 @pytest.mark.asyncio
-async def test_capability_observation_cannot_overrun_task_deadline_and_dispatch():
+async def test_capability_observation_cannot_overrun_task_deadline_and_dispatch(monkeypatch):
     runtime = _make_bare_runtime()
-    runtime.enrich_action_capabilities = AsyncMock(side_effect=lambda _: asyncio.sleep(1))
+    now = [time.time()]
+    clock = SimpleNamespace(**vars(time))
+    clock.time = lambda: now[0]
+    monkeypatch.setattr("openjiuwen.harness.tools.browser_move.playwright_runtime.runtime.time", clock)
 
     async def slow_observation(_):
+        # Wall-clock expiry is deterministic even if the Windows event-loop timer fires early.
+        now[0] += 1
         await asyncio.sleep(1)
 
-    runtime.enrich_action_capabilities.side_effect = slow_observation
+    runtime.enrich_action_capabilities = AsyncMock(side_effect=slow_observation)
     state = Rail._build_phase_state("搜索天气")
-    state["deadline_at"] = time.time() + 0.02
+    state["deadline_at"] = now[0] + 0.02
     session = session_for(state)
     inputs = invoke_args(
         "browser_batch_interact", {"generation_id": "g0", "steps": [{"op": "click", "target_id": "x"}]}
@@ -390,6 +397,7 @@ def test_sort_card_join_rejects_unrelated_or_stale_records(change):
 
 def test_runtime_stamps_and_retains_split_observations():
     state = search_state("")
+    state["requirements_source"] = "explicit"
     state["structured_evidence"] = []
     source = state["last_page"]["url"]
     page = BrowserPageState()
