@@ -16,8 +16,8 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMe
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
@@ -1030,7 +1030,7 @@ def test_processor_projects_runtime_task_state_before_current_page_state() -> No
 
     assert rendered.context_messages[-1] is current_state
     prompt = rendered.context_messages[-2].content
-    assert '"runtime_directive":"replan_before_browser_action"' in prompt
+    assert '"runtime_directive":"consider_different_strategy"' in prompt
     assert '"requirements":{' in prompt
     assert '"field":"price"' in prompt
     assert '"semantic_delta":"no_progress"' in prompt

@@ -1068,13 +1068,12 @@ class BrowserWorkingContextStore:
             "phase_contract": project_phase(state),
             "execution": project(state),
             "acceptance": explicit_acceptance(state),
-            "verification_only": bool(state.get("action_budget_exhausted")),
-            "verification_reads_remaining": max(0, 3 - int(state.get("budget_verification_reads", 0))),
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
             "status": state.get("status", "in_progress"),
             "current_phase": current_phase,
             "phase_budget": {
+                "enforcement": "advisory",
                 "attempts": int(current_phase_state.get("attempts") or 0),
                 "limit": int(current_phase_state.get("budget") or 0),
             },
@@ -1178,7 +1177,7 @@ class BrowserWorkingContextStore:
         if status in {"blocked", "partial"}:
             return "return_partial_or_blocked"
         if state.get("replan_required"):
-            return "replan_before_browser_action"
+            return "consider_different_strategy"
         if state.get("next_action_class") == "may_finish":
             return "may_finish_if_user_goal_met"
         return "continue"
