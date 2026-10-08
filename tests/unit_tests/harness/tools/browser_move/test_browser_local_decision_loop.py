@@ -665,7 +665,7 @@ async def test_finish_returns_to_llm_even_with_unmapped_fields_and_cannot_certif
     choose_operation(client, "FINISH")
     result = await policy.invoke(await messages_for(policy, context, captured), tools=TOOLS)
     payload = client.evaluate.call_args.args[0]
-    assert payload["state"]["runtime_progress"]["missing_requirements"]
+    assert not payload["state"]["runtime_progress"]["missing_requirements"]
     assert "FINISH" in payload["questions"]["action"]["criteria"]
     assert "HANDOFF" in payload["questions"]["action"]["criteria"]
     assert result.content == llm.invoke.return_value.content and not result.tool_calls

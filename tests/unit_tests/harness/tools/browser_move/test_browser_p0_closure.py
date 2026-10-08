@@ -176,13 +176,14 @@ def test_weak_query_phase_retains_sort_gaps_as_advisory_not_global_veto():
     Rail._apply_worker_progress_to_task_state(session, {"status": "completed"}, "已完成，第一条耳机A")
     assert state["status"] == "completed"
     result = Rail._authoritative_terminal_payload(state)
-    unsatisfied = {r["id"] for r in result["acceptance"] if r["status"] != "satisfied"}
-    assert {"sort:sales", "first_result:sales"} <= unsatisfied
+    assert "acceptance" not in result
+    assert result["observations"]
     assert result["missing_fields"] == [] and result["completion_basis"] == "worker_judgment"
 
 
 def test_sales_sort_and_first_result_proof_survive_node_rebinding_and_bounded_history():
     state = search_state("sale-desc")
+    state["requirements_source"] = "explicit"
     assert all(r["status"] == "satisfied" for r in explicit_acceptance(state))
     retain_acceptance(state)
     state["structured_evidence"] = [{"kind": "page_observation", "source": "https://item.taobao.com/item.htm?id=123"}]
@@ -213,6 +214,7 @@ def test_sort_and_first_result_evidence_cannot_be_invented_from_tool_intent(unpr
 
 def test_fresh_observation_proves_sort_without_extra_phase_call():
     state = search_state("sale-desc", goal="当前页面切换到销量排序")
+    state["requirements_source"] = "explicit"
     state["structured_evidence"] = []
     observe_acceptance(state, {"url": state["last_page"]["url"], "capture_id": "new", "controls": []})
     assert explicit_acceptance(state)[0]["status"] == "satisfied"
@@ -383,7 +385,7 @@ async def test_first_chunk_timeout_preserves_execution_and_does_not_replay_model
     result = ctx.request_force_finish.call_args.args[0]
     facts = result["authoritative_browser_result"]
     assert facts["execution"]["business_effects"][0]["steps"][0]["observed_feedback"] == "Added"
-    assert not facts["observed_blockers"] and facts["unconfirmed_blockers"] == ["need a future guest name"]
+    assert not facts.get("observed_blockers", []) and facts["unconfirmed_blockers"] == ["need a future guest name"]
     data = TaskTool._build_result_data(
         result, result["output"], agent_id="browser", subagent_type="browser_agent", sub_session_id="sub"
     )

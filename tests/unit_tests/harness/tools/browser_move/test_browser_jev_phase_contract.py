@@ -336,7 +336,7 @@ async def test_optional_cart_reader_retains_mismatch_without_certifying_business
     BrowserRuntimeRail._apply_worker_progress_to_task_state(session, {"status": "completed"}, "全部加购成功")
     result = BrowserRuntimeRail._authoritative_terminal_payload(state)
     assert result["status"] == "completed"  # Worker judgment, not runtime cart certification.
-    assert result["missing_conditions"] == [condition["id"]]
+    assert "missing_conditions" not in result
     assert condition["status"] == "unsatisfied"
     assert result["completion_basis"] == "worker_judgment"
 

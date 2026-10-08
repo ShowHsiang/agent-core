@@ -969,6 +969,7 @@ def test_terminal_state_returns_structured_denial(status: str) -> None:
 
 def test_comparison_evidence_requires_distinct_bilibili_sort_slots() -> None:
     state = BrowserRuntimeRail._build_phase_state("对比B站 Python 搜索综合和最新结果的标题")
+    _declare_output(state, ['title'], entity='bilibili_search_result', variants=('comprehensive', 'latest'))
     comprehensive = {
         "generation_id": "g2",
         "page_state": {"url": "https://search.bilibili.com/all?keyword=Python"},
@@ -1123,6 +1124,7 @@ def test_target_discovery_does_not_need_semantic_progress_proof(tool_name, tool_
 def test_evaluate_result_becomes_compact_evidence_before_action_windowing() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("extract the title")
+    _declare_output(state, ['title'], entity='task_result', variants=('default',))
     session.update_state({"__browser_phase_budget_state__": state})
     function = "() => ({title: document.title, count: 3})"
 
@@ -1157,6 +1159,7 @@ def test_targeted_evaluate_maps_only_requested_fields_with_provenance() -> None:
     state = BrowserRuntimeRail._build_phase_state(
         "返回文章作者、评论数和当前排序状态"
     )
+    _declare_output(state, ['author', 'comments', 'sort_state'], entity='task_result', variants=('default',))
 
     BrowserRuntimeRail._record_structured_evidence(
         state,
@@ -1213,6 +1216,7 @@ def test_ambiguous_evaluate_alias_requires_explicit_target_contract() -> None:
 
 def test_empty_evaluate_lookup_does_not_prove_field_unavailable() -> None:
     state = BrowserRuntimeRail._build_phase_state("返回商品评分")
+    _declare_output(state, ['product_rating'], entity='product', variants=('default',))
 
     BrowserRuntimeRail._record_structured_evidence(
         state,
@@ -1266,6 +1270,8 @@ def test_interactive_probe_sort_evidence_keeps_selection_source() -> None:
 def test_probe_contract_exposes_result_count_and_bounds_conflict_fallback() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("返回前3条搜索结果")
+    _declare_output(state, [], entity='task_result', variants=('default',))
+    state["requested_result_count"] = 3
     session.update_state({"__browser_phase_budget_state__": state})
     first = {
         "observed_count": 1,
@@ -1322,7 +1328,11 @@ def test_probe_contract_exposes_result_count_and_bounds_conflict_fallback() -> N
 
 def test_generation_or_selector_changes_do_not_create_new_semantic_evidence() -> None:
     session = _FakeSession()
-    session.update_state({"__browser_phase_budget_state__": BrowserRuntimeRail._build_phase_state("extract title")})
+    session.update_state({
+        "__browser_phase_budget_state__": _declare_output(
+            BrowserRuntimeRail._build_phase_state("extract title"), ["title"]
+        )
+    })
     first = BrowserRuntimeRail._record_phase_result(
         session,
         "browser_evaluate",
@@ -1382,6 +1392,7 @@ def test_price_interval_history_does_not_prohibit_current_user_actions() -> None
 def test_structured_extraction_records_task_scoped_evidence() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract product title and price")
+    _declare_output(state, ['title', 'price'], entity='task_result', variants=('default',))
     state["current_phase"] = "extraction"
     session.update_state({"__browser_phase_budget_state__": state})
 
@@ -1414,9 +1425,10 @@ def test_structured_extraction_records_task_scoped_evidence() -> None:
     assert prompt_evidence[0]["provenance"]["title"]["selector"] == "h2.product-title"
 
 
-def test_extraction_phase_waits_for_all_inferred_required_fields() -> None:
+def test_explicit_extraction_contract_waits_for_declared_fields() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract product title and price")
+    _declare_output(state, ['title', 'price'], entity='task_result', variants=('default',))
     state["current_phase"] = "extraction"
     state["phases"]["navigation"]["status"] = "completed"
     session.update_state({"__browser_phase_budget_state__": state})
@@ -1692,6 +1704,7 @@ def test_new_structured_evidence_recovers_pending_replan_trial() -> None:
 def test_partial_batch_keeps_successful_extraction_without_marking_batch_success() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract the title and price")
+    _declare_output(state, ['title', 'price'], entity='task_result', variants=('default',))
     session.update_state({"__browser_phase_budget_state__": state})
 
     result = BrowserRuntimeRail._record_phase_result(
@@ -1738,6 +1751,7 @@ def test_required_field_ontology_and_generic_evidence_slots_keep_provenance() ->
         "low_temperature",
         "sort_state",
     }
+    _declare_output(state, sorted(expected_fields))
     assert set(state["required_fields"]) == expected_fields
     assert {slot["field"] for slot in state["required_evidence_slots"]} == expected_fields
 
@@ -1770,21 +1784,8 @@ def test_required_field_ontology_and_generic_evidence_slots_keep_provenance() ->
     assert slots["author"]["raw_text"] == "作者 Alice"
     assert slots["author"]["generation"] == "g8"
     assert slots["likes"]["source"] == "browser_batch_interact"
-    assert BrowserRuntimeRail._infer_required_fields("提取商品评分和店铺评分") == [
-        "product_rating",
-        "shop_rating",
-    ]
 
 
-def test_required_fields_use_requested_output_clause_not_operation_preconditions() -> None:
-    task = "打开淘宝搜索机械键盘，可以按价格或销量排序，返回第一条商品标题"
-    assert BrowserRuntimeRail._infer_required_fields(task) == ["title"]
-    assert BrowserRuntimeRail._infer_required_fields(
-        "打开百度查看天气，返回最高温和最低温"
-    ) == ["high_temperature", "low_temperature"]
-    assert BrowserRuntimeRail._infer_required_fields("查询美元兑人民币并返回汇率") == ["exchange_rate"]
-    assert BrowserRuntimeRail._infer_required_fields("搜索 Python 视频，返回播放量") == ["views"]
-    assert BrowserRuntimeRail._infer_required_fields("打开淘宝把蓝牙耳机加入购物车") == []
 
 
 def test_cart_action_feedback_is_preserved_but_does_not_prove_sku_delta() -> None:
@@ -1813,7 +1814,7 @@ def test_cart_action_feedback_is_preserved_but_does_not_prove_sku_delta() -> Non
     assert updated["status"] == "completed"
     assert not updated["blockers"]
     assert not updated.get("phase_requirements")
-    assert updated["structured_evidence"][-1]["fields"] == ["action_confirmation"]
+    assert updated["structured_evidence"][-1]["fields"] == ["action_feedback"]
 
 
 def test_large_evaluate_observation_is_bounded() -> None:
@@ -1839,14 +1840,6 @@ def test_large_evaluate_observation_is_bounded() -> None:
     assert payload["recall_handle"] == "a" * 32
 
 
-def test_comprehensive_and_latest_create_distinct_title_slots_without_compare_word() -> None:
-    slots = BrowserRuntimeRail._infer_required_evidence_slots(
-        "在B站分别切换综合排序和最新发布，返回两个标题"
-    )
-    assert slots == [
-        {"entity": "bilibili_search_result", "variant": "comprehensive", "field": "title"},
-        {"entity": "bilibili_search_result", "variant": "latest", "field": "title"},
-    ]
 
 
 def test_terminal_state_allows_one_tool_disabled_synthesis_then_force_finishes() -> None:
@@ -2287,7 +2280,7 @@ def test_after_invoke_renders_authoritative_max_iteration_result() -> None:
     authoritative = result["authoritative_browser_result"]
     assert authoritative["status"] == "partial"
     assert authoritative["terminal_reason"] == "max_iterations_reached"
-    assert "price" in authoritative["unverified_fields"]
+    assert "unverified_fields" not in authoritative
     assert "max_iterations_reached" in authoritative["blockers"]
     assert result["error"] == "browser_task_incomplete"
 
@@ -2358,3 +2351,12 @@ def test_after_invoke_cannot_override_runtime_terminal_state_without_progress_bl
     assert result["result_type"] == "error"
     assert result["failure_summary"] == "runtime blocked: captcha"
     assert session.get_state("__browser_phase_budget_state__")["blockers"] == ["captcha"]
+
+
+def _declare_output(state, fields, *, entity="task_result", variants=("default",)):
+    """An externally declared output contract, independent of natural-language inference."""
+    state.update(requirements_source="explicit", required_fields=list(fields), required_evidence_slots=[
+        {"entity": entity, "variant": variant, "field": field}
+        for variant in variants for field in fields
+    ])
+    return state
