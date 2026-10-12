@@ -347,10 +347,10 @@ def record_result(session: Any, inputs: Any, outcome: dict[str, Any], result: An
         elif received is not None:
             ok = received.get("ok") is True
             ran = True if ok else received.get("executed")
-            maybe_ran = not ok and ran is not False
+            uncertain_execution = not ok and ran is not False and ran is not True
             if (
-                maybe_ran and ran is not True
-                and step["op"] in {"click", "fill", "type", "select_option", "set_checked"}
+                uncertain_execution
+                and step.get("op") in {"click", "fill", "type", "select_option", "set_checked"}
                 and _never_performed(received.get("error"))
             ):
                 ran = False  # Timed out before the action was sent: not a write, nothing to reconcile.

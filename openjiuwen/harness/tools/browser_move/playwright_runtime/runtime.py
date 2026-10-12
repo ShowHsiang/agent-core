@@ -1207,9 +1207,8 @@ class BrowserAgentRuntime:
         page = self.ensure_page_state()
         # Reuse only while the already acquired live view agrees; no extra probe RPC.
         read_view = {k: metadata.get(k) for k in ("url", "page_position")}
-        read_view["semantic"] = {k: current.get(k) for k in (
-            "form_values", "selected_filters", "first_card_title", "result_count"
-        )}
+        read_fields = ("form_values", "selected_filters", "first_card_title", "result_count")
+        read_view["semantic"] = {key: current.get(key) for key in read_fields}
         cached = page.card_probe_cache
         if cached and cached.get("view") != read_view:
             page.card_probe_cache = {}
@@ -4668,12 +4667,15 @@ class BrowserRuntimeRail(AgentRail):
             "browser_execution_error",
             "task_invocation_slice_exhausted",
         )
-        state["blockers"] = [
-            blocker
-            for blocker in state.get("blockers") or []
-            if not str(blocker).strip().lower().startswith(recoverable_prefixes)
-            and not str(blocker).strip().lower().endswith("_phase_budget_exhausted")
-        ][:10]
+        retained_blockers = []
+        for blocker in state.get("blockers") or []:
+            normalized_blocker = str(blocker).strip().lower()
+            if normalized_blocker.startswith(recoverable_prefixes):
+                continue
+            if normalized_blocker.endswith("_phase_budget_exhausted"):
+                continue
+            retained_blockers.append(blocker)
+        state["blockers"] = retained_blockers[:10]
         known_urls = list(state.get("known_urls") or [])
         for url in explicit_urls(resume_instruction):
             if url not in known_urls:
