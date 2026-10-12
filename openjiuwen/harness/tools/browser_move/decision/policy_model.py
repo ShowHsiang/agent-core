@@ -257,9 +257,8 @@ class BrowserPolicyModel(Model):
             # Counters, handoff history and freshness flags affect routing, not page progress.
             # Retain the last card content even while its executable bindings are stale: reading
             # the same cards again must not manufacture a missing -> present state transition.
-            value = {key: value[key] for key in (
-                "url", "observed", "history_length", "controls", "position", "semantic"
-            )}
+            effect_fields = ("url", "observed", "history_length", "controls", "position", "semantic")
+            value = {key: value.get(key) for key in effect_fields}
             value["cards"] = [
                 {k: card.get(k) for k in (*CARD_EVIDENCE_FIELDS, "result_index", "is_ad", "order_known")}
                 for card in observation.page.get("cards") or []
@@ -360,6 +359,17 @@ class BrowserPolicyModel(Model):
         )
         fresh_read = fresh_read and read.get("url", current_page.url) == current_page.url
         page_text = str((read.get("text") if fresh_read else "") or snapshot.get("page_text") or "")
+        acknowledged_actions = []
+        page_subject = evidence_subject(page.get("url"))
+        for entry in phase.get("execution_journal", []):
+            if evidence_subject(entry.get("source")) != page_subject:
+                continue
+            for step in entry.get("steps", []):
+                if step.get("execution_state") not in {"acknowledged", "verified"}:
+                    continue
+                acknowledged_actions.append({
+                    "op": step.get("op"), "target": step.get("target_name", ""), "effect": "tool_ack_only",
+                })
         state = {
             "intent_ambiguous": intent_ambiguous,
             "goal": goal[:2000] if goal != intent else "same as current_intent",
@@ -381,12 +391,7 @@ class BrowserPolicyModel(Model):
                 "title": page.get("title"),
                 "observed_queries": [v for k in ("q", "wd", "query", "keyword", "keywords", "search_query")
                                      for v in params.get(k, [])][:3],
-                "acknowledged_actions": [
-                    {"op": s["op"], "target": s.get("target_name", ""), "effect": "tool_ack_only"}
-                    for entry in phase.get("execution_journal", [])
-                    if evidence_subject(entry.get("source")) == evidence_subject(page.get("url"))
-                    for s in entry.get("steps", []) if s.get("execution_state") in {"acknowledged", "verified"}
-                ][-6:],
+                "acknowledged_actions": acknowledged_actions[-6:],
             },
             "page_position": page["page_position"],
             "executable_state": {
