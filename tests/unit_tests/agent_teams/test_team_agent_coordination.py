@@ -1376,8 +1376,8 @@ async def test_task_claimed_for_self_uses_teammate_template():
 
     Regression guard for the role-aware branch in ``on_task_claimed``:
     when ``is_human_agent(member_name)`` is False, the assignee sees the
-    existing ``[任务指派]`` text that urges them to call ``view_task`` and
-    work on the task autonomously.
+    ``[任务指派]`` text carrying the task title and body, telling it to
+    claim the task directly — no view_task round-trip.
     """
     agent = _make_leader()
     # Make sure the leader is NOT registered as a human-agent member —
@@ -1386,7 +1386,9 @@ async def test_task_claimed_for_self_uses_teammate_template():
     assert "leader-1" not in await agent.team_backend.human_agent_names()
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get = AsyncMock(return_value=MagicMock(title="Fix bug"))
+    agent._configurator.task_manager.get = AsyncMock(
+        return_value=MagicMock(task_id="task-42", title="Fix bug", content="reproduce and fix", status="pending")
+    )
     agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
@@ -1403,10 +1405,33 @@ async def test_task_claimed_for_self_uses_teammate_template():
     content = agent.deliver_input.await_args.args[0]
     assert "[任务指派]" in content
     assert "task-42" in content
-    # Teammate prompt steers toward autonomous execution via view_task.
-    assert "view_task" in content
+    # The notice carries the task itself and steers straight to claiming it.
+    assert "Fix bug" in content
+    assert "reproduce and fix" in content
+    assert "claim_task(status=claimed)" in content
+    assert "view_task" not in content
     # Must not pick the controller-facing HITT variant.
     assert "控制者" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_claimed_for_self_is_not_announced_while_blocked():
+    """A blocked assignment is left to the board, which wakes the member once it unblocks."""
+    agent = _make_leader()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get = AsyncMock(
+        return_value=MagicMock(task_id="task-42", title="Fix bug", content="c", status="blocked")
+    )
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2742,6 +2767,31 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
     assert cancel_calls == [None], "shutdown must drive the cooperative cancel path"
     sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_shutdown_self_settles_dormant_member_from_backend_lifetime():
+    """A dormant-lifetime member retires to DORMANT, read off the team backend.
+
+    Regression: ``resolve_retire_target`` once read a non-existent ``_infra``
+    attribute, so every ``shutdown_self`` / ``finalize_member`` raised before
+    writing the terminal status, leaving the member stuck in
+    SHUTDOWN_REQUESTED with a live coordination loop and a dead runtime.
+    """
+    agent = _make_teammate()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    agent._stream_controller.cooperative_cancel = AsyncMock()
+    agent.team_backend.get_member_lifetime = AsyncMock(return_value="dormant")
+    team_member = SimpleNamespace(update_status=AsyncMock(return_value=True))
+    agent._state.team_member = team_member
+
+    await agent.shutdown_self()
+
+    team_member.update_status.assert_awaited_once_with(MemberStatus.DORMANT)
+    assert agent.retired_status is MemberStatus.DORMANT
+    assert await agent._stream_controller.stream_queue.get() is None
+    assert await agent.resolve_retire_target(force=True) is MemberStatus.SHUTDOWN
 
 
 @pytest.mark.asyncio

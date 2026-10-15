@@ -806,6 +806,14 @@ class ReActAgent(BaseAgent):
             model_client_config=model_client_config,
         )
 
+    def get_llm(self) -> Model:
+        """Return the current model, initializing it lazily when needed.
+
+        Raises:
+            ValueError: If model_client_config is not configured.
+        """
+        return self._get_llm()
+
     def _get_llm(self) -> Model:
         """Get LLM instance (lazy initialization)
 
@@ -960,10 +968,10 @@ class ReActAgent(BaseAgent):
             queued, which also means no event was fired.
         """
         queue = ctx.steering_queue
-        if queue is None or queue.empty():
+        if queue is None or not ctx.has_pending_steering():
             return []
         previous_inputs = ctx.inputs
-        ctx.inputs = SteeringDrainInputs(pending=queue.qsize())
+        ctx.inputs = SteeringDrainInputs(pending=ctx.steering_pending_count())
         try:
             await ctx.fire(AgentCallbackEvent.BEFORE_STEERING_DRAIN)
             limit = ctx.inputs.limit

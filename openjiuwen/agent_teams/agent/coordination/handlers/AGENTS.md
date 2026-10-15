@@ -50,7 +50,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 | 事件 | 策略 |
 |---|---|
-| `USER_INPUT`（inner） | 直接 `deliver_input`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
+| `USER_INPUT`（inner） | 直接 `deliver_input`，并原样透传 payload 中的 request-local `run_context`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
 | `STANDBY` | `pause_polls()`，仅此 |
 | `CLEANED` | 非 leader → `shutdown_self()`。**leader 分支恒 no-op**：persistent leader 必须活过 `clean_team` 去接下一次交互；temporary leader 的收尾由 `StreamController._on_idle_settled` 查 `state.team_cleaned` 这个 latch 驱动，走总线事件会跟 round-end 抢跑 |
 | `TOOL_APPROVAL_RESULT` | 目标是自己才 `resume_interrupt`，把审批结果包成 `InteractiveInput` 灌回被中断的工具调用 |
@@ -140,14 +140,18 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 
 **C. 看板巡视** —— `on_task_board_event` → `_nudge_idle_agent`，角色分化最关键的一处：
 
-- **leader 收每个 board 事件都巡视全部未完成任务**（它owns 看板级决策，必须看见每次跃迁）
+- **leader 只在可能需要它决策的 board 事件上巡视全部未完成任务**（F_121）：`_LEADER_QUIET_EVENTS`（他人认领 / 指派生效的 `TASK_CLAIMED` 兜底、`TASK_STARTED`、验收往返 `TASK_SUBMITTED_FOR_REVIEW` / `TASK_REVISION_REQUESTED` 兜底）与**已有 assignee** 的 `TASK_UNBLOCKED` 只续轮询、不唤醒——纯进度变化，下次唤醒看到的仍是完整看板，卡住的任务由停滞检测兜底；完成、新建、释放、取消 / 改内容、plan 请求、无主任务解锁照常唤醒；由 `TASK_COMPLETED` / `TASK_VERIFIED` 触发时，看板（或全部完成的收尾提示）之前先列"刚完成"的那个任务及其完成摘要，按需附 `view_task(action='note')` 提示——看板只列未完成任务，否则刚完成的结果会丢（F_120）。成员不再另发完成汇报
 - **teammate 只被 `_TEAMMATE_NUDGE_EVENTS` 唤醒** = `TASK_CREATED` / `TASK_UNBLOCKED` /
   `TASK_RELEASED`，即**只有会扩大可处理池的三类**。其余跃迁要么缩小池（`CLAIMED`）、要么
   移除任务（`COMPLETED` / `CANCELLED`）、要么不改变可处理集（`UPDATED` / `STARTED`），
   唤醒 teammate 只会白烧一轮去重扫没变的板。
-- `_nudge_idle_agent` 给 teammate 只渲染 **claimable（pending 且无 assignee）+ assignee ==
-  自己的未完成任务**；别人 in-flight 的活不喂给 teammate——唤醒它是为了让它接活，不是让它
-  围观别人干活。
+- leader 看板每任务一行**不带 `content`**（`render_task_line(with_content=False)`，附 `[blocked by #…]`，数据来自 `list_tasks_with_deps`）——任务正文是 leader 自己写的，已在其上下文里，每次唤醒重贴只是重复；要看全文用 `view_task(get)`。teammate 看板保留 `content`（它靠正文匹配专长决定认领）
+- `_nudge_idle_agent` 给 teammate 只渲染**现在就能开始的任务**：claimable（pending 且无 assignee）
+  + assignee == 自己的 **pending** 任务；自己 blocked / 在手的任务、别人 in-flight 的活都不喂——
+  唤醒它是为了让它接活，不是让它围观。blocked 的任务解锁时 `TASK_UNBLOCKED` 会再唤醒它；筛完为空
+  不唤醒。看板标题直接让它 `claim_task(status=claimed)`，不再指去 `view_task`（行里已附正文）。
+- `on_task_claimed` 的 teammate 自身分支（被指派）：通知正文带任务标题与 `content`、直接让它认领；
+  任务不是 `pending`（仍 blocked 或已删）时不通知，交给解锁后的看板唤醒。
 - **`resume_polls()` 对每个事件都触发**：上面的过滤只砍 nudge，不停 poll。
 - **板子一律 `use_steer=False`**（维度 3）：巡视只是提醒，从不说"你手上的活作废了"，
   没有理由打断成员的推理。它因此进 follow-up 队列，这一轮结束才读到。**同一批排队的板子

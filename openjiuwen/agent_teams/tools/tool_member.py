@@ -22,6 +22,25 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
 
 
+def validate_member_name(member_name: str | None) -> str | None:
+    """Validate ``member_name`` at the tool boundary.
+
+    Returns:
+        An error message when the name is missing or malformed,
+        otherwise ``None``.
+    """
+    if member_name and _MEMBER_NAME_PATTERN.match(member_name):
+        return None
+    return (
+        f"Invalid member_name {member_name!r}: must start with a "
+        "lowercase ASCII letter (a-z), followed by lowercase letters, "
+        "digits (0-9) or hyphen (-); no uppercase, underscore, "
+        "whitespace, or non-ASCII characters (including CJK) — "
+        "member_name is reused as a routing token and a filesystem "
+        "path segment"
+    )
+
+
 def _is_anthropic_provider(provider: str) -> bool:
     """Return whether a provider name is Anthropic-compatible."""
     from openjiuwen.agent_teams.external.cli_agent.model_compat import is_anthropic_provider
@@ -123,25 +142,6 @@ class _SpawnToolBase(TeamTool, ABC):
         self.team = team
 
     @staticmethod
-    def _validate_member_name(member_name: str | None) -> str | None:
-        """Validate ``member_name`` at the tool boundary.
-
-        Returns:
-            An error message when the name is missing or malformed,
-            otherwise ``None``.
-        """
-        if member_name and _MEMBER_NAME_PATTERN.match(member_name):
-            return None
-        return (
-            f"Invalid member_name {member_name!r}: must start with a "
-            "lowercase ASCII letter (a-z), followed by lowercase letters, "
-            "digits (0-9) or hyphen (-); no uppercase, underscore, "
-            "whitespace, or non-ASCII characters (including CJK) — "
-            "member_name is reused as a routing token and a filesystem "
-            "path segment"
-        )
-
-    @staticmethod
     def _fail(reason: str) -> ToolOutput:
         """Build a failed ToolOutput carrying a diagnostic reason."""
         return ToolOutput(success=False, error=reason)
@@ -182,6 +182,46 @@ class _SpawnToolBase(TeamTool, ABC):
             f"Member spawned: member_name={d['member_name']} "
             f"display_name={d['display_name']} role={role}{suffix}"
         )
+
+
+async def register_teammate(
+    team: TeamBackend,
+    *,
+    member_name: str,
+    display_name: str,
+    desc: str,
+    prompt: str | None,
+    allocation: "Allocation | None",
+    isolation: str | None = None,
+    permissions_override: dict[str, str] | None = None,
+    lifetime: str | None = None,
+) -> "MemberOpResult":
+    """Register one ordinary LLM teammate row (UNSTARTED) — the single place that
+    knows how a teammate's card and mode are derived.
+
+    Used by ``spawn_teammate`` and by ``create_task``'s inline ``member``
+    (F_118), so the two can never drift on card id, mode or options.
+    """
+    from openjiuwen.agent_teams.schema.status import MemberMode
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    agent_card = AgentCard(
+        id=f"{team.team_name}_{member_name}",
+        name=display_name,
+        description=desc,
+    )
+    return await team.spawn_member(
+        member_name=member_name,
+        display_name=display_name,
+        agent_card=agent_card,
+        desc=desc,
+        prompt=prompt,
+        mode=MemberMode(team.teammate_mode.value),
+        allocation=allocation,
+        isolation=isolation,
+        permissions_override=permissions_override,
+        lifetime=lifetime,
+    )
 
 
 class SpawnTeammateTool(_SpawnToolBase):
@@ -286,10 +326,7 @@ class SpawnTeammateTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        from openjiuwen.agent_teams.schema.status import MemberMode
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -310,25 +347,18 @@ class SpawnTeammateTool(_SpawnToolBase):
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
-        permissions_override = inputs.get("permissions")
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
-        agent_card = AgentCard(
-            id=f"{self.team.team_name}_{member_name}",
-            name=display_name,
-            description=desc,
-        )
-        result = await self.team.spawn_member(
+        result = await register_teammate(
+            self.team,
             member_name=member_name,
             display_name=display_name,
-            agent_card=agent_card,
             desc=desc,
             prompt=inputs.get("prompt"),
-            mode=MemberMode(self.team.teammate_mode.value),
             allocation=allocation,
             isolation=inputs.get("isolation"),
-            permissions_override=permissions_override,
+            permissions_override=inputs.get("permissions"),
         )
         fork_value = inputs.get("fork")
         if fork_value and fork_value not in ("false", False):
@@ -499,7 +529,7 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -556,7 +586,10 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        if getattr(self.team, "conversation_mode", "team") != "group_chat":
+            return self._fail("spawn_passive_human requires a group_chat runtime")
+
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -633,7 +666,7 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
 
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -834,7 +867,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
         return f"<fallback_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</fallback_model_catalog>"
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 

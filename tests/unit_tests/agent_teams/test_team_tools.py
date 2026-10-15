@@ -2332,6 +2332,30 @@ class TestSendMessageTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_invoke_rejects_both_fields_when_targets_extends_to(self, agent_team, t):
+        """Targets that add members beyond 'to' stay ambiguous and are rejected."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_folds_targets_repeating_to_into_unicast(self, agent_team, t):
+        """A one-element 'targets' equal to 'to' is sent as a unicast with a corrective note."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": [" m1 "], "content": "Hi"})
+
+        assert result.success is True
+        assert result.data["type"] == "message"
+        assert result.data["to"] == "m1"
+        text = tool.render_for_llm(result)
+        assert "Success" in text
+        assert "only 'to'" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_requires_one_recipient_field(self, agent_team, t):
         """One separated recipient field must be present."""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -2782,6 +2806,29 @@ async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_
         if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
     ]
     assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_completed_task_explains_why(agent_team, t, sample_agent_card, db):
+    """Cancelling a completed task says it is already done instead of a bare failure."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    await db.task.complete_task(task.task_id)
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is False
+    assert "already completed" in result.error
+    assert (await agent_team.task_manager.get(task.task_id)).status == TaskStatus.COMPLETED.value
 
 
 @pytest.mark.asyncio
