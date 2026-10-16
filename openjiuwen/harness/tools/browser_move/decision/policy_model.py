@@ -713,8 +713,14 @@ class BrowserPolicyModel(Model):
                           if restricted and not fixed_read and impact not in {"read", "local_ui"}
                           else "")
                 recovery_key = self._binding_recovery_key(step, control, observation)
-                stale_receipts = [r for r in task.receipts if recovery_key and r.get("recovery_key") == recovery_key
-                                  and r.get("observation_invalidated") and not r.get("binding_recovered")]
+                stale_receipts = []
+                if recovery_key:
+                    for receipt in task.receipts:
+                        if receipt.get("recovery_key") != recovery_key:
+                            continue
+                        if not receipt.get("observation_invalidated") or receipt.get("binding_recovered"):
+                            continue
+                        stale_receipts.append(receipt)
                 if len(stale_receipts) >= 2:
                     reason = "repeated_target_invalidation"
                     local_recovery.append(stale_receipts[-1])
@@ -734,7 +740,8 @@ class BrowserPolicyModel(Model):
                 search_submit = bool(details.get("search_like") and (
                     step["op"] == "press" and step.get("key") == "Enter"
                     or step["op"] == "click" and details.get("tag") not in {"input", "textarea"}))
-                if not reason and not fixed_read and (impact not in {"read", "local_ui"} or search_submit):
+                needs_ack_check = impact not in {"read", "local_ui"} or search_submit
+                if not reason and not fixed_read and needs_ack_check:
                     if self._acknowledged_local_action(step, control, observation):
                         reason = "acknowledged_action_recovery"
                 if reason:
@@ -1045,11 +1052,13 @@ class BrowserPolicyModel(Model):
                     "obstacle remains, choose a different observed route, request authorized human help, or report "
                     "the blocker. Do not navigate to the same destination again without a changed basis.",
                 }
+            action_uncertain = reason == "uncertain_choice" and diagnostic.get("uncertain_head") == "action"
             if reason == "uncertain_choice":
-                recovery["decision"] = {name: diagnostic.get(name) for name in (
+                decision_fields = (
                     "operation_choice", "uncertain_head", "operation_confidence", "target_confidence",
                     "action_min_confidence", "target_min_confidence",
-                )}
+                )
+                recovery["decision"] = {name: diagnostic.get(name) for name in decision_fields}
             if observation.state.get("verification_only"):
                 recovery["next"] = "Action budget exhausted. Use up to three verification reads, then report partial."
             elif phase.get("unknown_writes"):
@@ -1084,8 +1093,7 @@ class BrowserPolicyModel(Model):
             elif reason in {"runtime_recovery_required", "observation_generation_changed",
                             "decision_observation_unavailable", "observation_unavailable"}:
                 recovery["next"] = "Refresh targets, inspect per-step results, and continue only unfinished steps."
-            elif (reason == "uncertain_choice" and diagnostic.get("uncertain_head") == "action"
-                  and observation.state.get("intent_source") == "task" and has_phase_tool):
+            elif action_uncertain and observation.state.get("intent_source") == "task" and has_phase_tool:
                 recovery["next"] = (
                     "Resolve what to do next from the source observations. For a complex goal with a clear remaining "
                     "local fragment, use browser_phase set once with a short objective and, if needed, observed "
@@ -1183,7 +1191,7 @@ class BrowserPolicyModel(Model):
                  "intent": observation.state.get("current_intent"),
                  "binding_version": (observation.state.get("phase") or {}).get("version", 0),
                  "view": view.get("semantic") or {}}
-        if op == "probe_cards" and scope["viewport_only"]:
+        if op == "probe_cards" and scope.get("viewport_only"):
             value["position"] = view.get("page_position") or observation.state.get("page_position")
         return hashlib.sha256(canonical_arguments(value).encode()).hexdigest()[:24]
 
@@ -1309,26 +1317,27 @@ class BrowserPolicyModel(Model):
             fact = facts[index] if index < len(facts) else {}
             succeeded = (fact.get("execution_state") in {"acknowledged", "verified"}
                          if fact else outcome.get("success"))
-            if not succeeded or step.get("op") not in _SCOPED_READ_OPS:
+            op = step.get("op")
+            if not succeeded or op not in _SCOPED_READ_OPS:
                 continue
             # A later dispatched mutation in this batch may already have changed the read object.
             if any(f.get("impact") != "read" and f.get("execution_state") not in
                    {"not_started", "rejected_before_dispatch", "prepared"} for f in facts[index + 1:]):
                 continue
             control = fact.get("control") or step_control(self.runtime, step)
-            if step["op"] in {"extract_text", "extract_value"}:
+            if op in {"extract_text", "extract_value"}:
                 if not (control.get("decision_state") or {}).get("node_guard"):
                     continue  # Raw source remains available; do not invent a fresh target binding.
                 step = {**step, "target_id": control.get("target_id")}
             receipt_id = call_id if len(steps) == 1 else f"{call_id}:{index}"
-            if any(r["decision_id"] == receipt_id for r in task.receipts):
+            if any(r.get("decision_id") == receipt_id for r in task.receipts):
                 continue
             observation = _Observation("", "", 0,
                 {"current_intent": self.current_intent, "phase": project_phase(phase)}, [control], observed_page)
             task.receipts.append({"decision_id": receipt_id, "model_source": "llm", "success": True,
-                "executed": True, "operation": step["op"], "execution_state": "acknowledged",
+                "executed": True, "operation": op, "execution_state": "acknowledged",
                 "postcondition": "observation_available", "reader_scope": self._reader_scope_key(step, observation),
-                "reader_interaction": observed_page["reader_interaction"]})
+                "reader_interaction": observed_page.get("reader_interaction", "")})
         task.receipts = task.receipts[-40:]
 
     def record_execution(self, inputs: Any, session: Any, outcome: dict[str, Any]) -> None:
@@ -1349,8 +1358,8 @@ class BrowserPolicyModel(Model):
 
             args = arguments(inputs)
             result = getattr(inputs, "tool_result", None)
-            if (not facts and str(inputs.tool_name).endswith("browser_batch_interact")
-                    and not is_write(str(inputs.tool_name), args) and isinstance(result, dict)):
+            batch_without_facts = not facts and str(inputs.tool_name).endswith("browser_batch_interact")
+            if batch_without_facts and not is_write(str(inputs.tool_name), args) and isinstance(result, dict):
                 received = {r.get("index", i): r for i, r in enumerate(result.get("steps") or [])
                             if isinstance(r, dict)}
                 if received:

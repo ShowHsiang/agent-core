@@ -238,10 +238,11 @@ def build_menu(
                 same_node(binding, control) and binding["value"] == current for binding in search_bindings or []
             )
             submittable = current in field_values or (llm_bound and not bound)
-            if (submittable and bound and not details.get("search_like") and tag != "textarea"
-                    and re.search(r"提交|确认|应用|回车|submit|confirm|apply|enter", goal, re.I)):
-                add(f"PRESS Enter on {name}: submit the explicitly bound value",
-                    {**base, "op": "press", "key": "Enter"})
+            if submittable and bound:
+                single_line_field = not details.get("search_like") and tag != "textarea"
+                if single_line_field and re.search(r"提交|确认|应用|回车|submit|confirm|apply|enter", goal, re.I):
+                    add(f"PRESS Enter on {name}: submit the explicitly bound value",
+                        {**base, "op": "press", "key": "Enter"})
             if details.get("search_like") and submittable:
                 add(
                     f"SUBMIT SEARCH {name}: press Enter on the observed literal query",

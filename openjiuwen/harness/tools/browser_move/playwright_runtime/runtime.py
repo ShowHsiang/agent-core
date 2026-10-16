@@ -1329,8 +1329,11 @@ class BrowserAgentRuntime:
         observation_error = ""
         policy_config = getattr(getattr(self, "decision_policy", None), "decision_config", None)
         snapshot = self.ensure_page_state().decision_snapshot
-        if ((getattr(policy_config, "mode", "llm") in {"hybrid", "shadow"} or snapshot.get("invalidated"))
-                and (not snapshot.get("capture_id") or snapshot.get("url") != self.ensure_page_state().url)):
+        needs_decision = getattr(policy_config, "mode", "llm") in {"hybrid", "shadow"} or snapshot.get("invalidated")
+        needs_repair = needs_decision and (
+            not snapshot.get("capture_id") or snapshot.get("url") != self.ensure_page_state().url
+        )
+        if needs_repair:
             # Repair missing or explicitly invalidated data once, using the existing metadata path.
             # The primary tool receipt is already committed; never replay it or fetch full AX.
             try:
@@ -2251,9 +2254,9 @@ class BrowserAgentRuntime:
             op = str(step.get("op") or "")
             if step.get("ok") and op in _BATCH_REGISTERED_TARGET_OPS | {"press"}:
                 action_acked = True
-            if (action_acked and op in {"extract_text", "extract_value"}
-                    and step.get("ok") is False and step.get("executed") is False):
-                break
+            if action_acked and op in {"extract_text", "extract_value"}:
+                if step.get("ok") is False and step.get("executed") is False:
+                    break
         else:
             return
         result["recovery_hint"] = (
@@ -3478,9 +3481,11 @@ class BrowserRuntimeRail(AgentRail):
         state = execution_journal.task_state(session)
         entry = next((e for e in state.get("execution_journal", [])
                       if e.get("call_id") == self._tool_call_id(inputs)), None)
-        if (inputs is not None and isinstance(exc, ValueError)
-                and str(exc).startswith("browser_observation_stale:")
-                and (entry is None or entry.get("execution_state") == "prepared")):
+        stale_before_dispatch = False
+        if inputs is not None and isinstance(exc, ValueError):
+            not_dispatched = entry is None or entry.get("execution_state") == "prepared"
+            stale_before_dispatch = str(exc).startswith("browser_observation_stale:") and not_dispatched
+        if stale_before_dispatch:
             # PageState rejected compilation before dispatch; preserve this even when
             # the rail exception path, rather than a tool, produces the receipt.
             result = {"ok": False, "executed": False, "state_changed": False,
