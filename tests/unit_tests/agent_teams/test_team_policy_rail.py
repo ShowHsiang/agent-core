@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from openjiuwen.agent_teams.prompts import (
@@ -98,6 +100,15 @@ class _StubContext:
         self.context = _StubModelContext(messages)
         self.inputs = None
         self.extra: dict = {}
+
+
+# Every admitted input is stamped with a current-time anchor (F_24).
+_CLOCK_PATTERN = re.compile(r'<team-clock now="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( [+-]\d{2}:\d{2})?"/>')
+
+
+def _without_clock(text: str) -> str:
+    """Drop the one clock anchor an admitted message carries, with its separator."""
+    return _CLOCK_PATTERN.sub("", text, count=1).removeprefix("\n")
 
 
 async def _admit(
@@ -615,6 +626,132 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.ROLE in sections
 
 
+class TestTeamPolicyRailFrameworkBootstrap:
+    """A framework-built team's leader (F_122): prebuilt opening in the prefix,
+    the policy delivered as a ``<team-policy>`` block ahead of the first input."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_prefix_is_prebuilt_opening_plus_extra(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+
+        rail = _leader_rail(dispatch_mode="scheduled", bootstrap_mode="framework", base_prompt="Stay sharp")
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        sections = builder.get_all_sections()
+        assert set(sections) == {TeamSectionName.PREBUILT, TeamSectionName.EXTRA}
+        opening = sections[TeamSectionName.PREBUILT].render("cn")
+        # The team exists: no routing to build_team, and no policy in the prefix.
+        assert "调用 `build_team`" not in opening
+        assert "没有 `build_team` 这一步" in opening
+        assert "任务下发（调度指派模式）" not in builder.build()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_receives_the_policy_ahead_of_its_first_input(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Generic team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+
+        batch = ["research the market"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+        await rail.on_user_message(ctx)
+
+        # Team context, then the policy, then the roster, then the clock — all
+        # ahead of what the user typed.
+        delivered = batch[0]
+        assert "<team-context>" in delivered
+        assert "<team-policy>" in delivered
+        assert delivered.index("<team-context>") < delivered.index("<team-policy>")
+        assert delivered.index("<team-policy>") < delivered.index('<team-event kind="roster">')
+        assert batch[-1] == "research the market"
+        expected = build_leader_policy_disclosure(
+            lifecycle="temporary",
+            dispatch_mode="scheduled",
+            language="cn",
+        )
+        assert expected in delivered
+        assert "任务下发（调度指派模式）" in delivered
+
+        # Delivered once: the next input carries no second copy.
+        second = ["and the competitors"]
+        ctx.inputs = UserMessageInputs(parts=second, source="query")
+        await rail.on_user_message(ctx)
+        assert "<team-policy>" not in "\n".join(second)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_framework_leader_policy_rides_the_attachment_lane(self):
+        """With the production attachment manager the policy is in the registered snapshot."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Generic team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _AttachmentStubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["ship it"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        snapshot = await _sync_attachments(agent, ctx)
+
+        assert batch[-1] == "ship it"
+        assert "<team-policy>" not in "\n".join(batch)
+        assert snapshot is not None
+        assert "<team-policy>" in snapshot.content
+        assert "<team-context>" in snapshot.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_bootstrap_mode_delivers_no_policy_block(self):
+        """The default lane is untouched: policy comes from build_team, not the tracker."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["go"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        await rail.before_model_call(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
+        assert TeamSectionName.BOOTSTRAP in builder.get_all_sections()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_teammate_never_gets_a_policy_block(self):
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="dev1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["hello"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
+
+
 class TestTeamPolicyRailTeamContext:
     """Team state is delivered into the conversation, not the system prompt.
 
@@ -643,7 +780,7 @@ class TestTeamPolicyRailTeamContext:
         user_message = UserMessage(content="\n".join(batch))
         await ctx.context.add_messages(user_message)
 
-        assert batch == ["ship it"]
+        assert [part for part in batch if not _CLOCK_PATTERN.fullmatch(part)] == ["ship it"]
         assert ctx.context.messages == [snapshot, user_message]
         assert isinstance(snapshot, UserMessage)
         assert snapshot.content.startswith("<system-reminder>\n")
@@ -887,7 +1024,7 @@ class TestTeamPolicyRailTeamContext:
         assert "<team-context>" in first.content
         assert first.content.endswith("<team-inbound>报数任务已发布</team-inbound>")
         assert "<team-context>" not in second.content
-        assert second.content == "[STEERING] task board"
+        assert _without_clock(second.content) == "[STEERING] task board"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -903,7 +1040,7 @@ class TestTeamPolicyRailTeamContext:
         query = await _admit(rail, ctx, "build me a team")
         await rail.before_model_call(ctx)
         # Nothing exists yet, so the input was left alone.
-        assert query.content == "build me a team"
+        assert _without_clock(query.content) == "build me a team"
         assert len(ctx.context.messages) == 1
 
         # The round runs build_team through a tool call.
@@ -922,7 +1059,7 @@ class TestTeamPolicyRailTeamContext:
         assert "# 团队信息" in tail.content
         assert "报数小队" in tail.content
         # Everything that was already history is untouched.
-        assert ctx.context.messages[0].content == "build me a team"
+        assert _without_clock(ctx.context.messages[0].content) == "build me a team"
         assert ctx.context.messages[2].content == "Team created"
 
     @pytest.mark.asyncio
@@ -947,7 +1084,7 @@ class TestTeamPolicyRailTeamContext:
 
         ctx = _StubContext()
         query = await _admit(rail, ctx, "build me a team")
-        assert query.content == "build me a team"
+        assert _without_clock(query.content) == "build me a team"
 
         backend.set_team(_StubTeam("Beta", "报数小队", "count off"), mtime=7)
         backend.register_self(_StubMember("leader1", "队长"), mtime=7)
@@ -1025,7 +1162,7 @@ class TestTeamPolicyRailTeamContext:
 
         assert backend.get_info_calls == 1
         assert backend.list_members_calls == 1
-        assert second.content == "still going"
+        assert _without_clock(second.content) == "still going"
         assert len(ctx.context.messages) == 2
 
     @pytest.mark.asyncio
@@ -1102,7 +1239,7 @@ class TestTeamPolicyRailTeamContext:
         rebuilt.init(_StubAgent(SystemPromptBuilder(language="cn")))
         next_ctx = _StubContext(session=session)
         second = await _admit(rebuilt, next_ctx, "second round")
-        assert second.content == "second round"
+        assert _without_clock(second.content) == "second round"
 
         # Losing the baseline (a fresh session) starts the announcements over.
         fresh = _leader_rail(backend)
@@ -1422,6 +1559,7 @@ class TestTagNoticeInclusion:
             content = section.render(language)
             assert "<team-context>" in content
             assert "roster-change" in content
+            assert "<team-clock" in content
 
     @pytest.mark.level1
     def test_external_cli_prompt_has_inbound_tags(self):
@@ -1783,3 +1921,52 @@ async def test_autonomous_and_leader_rails_carry_no_outcome_notice():
 
     assert "task-verified" not in autonomous_msg.content
     assert "task-verified" not in leader_msg.content
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_every_admitted_input_carries_one_clock_anchor():
+    """Each admitted input is stamped with the current time, steering included.
+
+    Inbound messages carry absolute send times only, so the anchor is the one
+    place a member learns what "now" is. It sits right in front of the inputs
+    it stamps; team state folded into the same input still goes first.
+    """
+    backend = _FakeTeamBackend(
+        team=_StubTeam("Beta", "Test"),
+        members=[_StubMember("dev1", "Dev")],
+        self_member_name="leader1",
+    )
+    rail = _leader_rail(backend)
+    rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+    ctx = _StubContext()
+
+    first = await _admit(rail, ctx, "<team-inbound>hello</team-inbound>")
+    second = await _admit(rail, ctx, "task board", source="steering", prefix="[STEERING] ")
+
+    for message in (first, second):
+        assert len(_CLOCK_PATTERN.findall(message.content)) == 1
+    clock_at = _CLOCK_PATTERN.search(first.content).start()
+    assert first.content.index("<team-context>") < clock_at < first.content.index("<team-inbound>")
+    assert second.content.startswith("[STEERING] <team-clock ")
+    assert second.content.endswith("task board")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_clock_anchor_follows_superseded_board_pruning():
+    """Pruning runs on the original inputs; the anchor is added to what survives."""
+    rail, _backend = _teammate_rail("autonomous")
+    rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+    old_board = render_event(kind="task-board", body="old")
+    new_board = render_event(kind="task-board", body="new")
+    ctx = _StubContext()
+    batch = [old_board, new_board]
+    ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+    await rail.on_user_message(ctx)
+
+    assert old_board not in batch
+    assert batch[-1] == new_board
+    assert sum(1 for part in batch if _CLOCK_PATTERN.fullmatch(part)) == 1

@@ -3,6 +3,7 @@
 
 """Tests for pure-function inbound rendering."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -66,7 +67,7 @@ def _task(
 
 @pytest.mark.level0
 def test_render_message_direct(lang_en):
-    out = render_message(_message("m1", "leader", "hello", broadcast=False), now_ms=_NOW_MS)
+    out = render_message(_message("m1", "leader", "hello", broadcast=False))
     # Rendered as <team-inbound> XML, mirroring the in-process dispatcher.
     assert out.startswith("<team-inbound ")
     assert 'message_id="m1"' in out
@@ -75,13 +76,15 @@ def test_render_message_direct(lang_en):
     assert "hello" in out
     # A non-human member gets a reply-hint note.
     assert '<team-note kind="reply-hint">' in out
-    # Send time is rendered as absolute + relative diff.
-    assert "3m ago" in out
+    # Send time is the absolute time only: the block stays in the history,
+    # where a relative diff rendered now would go stale.
+    assert re.search(r'time="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}( [+-]\d{2}:\d{2})?"', out)
+    assert "ago" not in out
 
 
 @pytest.mark.level0
 def test_render_message_broadcast(lang_en):
-    out = render_message(_message("m2", "leader", "all hands", broadcast=True), now_ms=_NOW_MS)
+    out = render_message(_message("m2", "leader", "all hands", broadcast=True))
     assert 'type="broadcast"' in out
 
 
@@ -90,7 +93,6 @@ def test_render_message_human_agent_is_controller_notification(lang_en):
     out = render_message(
         _message("m3", "leader", "please review", broadcast=False),
         is_human_agent=True,
-        now_ms=_NOW_MS,
     )
     # A human-agent avatar sees the message as a controller notification with
     # the load-bearing hitt-silence constraint, not a reply-hint.
@@ -106,7 +108,6 @@ def test_render_messages_joins_batch(lang_en):
             _message("m1", "leader", "first", broadcast=False),
             _message("m2", "dev-2", "second", broadcast=False),
         ],
-        now_ms=_NOW_MS,
     )
     assert "first" in out
     assert "second" in out

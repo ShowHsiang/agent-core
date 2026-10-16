@@ -440,6 +440,11 @@ class TeamBackend:
             return list(self._model_allocator.list_cli_models(provider_filter=provider_filter))
         return []
 
+    def list_route_tags(self) -> list[str]:
+        """Tags a model-group member can be pinned to (empty outside model groups)."""
+        lister = getattr(self._model_allocator, "list_route_tags", None)
+        return list(lister()) if callable(lister) else []
+
     def resolve_cli_models(self, model_name: str, provider_filter=None) -> list[Any]:
         from openjiuwen.agent_teams.models.allocator import CliModelCatalog
 
@@ -1274,7 +1279,7 @@ class TeamBackend:
                 except Exception as exc:
                     team_logger.warning("Failed to clean stale runtime for member {}: {}", member_name, exc)
             if current_status is MemberStatus.DORMANT:
-                await self._publish_member_shutdown(member_name, force)
+                await self._publish_member_shutdown(member_name, force, MemberStatus.SHUTDOWN)
             team_logger.info("Shutdown {} member {} directly", current_status.value, member_name)
             return MemberOpResult.success()
 
@@ -1301,7 +1306,7 @@ class TeamBackend:
             if not success:
                 return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
-            await self._publish_member_shutdown(member_name, force)
+            await self._publish_member_shutdown(member_name, force, MemberStatus.SHUTDOWN)
             team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
             return MemberOpResult.success()
 
@@ -1332,7 +1337,8 @@ class TeamBackend:
         # without a round, so the notice would only sit unread — and worse, it
         # would count as "unread input" and make the settle defer forever.
         lifetime = await self.get_member_lifetime(member_name)
-        if retire_target(lifetime, force=force) is MemberStatus.SHUTDOWN:
+        target_status = retire_target(lifetime, force=force)
+        if target_status is MemberStatus.SHUTDOWN:
             msg_id = await self.message_manager.send_message(
                 content=t("team.shutdown_request_content"),
                 to_member_name=member_name,
@@ -1341,12 +1347,19 @@ class TeamBackend:
                 team_logger.warning(f"Failed to send shutdown request message to member {member_name}")
 
         # Publish shutdown event (for cross-process notification to member)
-        await self._publish_member_shutdown(member_name, force)
+        await self._publish_member_shutdown(member_name, force, target_status)
         team_logger.info(f"Shutdown request sent to member {member_name}")
         return MemberOpResult.success()
 
-    async def _publish_member_shutdown(self, member_name: str, force: bool) -> None:
-        """Best-effort ``MemberShutdownEvent`` so rosters and observers refresh."""
+    async def _publish_member_shutdown(self, member_name: str, force: bool, target_status: MemberStatus) -> None:
+        """Best-effort ``MemberShutdownEvent`` so rosters and observers refresh.
+
+        Args:
+            member_name: The retiring member.
+            force: Whether the shutdown is forced.
+            target_status: Settled status the retirement leads to (SHUTDOWN or
+                DORMANT), so observers keep a dormant member on the roster.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
@@ -1355,6 +1368,7 @@ class TeamBackend:
                         team_name=self.team_name,
                         member_name=member_name,
                         force=force,
+                        target_status=target_status.value,
                     )
                 ),
             )
@@ -2218,6 +2232,10 @@ class TeamBackend:
                 if isinstance(member_spec, ExternalCliMemberSpec)
                 else None
             )
+            if cli_agent and allocation is not None and allocation.route_tag:
+                # Route tags pin in-process model-group members; an external CLI
+                # cannot run on the logical "*" entry, so keep it unallocated.
+                allocation = None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,

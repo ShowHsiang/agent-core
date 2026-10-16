@@ -72,6 +72,17 @@ STRINGS: dict[str, str] = {
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择合适的模型"
     ),
+    "spawn_teammate.model_name_group": (
+        "可选。仅当用户明确要求该成员使用某个模型时填写，且必须原样填写下方 selectable_models 中的一项；"
+        "用户未提及模型时省略，由模型组自动选择。\n"
+        "填写前，将用户的说法与 selectable_models 逐项比对（比对时忽略大小写、空格和连字符）：\n"
+        "- 与某一项完全一致：只对应该项，直接使用。\n"
+        "- 否则，名称中包含用户说法的每一项都算对应。只对应一项时直接使用；"
+        "对应多项时，必须先调用 ask_user 列出这些候选让用户选择，"
+        "不得自行挑选名称最短或看起来最接近的一项。"
+        "例如用户说“用 GLM”，而列表中有 GLM-5.3 和 GLM-5.3-Flash，必须询问。\n"
+        "- 一项都不对应：先调用 ask_user 告知用户当前可选的模型，不得替换为其他模型。"
+    ),
     "spawn_teammate.permissions": (
         "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
@@ -252,18 +263,23 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在（调度模式下也可以是本次调用中其他任务用 member 内联声明的成员）"
-        "且不能是 leader。自主模式可选，未填写则进入公共认领池；调度模式必填，成员不会自主认领"
+        "承担该任务的成员名称（可选）；该成员必须已存在（先 spawn_teammate）且不能是 leader。"
+        "未填写则进入公共认领池，等待成员自主认领"
     ),
-    "create_task.task.member": (
+    "create_task_scheduled.task.assignee": (
+        "承担该任务的成员名称（与 member 二选一）；该成员必须已存在（也可以是本次调用中其他任务用 member "
+        "内联声明的成员）且不能是 leader。调度模式必填承担者，成员不会自主认领"
+    ),
+    "create_task_scheduled.task.member": (
         "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"
         "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
         "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
     ),
-    "create_task.task.member.lifetime": (
+    "create_task_scheduled.task.member.lifetime": (
         "退场策略：shutdown = 名下任务全部完成后自动关闭（终态，名字不可复用）；"
         "dormant = 自动休眠（保留在名册，不处理任何事件），"
         "仅被点名（send_message(to=该成员) 或派新任务）时唤醒"

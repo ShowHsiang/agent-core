@@ -22,7 +22,7 @@ from openjiuwen.agent_teams.inbound_render import (
     render_event,
     render_inbound,
 )
-from openjiuwen.agent_teams.timefmt import format_time_context
+from openjiuwen.agent_teams.timefmt import format_absolute_time, format_time_context
 
 # Task statuses that should not appear on the actionable task board.
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "cancelled"})
@@ -53,21 +53,19 @@ def render_message(
     message: _MessageLike,
     *,
     is_human_agent: bool = False,
-    now_ms: int,
     body: str | None = None,
 ) -> str:
     """Render one inbound message as ``<team-inbound>`` XML.
 
     Mirrors the in-process ``MessageHandler._format_message``: the message body
-    goes verbatim inside ``<team-inbound>`` (sender / message_id / type / time
-    as attributes) and the framework hint goes in a separate ``<team-note>``. A
-    human-agent avatar gets ``for="controller"`` plus a ``hitt-silence`` note;
-    any other member gets a ``reply-hint`` note.
+    goes verbatim inside ``<team-inbound>`` (sender / message_id / type /
+    absolute send time as attributes) and the framework hint goes in a
+    separate ``<team-note>``. A human-agent avatar gets ``for="controller"``
+    plus a ``hitt-silence`` note; any other member gets a ``reply-hint`` note.
 
     Args:
         message: A team message row (direct or broadcast).
         is_human_agent: Whether the recipient is a human-agent avatar.
-        now_ms: Current millisecond UTC epoch, the relative-time anchor.
         body: Delivery-time body of a framework template message, rendered by
             the caller (which owns the DB handle this pure module does not —
             see ``message_template.expand_message``). Passing it also drops the
@@ -79,7 +77,7 @@ def render_message(
         The ``<team-inbound>`` XML, optionally followed by a ``<team-note>``.
     """
     msg_type = INBOUND_TYPE_BROADCAST if message.broadcast else INBOUND_TYPE_DIRECT
-    time_info = format_time_context(message.timestamp, now_ms)
+    time_info = format_absolute_time(message.timestamp)
     if is_human_agent:
         return render_inbound(
             content=body if body is not None else message.content,
@@ -114,10 +112,9 @@ def render_messages(
     messages: list[_MessageLike],
     *,
     is_human_agent: bool = False,
-    now_ms: int,
     bodies: dict[str, str] | None = None,
 ) -> str:
-    """Render a batch of inbound messages, newest-handling left to caller.
+    """Render a batch of inbound messages in the order given (oldest first).
 
     Args:
         bodies: Delivery-time bodies of the framework template messages in the
@@ -126,7 +123,7 @@ def render_messages(
     """
     bodies = bodies or {}
     return "\n\n".join(
-        render_message(m, is_human_agent=is_human_agent, now_ms=now_ms, body=bodies.get(m.message_id))
+        render_message(m, is_human_agent=is_human_agent, body=bodies.get(m.message_id))
         for m in messages
     )
 

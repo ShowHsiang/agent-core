@@ -637,3 +637,71 @@ class TestRunOrganizationLeaderTurn:
             session_id="session-1",
         )
         session.post_run.assert_awaited_once()
+
+
+class TestActivatePausedModelSelection:
+    """A paused runtime is rebuilt only when the model selection really changed."""
+
+    class _StopAfterModelCheck(Exception):
+        """Raised by the stubbed session inspection to end ``activate`` early."""
+
+    @staticmethod
+    def _entry(*, client_id: str, api_key: str = "K") -> "ModelPoolEntry":
+        from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+
+        return ModelPoolEntry(
+            model_name="deepseek-flash",
+            api_key=api_key,
+            api_base_url="https://api.deepseek.com",
+            api_provider="OpenAI",
+            metadata={"client": {"client_id": client_id, "timeout": 1800.0}},
+        )
+
+    async def _activate(self, monkeypatch, *, live_pool: list, requested_pool: list) -> AsyncMock:
+        manager = TeamRuntimeManager()
+        team_spec = SimpleNamespace(model_pool=live_pool, model_pool_strategy="by_model_name")
+        agent = SimpleNamespace(runtime_context=SimpleNamespace(team_spec=team_spec))
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="team-a",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.PAUSED,
+            )
+        )
+        stop_team = AsyncMock()
+        monkeypatch.setattr(manager, "stop_team", stop_team)
+
+        async def _inspect(*_args, **_kwargs):
+            raise self._StopAfterModelCheck()
+
+        monkeypatch.setattr(manager, "_inspect_session", _inspect)
+        spec = SimpleNamespace(
+            team_name="team-a",
+            model_pool=requested_pool,
+            model_pool_strategy="by_model_name",
+        )
+        with pytest.raises(self._StopAfterModelCheck):
+            await manager.activate(spec, "session-1")
+        return stop_team
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_fresh_client_id_alone_keeps_the_paused_runtime(self, monkeypatch):
+        """Regression: every follow-up request rebuilt the team over a new uuid."""
+        stop_team = await self._activate(
+            monkeypatch,
+            live_pool=[self._entry(client_id="first-build")],
+            requested_pool=[self._entry(client_id="second-build")],
+        )
+        stop_team.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_real_config_change_still_rebuilds(self, monkeypatch):
+        stop_team = await self._activate(
+            monkeypatch,
+            live_pool=[self._entry(client_id="first-build", api_key="OLD")],
+            requested_pool=[self._entry(client_id="second-build", api_key="ROTATED")],
+        )
+        stop_team.assert_awaited_once_with(team_name="team-a", session_id="session-1")

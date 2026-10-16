@@ -48,7 +48,10 @@ from openjiuwen.agent_teams.external.cli_agent.injector import Injector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import ProcessLike, ProcessTransport, StreamReaderLike
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.inbound_render import render_clock
 from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -297,6 +300,11 @@ class CliRuntimeBase(ABC):
         Returns None (CLI runtimes have no monotonic sequence id to surface).
         """
         text = content if isinstance(content, str) else str(content)
+        # Inbound messages carry absolute send times only; the anchor tells
+        # the member what "now" is, the way TeamPolicyRail does for an
+        # in-process member.
+        clock = render_clock(now=format_absolute_time(get_current_time()))
+        text = f"{clock}\n{text}" if text else clock
         outcome = await self._pending_task_outcome()
         if outcome:
             text = f"{outcome}\n\n{text}" if text else outcome

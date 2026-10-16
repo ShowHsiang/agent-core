@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import (
     ExternalRuntimeFailureReason,
     ExternalRuntimePhase,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
@@ -235,8 +236,18 @@ class MemberExecutionChangedEvent(BaseEventMessage):
 
 
 class MemberShutdownEvent(BaseEventMessage):
-    """Event published when a member is shut down"""
+    """Event published when a member is asked to retire.
+
+    The member's runtime is torn down either way; ``target_status`` tells
+    observers where the member settles. ``shut_down`` leaves the roster,
+    while ``dormant`` keeps the member on it and wakes it when named again,
+    so rosters must not treat every shutdown event as a removal.
+    """
     force: bool = Field(..., description="Force member shut down")
+    target_status: str = Field(
+        default=MemberStatus.SHUTDOWN.value,
+        description="Settled member status this retirement leads to: 'shut_down' or 'dormant'",
+    )
 
 
 class MemberCanceledEvent(BaseEventMessage):

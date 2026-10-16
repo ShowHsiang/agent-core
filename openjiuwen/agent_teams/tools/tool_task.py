@@ -14,7 +14,12 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
-from openjiuwen.agent_teams.tools.tool_member import register_teammate, validate_member_name
+from openjiuwen.agent_teams.tools.tool_member import (
+    check_model_selectable,
+    model_name_description,
+    register_teammate,
+    validate_member_name,
+)
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -73,13 +78,15 @@ def _autonomous_task_node_schema(t: Translator) -> dict:
 _MEMBER_LIFETIMES = ("shutdown", "dormant")
 
 
-def _inline_member_schema(t: Translator) -> dict:
+def _inline_member_schema(t: Translator, member_model_description: str | None = None) -> dict:
     """Schema of ``create_task``'s inline ``member`` object (scheduled only, F_118).
 
     The five public fields are ``spawn_teammate``'s, word for word — an inline
     member *is* a teammate row, only written by ``create_task`` — so their
     descriptions are shared. ``lifetime`` is what makes it inline: a member
     declared with its task always carries a retirement policy.
+    ``member_model_description`` overrides the plain ``model_name`` prose,
+    e.g. with a model group's selectable catalog.
     """
     return {
         "type": "object",
@@ -88,18 +95,26 @@ def _inline_member_schema(t: Translator) -> dict:
             "display_name": {"type": "string", "description": t("spawn_teammate", "display_name")},
             "desc": {"type": "string", "description": t("spawn_teammate", "desc")},
             "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
-            "model_name": {"type": "string", "description": t("spawn_teammate", "model_name")},
+            "model_name": {
+                "type": "string",
+                "description": member_model_description or t("spawn_teammate", "model_name"),
+            },
             "lifetime": {
                 "type": "string",
                 "enum": list(_MEMBER_LIFETIMES),
-                "description": t("create_task", "task.member.lifetime"),
+                "description": t("create_task_scheduled", "task.member.lifetime"),
             },
         },
         "required": ["member_name", "display_name", "desc", "lifetime"],
     }
 
 
-def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = True) -> dict:
+def _scheduled_task_node_schema(
+    t: Translator,
+    *,
+    inline_member_enabled: bool = True,
+    member_model_description: str | None = None,
+) -> dict:
     """Build the scheduled create_task node schema.
 
     ``assignee`` and ``member`` are the two ways to name a task's owner —
@@ -111,7 +126,7 @@ def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = 
     properties = _base_task_node_properties(t)
     properties.update(
         {
-            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+            "assignee": {"type": "string", "description": t("create_task_scheduled", "task.assignee")},
             # reviewer 结构化对象数组。model 只传 type + description，
             # reviewer_id 由代码按类型自动编号（verifier_1, inspector_1 等）。
             "reviewer": {
@@ -140,8 +155,8 @@ def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = 
     )
     if inline_member_enabled:
         properties["member"] = {
-            **_inline_member_schema(t),
-            "description": t("create_task", "task.member"),
+            **_inline_member_schema(t, member_model_description),
+            "description": t("create_task_scheduled", "task.member"),
         }
     return _task_node_schema(properties)
 
@@ -212,13 +227,18 @@ async def _materialize_inline_members(
         if await agent_team.member_exists(name):
             await _discard_inline_members(agent_team, created)
             return [], f"Task {_spec_label(spec)!r}: member {name!r} already exists in the team"
+        allocation = allocate(member.get("model_name")) if allocate else None
+        error = check_model_selectable(agent_team, member.get("model_name"), allocation)
+        if error:
+            await _discard_inline_members(agent_team, created)
+            return [], f"Task {_spec_label(spec)!r}: {error}"
         result = await register_teammate(
             agent_team,
             member_name=name,
             display_name=member["display_name"].strip(),
             desc=member["desc"].strip(),
             prompt=(member.get("prompt") or "").strip() or None,
-            allocation=allocate(member.get("model_name")) if allocate else None,
+            allocation=allocation,
             lifetime=member["lifetime"],
         )
         if not result.ok:
@@ -390,6 +410,11 @@ class TaskCreateTool(TeamTool):
     targets are rejected at this boundary as redundant. Tasks without an
     ``assignee`` are claimable from the shared board; tasks with an assignee
     are reserved for that non-leader member.
+
+    The inline ``member`` object belongs to the scheduled variant only (F_118):
+    this schema never exposes it, and ``invoke`` rejects it instead of
+    dropping it — a silently ignored ``member`` lands an unassigned task on
+    the board while the leader believes it created a member (B_04).
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -422,6 +447,16 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
+        inline = [_spec_label(spec) for spec in tasks if spec.get("member") is not None]
+        if inline:
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Tasks {inline}: 'member' is not accepted under autonomous dispatch — this team has no "
+                    "inline-member creation. Register the member with spawn_teammate first and pass its "
+                    "member_name as 'assignee', or omit 'assignee' to put the task on the shared board."
+                ),
+            )
         error = await _validate_assignees(self.agent_team, tasks, required=False)
         if error:
             return ToolOutput(success=False, error=error)
@@ -579,7 +614,11 @@ class ScheduledTaskCreateTool(TeamTool):
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": _scheduled_task_node_schema(t, inline_member_enabled=inline_member_enabled),
+                    "items": _scheduled_task_node_schema(
+                        t,
+                        inline_member_enabled=inline_member_enabled,
+                        member_model_description=model_name_description(agent_team, t),
+                    ),
                     "description": t("create_task", "tasks"),
                 },
             },

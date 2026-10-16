@@ -26,7 +26,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
 | 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md、F_123_team-tools-direct-under-progressive-exposure.md |
 
 ## 范围 / 边界
 
@@ -302,6 +302,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       解散的团队（自己的 `clean_team`，或 operator 的 `delete_agent_team`），团队行已消失，
       那时它确实需要重新建队。
 
+21a-1. **`bootstrap_mode="framework"` 的 leader 工具集不含 `build_team`**（[[F_122]]）。框架在
+    `kernel.start()` 里建队（`TeamBackend.build_team` 程序化调用，`overrides=None`，生效能力 = spec
+    天花板），准则改由 `TeamContextTracker` 以 `<team-policy>` 块随首条输入投递，于是 `build_team`
+    没有任何剩余职责——工具在、描述在，模型就会去调，所以在 `create_team_tools` 里按
+    `bootstrap_mode` 减掉（与 plan_mode / persistent 两条减法同处），而不是留一个幂等空转的工具。
+    减法只动 leader 集的这一个名字；成员集不变。`rejects_rebuild` / `_reattach_team` 保留给
+    `bootstrap_mode="leader"`，本模式物理不可达。该模式只允许与 `dispatch_mode="scheduled"` 组合
+    （spec 校验）。
+
 21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
     `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
     描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、
@@ -349,7 +358,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     （失败回滚到被认领时的原状态）；广播不批量恢复，避免一条泛化消息触发全队 restart storm，
     也**永远不唤醒休眠成员**。ERROR / DORMANT runtime 已经退出时，`shutdown_member` 则直接
     CAS 到 `SHUTDOWN` 并清理 stale handle，不发送一个永远不会被消费的 shutdown event
-    （DORMANT 仍发布 `MemberShutdownEvent` 供名册刷新）。
+    （DORMANT 仍发布 `MemberShutdownEvent` 供名册刷新，`target_status="shut_down"`）。
+    走 `SHUTDOWN_REQUESTED` 正常路径时，事件的 `target_status` 取 `retire_target(lifetime, force)`，
+    休眠退场为 `"dormant"`，观察者据此保留该成员。
     两点边界：**scheduled 的 `create_task` 不拉人**（交接归 `TeamScheduler`，工具再插一手
     就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
     模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
@@ -380,7 +391,14 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
     拉起（`S_05` 不变量 1）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
     `team_mode != "predefined"` 一起出现 / 消失（同 `spawn_teammate` 被摘掉的门），偷传在写库前
-    拒掉。`TaskCreateTool`（autonomous）**不改**：形态差异由类吸收。
+    拒掉。`TaskCreateTool`（autonomous）**不暴露也不接受 `member`**：schema 里没有该属性，
+    `invoke` 在批次纯校验之后、任何 DB 访问之前把带 `member` 的任务报错拒掉（指引先
+    `spawn_teammate` 再 `assignee`），而不是静默丢弃——与 `update_task` 对偷传 `reviewer` 的处置
+    同一原则（B_04）。形态差异仍由类吸收，不进共享纯函数 `_validate_assignees`。
+    **讲内联成员的文案只在 scheduled 形态出现**：`assignee` 的参数描述按形态分命名空间
+    （`create_task.task.assignee` 只讲 autonomous；`create_task_scheduled.task.{assignee,member,member.lifetime}`
+    讲 scheduled），`shutdown_member` 描述里的 lifetime / DORMANT 一段是 capability 槽
+    `{{shutdown_member_lifetime}}`，gate `dispatch_mode == "scheduled"`。
     退场：`shutdown_member` 的终态由成员行 `options.lifetime` 决定（`retire_target`，`S_12`）——
     常规成员落 `SHUTDOWN`，`lifetime=dormant` 落 `DORMANT`，`force=True` 一律 `SHUTDOWN`；终态为
     `DORMANT` 的请求**不发告别通知**（见 `S_22` 不变量 17）；对已 `DORMANT` 的成员再调一次即
@@ -403,6 +421,12 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     则忽略并在结果里提示。认领成功后结果列出本任务**直接上游**（一跳依赖）的完成摘要
     （`message_template.upstream_lines`，与调度模式开工通知同格式）与 `view_task(action='note')` 提示；
     `view_task(get)` 同样附"Upstream deliveries"小节。两种模式下成员都不再用 `send_message` 汇报完成。
+29. **团队工具在渐进式工具暴露下始终 DIRECT**（F_123）。`TeamToolRail.init` 在 `add_ability`
+    之前对每张卡片（工厂产出 + 追加的 `workspace_meta`）调 `declare_team_tool_direct`：未在构造期
+    声明 `exposure`、也未被注册解析过的卡片一律声明 `ToolExposure.DIRECT`；显式声明优先，不改写。
+    协作工具是成员的主接口，成员基 spec 带 `ProgressiveToolSpec(enabled=True)` 时只有长尾工具进
+    `tool_search`。名单不进 harness 的 `_DEFAULT_DIRECT_TOOL_NAMES`（按 dispatch / role / capability
+    变化的集合不硬编码）。外部 CLI / MCP 成员不经 `AbilityManager`，不受此约束。
 
 ## 接口契约
 

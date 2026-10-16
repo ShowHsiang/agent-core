@@ -701,6 +701,9 @@ ERROR      -> RESTARTING | READY | STOPPED | SHUTDOWN_REQUESTED | SHUTDOWN
 `retire_target(lifetime, force)`（`status.py`）——`lifetime == "dormant"` 且非 `force` → `DORMANT`，
 其余 → `SHUTDOWN`。三处落终态的代码（机制 18 无 round 分支的 `shutdown_self`、`finalize_member`
 的 `SHUTDOWN_REQUESTED` 分支、`MemberHandler` 的 `force`）都经它解析，见 F_118。
+发起退场的 `shutdown_member` 也用同一函数算出终态，写进 `MemberShutdownEvent.target_status`
+（`"shut_down"` / `"dormant"`，默认 `"shut_down"`）。成员侧对两种终态的处理完全相同（拆 runtime），
+该字段只给名册 / 前端等观察者用：`dormant` 的成员仍在名册上，不能因收到退场事件就移除。
 
 关键约束：
 

@@ -182,7 +182,7 @@ class TeamRuntimeManager:
             if selection_changed:
                 change_reason = "pool" if live_pool_signature != requested_pool_signature else "strategy"
                 team_logger.info(
-                    "activate: model %s changed for paused team {}; rebuilding runtime",
+                    "activate: model {} changed for paused team {}; rebuilding runtime",
                     change_reason,
                     team_name,
                 )

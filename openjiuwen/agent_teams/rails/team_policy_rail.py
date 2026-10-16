@@ -44,15 +44,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
+    build_leader_policy_disclosure,
+    build_leader_prebuilt_section,
     build_team_extra_section,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -122,6 +126,7 @@ class TeamPolicyRail(DeepAgentRail):
         language: str = "cn",
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
+        bootstrap_mode: str = "leader",
         base_prompt: str | None = None,
         team_workspace_path: str | None = None,
         team_outputs_dir: str | None = None,
@@ -166,7 +171,28 @@ class TeamPolicyRail(DeepAgentRail):
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
             swarmflow_enabled=swarmflow_enabled,
+            bootstrap_mode=bootstrap_mode,
         )
+
+        # A framework-built team (F_122) has no ``build_team`` result to carry
+        # the leader's policy, so the same disclosure text is rendered here —
+        # every variable it depends on is spec-settled (no leader choice is
+        # pending) — and handed to the tracker as a ``<team-policy>`` block.
+        # ``hitt_enabled`` is the spec ceiling: with no ``build_team`` call it
+        # is also the effective value.
+        policy_text: str | None = None
+        if role == TeamRole.LEADER and bootstrap_mode == "framework":
+            policy_text = render_team_policy_inline(
+                body=build_leader_policy_disclosure(
+                    lifecycle=lifecycle,
+                    teammate_mode=teammate_mode,
+                    team_mode=team_mode,
+                    dispatch_mode=dispatch_mode,
+                    language=language,
+                    hitt_enabled=hitt_enabled,
+                    loader=self._loader,
+                ),
+            )
 
         self._tracker = TeamContextTracker(
             team_backend=team_backend,
@@ -180,6 +206,7 @@ class TeamPolicyRail(DeepAgentRail):
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
             fork_source=fork_source,
+            policy_text=policy_text,
         )
         # Scheduled dispatch only (F_119): a passed review does not wake the
         # author, so the outcome rides its next admitted input instead.
@@ -210,13 +237,21 @@ class TeamPolicyRail(DeepAgentRail):
         self.attachment_manager = None
 
     async def on_user_message(self, ctx: AgentCallbackContext) -> None:
-        """Drop superseded inputs from the batch, then fold in team state.
+        """Drop superseded inputs, stamp the current time, then fold in team state.
 
-        Two jobs on the list of inputs about to become one message, in that
-        order: the batch is pruned first, and the team state then goes in front
-        of what survives.
+        Three jobs on the list of inputs about to become one message, in that
+        order: the batch is pruned first, a ``<team-clock>`` anchor goes in
+        front of what survives, and the team state then goes in front of that.
 
-        Both exist because this is the one moment these are still *inputs*. A
+        The clock anchor is what makes the absolute ``time`` on every
+        ``<team-inbound>`` readable as "how long ago". The inbound blocks carry
+        no relative diff because they stay in the history: rendered once, a
+        "just now" would still say "just now" when the member reads it again an
+        hour later. The anchor is written once per admitted input and never
+        refreshed, so each one stays true as a record of when that input
+        arrived, and the newest one is the member's current time.
+
+        All three happen here because this is the one moment these are still *inputs*. A
         step later they are one ordinary history message — it can no longer be
         located by position (compaction rewrites the history behind it) and it
         must no longer be edited (rewriting a message invalidates every KV-cache
@@ -239,6 +274,8 @@ class TeamPolicyRail(DeepAgentRail):
             return
 
         self._drop_superseded(parts)
+        if parts:
+            parts.insert(0, render_clock(now=format_absolute_time(get_current_time())))
 
         session = getattr(ctx, "session", None)
         if session is None:
@@ -426,6 +463,7 @@ class TeamPolicyRail(DeepAgentRail):
         base_prompt: str | None,
         hitt_enabled: bool,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time.
 
@@ -441,6 +479,7 @@ class TeamPolicyRail(DeepAgentRail):
             sections = self._build_leader_sections(
                 base_prompt=base_prompt,
                 swarmflow_enabled=swarmflow_enabled,
+                bootstrap_mode=bootstrap_mode,
             )
         else:
             sections = build_team_static_sections(
@@ -468,19 +507,27 @@ class TeamPolicyRail(DeepAgentRail):
         *,
         base_prompt: str | None,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
+        """Build the leader's prefix: an opening section, plus the caller's own prompt.
 
-        The extra section stays here rather than moving into the ``build_team``
-        disclosure because it is not team policy: it is what the SDK caller told
-        *this* leader to do, and it has to be in force before the team exists —
-        it may well be the instruction that decides what team to build.
+        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
+        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
+        the policy arrives as a ``<team-policy>`` block). The extra section
+        stays here rather than moving into the policy disclosure because it is
+        not team policy: it is what the SDK caller told *this* leader to do,
+        and it has to be in force before the team exists — it may well be the
+        instruction that decides what team to build.
         """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
+        if bootstrap_mode == "framework":
+            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
+        else:
+            opening = build_leader_bootstrap_section(
+                swarmflow_enabled=swarmflow_enabled,
+                language=self._language,
+                loader=self._loader,
+            )
+        sections = [opening]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:
             sections.append(extra)

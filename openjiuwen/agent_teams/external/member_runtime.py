@@ -32,7 +32,10 @@ from typing import (
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
+from openjiuwen.agent_teams.inbound_render import render_clock
 from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -562,6 +565,11 @@ class ExternalHarnessMemberRuntime:
                 return await self._adapter.send(content, immediate=immediate)
             external_input = to_harness_input(content)
             delivered_text = harness_input_text(external_input)
+            # Inbound messages carry absolute send times only; the anchor
+            # tells the member what "now" is, the way TeamPolicyRail does for
+            # an in-process member.
+            clock = render_clock(now=format_absolute_time(get_current_time()))
+            external_input = _prepend_context(external_input, clock)
             pending_outcome = await self._pending_task_outcome()
             if pending_outcome:
                 external_input = _prepend_context(external_input, pending_outcome)
@@ -574,6 +582,7 @@ class ExternalHarnessMemberRuntime:
             # a message per block, so the combined text would match none of
             # them and the turn would read as if nobody had said anything.
             self._record_input(receipt, delivered_text)
+            self._record_input(receipt, clock)
             if pending_outcome:
                 self._record_input(receipt, pending_outcome)
                 await self._commit_task_outcome()

@@ -1120,11 +1120,11 @@ async def test_process_unread_delegates_raw_delivered_messages_to_manager():
         msg.content = f"direct {msg_id}"
         return msg
 
-    # Newest-first ordering (as _read_all_unread returns). Two directs and
+    # Oldest-first ordering (as _read_all_unread returns). Two directs and
     # three broadcasts — the handler forwards all five untouched.
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[
-            [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
+            [_bc("b1", 1000), _dm("dm-1", 1500), _bc("b2", 2000), _dm("dm-2", 2500), _bc("b3", 3000)],
             [],
         ]
     )
@@ -1665,7 +1665,7 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.timestamp = 1_700_000_000_000
 
     expanded = ExpandedMessage(body=msg.content, is_template=False)
-    text = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=1_700_000_000_000)
+    text = handler._format_message(msg, expanded=expanded, is_human_agent=False)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -1694,9 +1694,7 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.timestamp = 1_700_000_000_000
 
     direct_expanded = ExpandedMessage(body=direct.content, is_template=False)
-    direct_text = handler._format_message(
-        direct, expanded=direct_expanded, is_human_agent=True, now_ms=1_700_000_000_000
-    )
+    direct_text = handler._format_message(direct, expanded=direct_expanded, is_human_agent=True)
     assert 'type="direct"' in direct_text
     assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
@@ -1717,9 +1715,7 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.timestamp = 1_700_000_000_000
 
     bcast_expanded = ExpandedMessage(body=bcast.content, is_template=False)
-    bcast_text = handler._format_message(
-        bcast, expanded=bcast_expanded, is_human_agent=True, now_ms=1_700_000_000_000
-    )
+    bcast_text = handler._format_message(bcast, expanded=bcast_expanded, is_human_agent=True)
     assert 'type="broadcast"' in bcast_text
     assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text

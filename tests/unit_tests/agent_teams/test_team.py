@@ -2068,6 +2068,51 @@ async def test_shutdown_member_sends_no_notice_for_dormant_retirement(db, messag
         assert (await db.member.get_member(name, "notice_team")).status == MemberStatus.SHUTDOWN_REQUESTED.value
 
 
+def _shutdown_event_targets(message_bus) -> dict[str, str]:
+    """``member_name -> target_status`` of every MEMBER_SHUTDOWN the bus saw."""
+    targets = {}
+    for call in message_bus.publish.await_args_list:
+        message = call.kwargs["message"]
+        if message.event_type == TeamEvent.MEMBER_SHUTDOWN:
+            targets[message.payload["member_name"]] = message.payload["target_status"]
+    return targets
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_event_carries_retire_target(db, message_bus):
+    """Observers learn from the event whether the member leaves the roster or goes dormant."""
+    await db.team.create_team(team_name="target_team", display_name="t", leader_member_name="leader1")
+    backend = TeamBackend(team_name="target_team", member_name="leader1", db=db, messager=message_bus, is_leader=True)
+    card = AgentCard(name="X", description="x", version="1.0.0")
+    await backend.spawn_member(member_name="dormant-1", display_name="D", agent_card=card, lifetime="dormant")
+    await backend.spawn_member(member_name="dormant-2", display_name="D2", agent_card=card, lifetime="dormant")
+    await backend.spawn_member(member_name="temp-1", display_name="T", agent_card=card, lifetime="shutdown")
+    for name in ("dormant-1", "dormant-2", "temp-1"):
+        await db.member.update_member_status(name, "target_team", MemberStatus.READY.value)
+
+    assert (await backend.shutdown_member("dormant-1")).ok
+    assert (await backend.shutdown_member("dormant-2", force=True)).ok
+    assert (await backend.shutdown_member("temp-1")).ok
+
+    assert _shutdown_event_targets(message_bus) == {
+        "dormant-1": MemberStatus.DORMANT.value,
+        "dormant-2": MemberStatus.SHUTDOWN.value,
+        "temp-1": MemberStatus.SHUTDOWN.value,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_dormant_member_event_targets_shutdown(db, message_bus):
+    """Shutting down an already-dormant member removes it for good: the event says shut_down."""
+    backend = await _dormant_backend(db, message_bus, "dormant_target_team")
+
+    assert (await backend.shutdown_member("dev-1")).ok
+
+    assert _shutdown_event_targets(message_bus) == {"dev-1": MemberStatus.SHUTDOWN.value}
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_delete_unstarted_member_releases_workspace(db, message_bus, monkeypatch):
