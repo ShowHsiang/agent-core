@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 287 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 288 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -20,9 +20,11 @@ generated: true
 | [agent_teams/workflow](#module-3) | 16 |
 | [extensions/observability](#module-4) | 2 |
 | [harness](#module-5) | 64 |
-| [harness/subagents](#module-6) | 1 |
+| [harness/subagents](#module-6) | 2 |
 | [harness/tools/browser_move](#module-7) | 1 |
-| [未分类](#module-8) | 6 |
+| [harness/tools/browser_move/decision](#module-8) | 1 |
+| [harness/tools/subagent](#module-9) | 1 |
+| [未分类](#module-10) | 6 |
 
 <a id="module-1"></a>
 
@@ -311,15 +313,15 @@ generated: true
 | [F_18_browser-receipts-and-local-continuity](features/harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](features/harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
-| [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
 | [F_22_agent-template-card-and-async-loader](features/harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
-| [F_22_browser-receipts-and-local-recovery](features/harness/F_22_browser-receipts-and-local-recovery.md) | F | Browser receipts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_22_browser-receipts-and-local-recovery](features/harness/F_22_browser-receipts-and-local-recovery.md) | F | Browser receipts and local recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_22_cli-jiuwen-memory-rail-mount-and-switch](features/harness/F_22_cli-jiuwen-memory-rail-mount-and-switch.md) | F | F_22 CLI 挂载 JiuwenMemoryRail 与启用开关 | huangyuzhe | openjiuwen/harness | — | 待核实 |
-| [F_23_browser-reader-admission-and-stale-recovery](features/harness/F_23_browser-reader-admission-and-stale-recovery.md) | F | Browser reader admission and stale observation recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_23_browser-reader-admission-and-stale-recovery](features/harness/F_23_browser-reader-admission-and-stale-recovery.md) | F | Browser reader admission and stale observation recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_23_progressive-tool-discovery-metadata](features/harness/F_23_progressive-tool-discovery-metadata.md) | F | 渐进式工具发现元数据 | MengHan18 | openjiuwen/harness | openjiuwen/harness/tools/tool_discovery/bm25.py, openjiuwen/harness/rails/progressive_tool_rail.py | 无独立 D：复用现有渐进式工具发现架构，仅增加向后兼容的卡片元数据扩展点 |
-| [F_24_browser-dispatch-facts-and-local-recovery](features/harness/F_24_browser-dispatch-facts-and-local-recovery.md) | F | Browser dispatch facts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
-| [F_25_browser-local-capabilities-and-recovery](features/harness/F_25_browser-local-capabilities-and-recovery.md) | F | Browser local capabilities and recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_24_browser-dispatch-facts-and-local-recovery](features/harness/F_24_browser-dispatch-facts-and-local-recovery.md) | F | Browser dispatch facts and local recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_25_browser-local-capabilities-and-recovery](features/harness/F_25_browser-local-capabilities-and-recovery.md) | F | Browser local capabilities and recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_26_browser-fact-handoff-and-stream-diagnostics](features/harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_27_browser-local-intent-and-reader-decisions](features/harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_28_browser-source-and-local-continuity](features/harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | openjiuwen/harness | — | 待核实 |
@@ -352,6 +354,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
+| [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
 
 <a id="module-7"></a>
 
@@ -362,6 +365,22 @@ generated: true
 | [F_20261029_1852_optional-handoff-and-resume](features/F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
 <a id="module-8"></a>
+
+## harness/tools/browser_move/decision
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-9"></a>
+
+## harness/tools/subagent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [B_20261102_1733_browser-pr-contract-review](bugfix/harness/B_20261102_1733_browser-pr-contract-review.md) | B | Browser PR budget and exception contract corrections | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/subagent, openjiuwen/harness/tools/browser_move/decision | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/subagent/task_tool.py, tests/unit_tests/harness/tools/browser_move/test_browser_fact_handoff.py, tests/unit_tests/harness/tools/browser_move/test_browser_shared_state_delivery.py, tests/unit_tests/harness/tools/browser_move/test_browser_local_intent_readers.py | 无独立 D：Local corrections to the existing explicit-budget and fact-retention contracts; no new architecture or feature. |
+
+<a id="module-10"></a>
 
 ## 未分类
 

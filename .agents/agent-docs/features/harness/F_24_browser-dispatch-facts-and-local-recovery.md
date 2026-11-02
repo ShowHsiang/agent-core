@@ -1,3 +1,16 @@
+---
+title: Browser dispatch facts and local recovery
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_24_browser-dispatch-facts-and-local-recovery
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser dispatch facts and local recovery
 
 ## Metadata

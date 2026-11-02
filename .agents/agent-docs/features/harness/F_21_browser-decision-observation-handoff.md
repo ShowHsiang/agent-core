@@ -1,3 +1,16 @@
+---
+title: Browser decision observation and local handoff
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_21_browser-decision-observation-handoff
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser decision observation and local handoff
 
 ## Metadata

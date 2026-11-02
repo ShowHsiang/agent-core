@@ -209,15 +209,15 @@ generated: true
 | [F_18_browser-receipts-and-local-continuity](harness/F_18_browser-receipts-and-local-continuity.md) | F | Browser receipts, observation reuse and local continuity | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_19_browser-observation-first-results](harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
-| [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
 | [F_22_agent-template-card-and-async-loader](harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
-| [F_22_browser-receipts-and-local-recovery](harness/F_22_browser-receipts-and-local-recovery.md) | F | Browser receipts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_22_browser-receipts-and-local-recovery](harness/F_22_browser-receipts-and-local-recovery.md) | F | Browser receipts and local recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_22_cli-jiuwen-memory-rail-mount-and-switch](harness/F_22_cli-jiuwen-memory-rail-mount-and-switch.md) | F | F_22 CLI 挂载 JiuwenMemoryRail 与启用开关 | huangyuzhe | openjiuwen/harness | — | 待核实 |
-| [F_23_browser-reader-admission-and-stale-recovery](harness/F_23_browser-reader-admission-and-stale-recovery.md) | F | Browser reader admission and stale observation recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_23_browser-reader-admission-and-stale-recovery](harness/F_23_browser-reader-admission-and-stale-recovery.md) | F | Browser reader admission and stale observation recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_23_progressive-tool-discovery-metadata](harness/F_23_progressive-tool-discovery-metadata.md) | F | 渐进式工具发现元数据 | MengHan18 | openjiuwen/harness | openjiuwen/harness/tools/tool_discovery/bm25.py, openjiuwen/harness/rails/progressive_tool_rail.py | 无独立 D：复用现有渐进式工具发现架构，仅增加向后兼容的卡片元数据扩展点 |
-| [F_24_browser-dispatch-facts-and-local-recovery](harness/F_24_browser-dispatch-facts-and-local-recovery.md) | F | Browser dispatch facts and local recovery | 待确认 | openjiuwen/harness | — | 待核实 |
-| [F_25_browser-local-capabilities-and-recovery](harness/F_25_browser-local-capabilities-and-recovery.md) | F | Browser local capabilities and recovery | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_24_browser-dispatch-facts-and-local-recovery](harness/F_24_browser-dispatch-facts-and-local-recovery.md) | F | Browser dispatch facts and local recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
+| [F_25_browser-local-capabilities-and-recovery](harness/F_25_browser-local-capabilities-and-recovery.md) | F | Browser local capabilities and recovery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_26_browser-fact-handoff-and-stream-diagnostics](harness/F_26_browser-fact-handoff-and-stream-diagnostics.md) | F | Browser fact handoff and stream diagnostics | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_27_browser-local-intent-and-reader-decisions](harness/F_27_browser-local-intent-and-reader-decisions.md) | F | Browser local intent continuity and reader decisions | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_28_browser-source-and-local-continuity](harness/F_28_browser-source-and-local-continuity.md) | F | Browser source retention and local continuity after develop integration | ShowHsiang | openjiuwen/harness | — | 待核实 |

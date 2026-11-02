@@ -1,3 +1,16 @@
+---
+title: Browser reader admission and stale observation recovery
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
+id: F_23_browser-reader-admission-and-stale-recovery
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser reader admission and stale observation recovery
 
 ## Metadata
