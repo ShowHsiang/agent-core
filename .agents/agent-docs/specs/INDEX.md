@@ -9,16 +9,30 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 50 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+按模块分组；跨模块文档在各相关分组展示。
 
 ## 模块导航
 
-| 模块 | 文档数 |
-|---|---|
-| [agent_teams](#module-1) | 31 |
-| [harness](#module-2) | 19 |
+| 模块 |
+|---|
+| [agent_evolving/ttse](#module-1) |
+| [agent_teams](#module-2) |
+| [core/context_engine](#module-3) |
+| [core/controller](#module-4) |
+| [core/runner/drunner/dmessage_queue](#module-5) |
+| [core/session](#module-6) |
+| [extensions/a2a](#module-7) |
+| [harness](#module-8) |
 
 <a id="module-1"></a>
+
+## agent_evolving/ttse
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_ttse-bank](agent_evolving/S_01_ttse-bank.md) | S | TTSE 经验库容量与写入契约 | xinyang_bali | openjiuwen/agent_evolving/ttse | openjiuwen/agent_evolving/ttse/config.py, openjiuwen/agent_evolving/ttse/stores.py, openjiuwen/agent_evolving/ttse/index.py | — |
+
+<a id="module-2"></a>
 
 ## agent_teams
 
@@ -56,7 +70,47 @@ generated: true
 | [S_28_group-conversation-and-delegation](agent_teams/S_28_group-conversation-and-delegation.md) | S | S_28 群聊输入与文件归档 | openJiuwen-bot | openjiuwen/agent_teams | — | — |
 | [S_29_team-organization](agent_teams/S_29_team-organization.md) | S | Team Organization | ZezeChang | openjiuwen/agent_teams | — | — |
 
-<a id="module-2"></a>
+<a id="module-3"></a>
+
+## core/context_engine
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-4"></a>
+
+## core/controller
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-5"></a>
+
+## core/runner/drunner/dmessage_queue
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-6"></a>
+
+## core/session
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-7"></a>
+
+## extensions/a2a
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [S_01_runtime-data-compatibility](core_runtime/S_01_runtime-data-compatibility.md) | S | 运行时身份、持久化与流式结束兼容规约 | alan_cheng | openjiuwen/core/session, openjiuwen/core/context_engine, openjiuwen/core/controller, openjiuwen/core/runner/drunner/dmessage_queue, openjiuwen/extensions/a2a | openjiuwen/core/session/session_controller/scope.py, openjiuwen/core/session/session_controller/chain_session.py, openjiuwen/core/session/vcs/models.py, openjiuwen/core/session/vcs/delta.py, openjiuwen/core/session/vcs/adapter.py, openjiuwen/core/context_engine/context_engine.py, openjiuwen/core/controller/modules/intent_recognizer.py, openjiuwen/core/runner/drunner/dmessage_queue/message_serializer.py, openjiuwen/core/runner/runner_config.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_factory.py, openjiuwen/core/runner/drunner/dmessage_queue/message_queue_fake.py, openjiuwen/extensions/message_queue/message_queue_pulsar.py, openjiuwen/extensions/a2a/a2a_agent_executor.py | — |
+
+<a id="module-8"></a>
 
 ## harness
 

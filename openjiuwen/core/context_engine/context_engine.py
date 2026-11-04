@@ -55,6 +55,9 @@ class ContextEngine:
         "prompt too long",
         "input is too long",
         "input too long",
+        # Alibaba Cloud Bailian (DashScope) OpenAI-compatible endpoint:
+        # "Range of input length should be [1, 1000000]".
+        "range of input length",
     )
     _CONTEXT_OVERFLOW_FIELDS = (
         "message",
@@ -564,6 +567,13 @@ class ContextEngine:
             yield from cls._iter_exception_texts(
                 nested_value, depth=depth + 1, seen=seen
             )
+
+    def list_context_ids(self, session_id: str) -> list[str]:
+        """Return ids of live contexts owned by one session without saving state."""
+        return [
+            context.context_id() for context in self._context_pool.values()
+            if context.session_id() == session_id
+        ]
 
     async def clear_context(
             self,

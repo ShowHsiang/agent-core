@@ -180,3 +180,21 @@ it was not counted as validation. The develop run above completed all applicable
 without those environment errors. No provider requests or real shopping actions were made.
 No formatter or static-analysis tool was run. Delivery evidence is stored locally under
 `.tmp/jev-push-20261102/` in the Swarm workspace; raw logs are excluded from commits.
+
+## Develop PR extraction (2026-11-02)
+
+Issue: https://github.com/openJiuwen-ai/agent-core/issues/2385.
+
+The isolated PR branch starts from official develop `da6045f3b`, after the official
+release integration. It carries only the two unmerged browser increments: the
+implementation/test/document commits from October 22 and November 2. Earlier scoped
+Jev observation and recovery fixes already integrated through release are not
+resubmitted. Only document-location and generated-index conflicts needed resolution;
+the browser implementation and associated tests match the fork candidate above.
+
+Regression rerun on this extracted branch: **1,658 passed, 0 failed, 0 skipped** in
+259.27 seconds across the same 63 files. The two existing Pydantic deprecation warnings
+remain. Tests used local headless Edge, isolated browser logs and the existing Python
+environment; no live supplier or shopping requests were made. Formatting and static
+analysis were not run. Local source worktrees, SDK dependency overrides and unrelated
+uncommitted changes are outside this PR.

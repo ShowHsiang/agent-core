@@ -484,7 +484,7 @@ Initial tabs and scoped reader content use existing task/cache state to avoid st
 and repeat reads caused only by unrelated control observations. Same-query ACK search
 submits are retired locally; LLM recovery, new bindings and changed scope remain possible.
 
-See [F_21](../../features/harness/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
+See [F_21](../features/F_21_browser-decision-observation-handoff.md) for compatibility and tests.
 
 
 ### Browser receipt and current binding consistency (2026-10-09)
@@ -631,6 +631,9 @@ and includes the failure flag and error in its model-facing renderer. It logs th
 traceback and does not grant another resume. Classified model/transport interruptions keep
 their existing structured partial-result and bounded recovery semantics; cancellation still
 propagates. Fact retention and tool success are separate decisions.
+This failure flag is assigned at the caught-exception boundary. A normally returned,
+runtime-finalized partial/blocked result remains successful delivery of that result;
+its terminal-reason label alone must not be treated as an escaping TaskTool exception.
 
 Terminal source excerpts deduplicate retained records and cover source/scope diversity
 within the existing size limit. They retain raw recall references and source region; absence
