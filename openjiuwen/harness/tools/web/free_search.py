@@ -47,6 +47,7 @@ from openjiuwen.harness.tools.web._common import (
     _env_flag,
     _normalized_domain,
     _parse_html,
+    _parse_http_url,
     _safe_int,
     _search_request_headers,
     _strip_tags,
@@ -107,7 +108,7 @@ def _select_search_candidates(
     for index, row in enumerate(rows):
         url = str(row.get("url", "") or "").strip()
         title = str(row.get("title", "") or "").strip()
-        if not title or not url or urlparse(url).scheme not in {"https", "http"} or not urlparse(url).hostname:
+        if not title or _parse_http_url(url) is None:
             relevance, reasons = "rejected", ["invalid_target"]
         elif url in seen:
             relevance, reasons = "rejected", ["duplicate_url"]
@@ -120,7 +121,13 @@ def _select_search_candidates(
             judgment = judgments.get(index)
             relevance = judgment.relevance if judgment else "uncertain"
             reasons = [judgment.reason] if judgment else [unavailable_reason]
-        decisions.append({"index": index, "row": dict(row), "relevance": relevance, "reasons": reasons, "selected": False})
+        decisions.append({
+            "index": index,
+            "row": dict(row),
+            "relevance": relevance,
+            "reasons": reasons,
+            "selected": False,
+        })
         if relevance == "rejected":
             continue
         candidate = dict(row, url=url, relevance=relevance, relevance_reason="; ".join(reasons))
@@ -154,11 +161,11 @@ def _parse_ddg_reader(text: str, max_results: int) -> list[dict[str, str]]:
         if anchor is None or anchor.find("img") is not None:
             continue
         href = _decode_ddg_redirect(unescape(str(anchor["href"]))).strip()
-        parsed = urlparse(href)
-        host = (parsed.hostname or "").casefold()
+        parsed = _parse_http_url(href)
         title = " ".join(anchor.get_text(" ", strip=True).split())
-        if not title or parsed.scheme not in {"http", "https"} or not host:
+        if not title or parsed is None:
             continue
+        host = (parsed.hostname or "").casefold()
         if host == "duckduckgo.com" or host.endswith(".duckduckgo.com") or href in seen:
             continue
         snippets = []
@@ -187,9 +194,8 @@ def _parse_ddg_reader(text: str, max_results: int) -> list[dict[str, str]]:
 def _is_search_navigation_url(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    engine_host = any(host == domain or host.endswith("." + domain) for domain in (
-        "bing.com", "duckduckgo.com",
-    ))
+    engine_domains = ("bing.com", "duckduckgo.com")
+    engine_host = any(host == domain or host.endswith("." + domain) for domain in engine_domains)
     return engine_host and parsed.path.rstrip("/") in {"", "/s", "/ns", "/search", "/html", "/link"}
 
 
@@ -414,8 +420,8 @@ def _extract_bing_answer_cards(soup: BeautifulSoup, fallback_url: str) -> list[d
         if anchor is not None:
             href_raw = unescape(str(anchor.get("href", "") or ""))
             href = _decode_bing_redirect(href_raw)
-            parsed = urlparse(href)
-            if not parsed.scheme.startswith("http") or "bing.com" in parsed.netloc.lower():
+            parsed = _parse_http_url(href)
+            if parsed is None or "bing.com" in parsed.netloc.lower():
                 href = ""
         title_parts: list[str] = []
         for selector in (".b_focusLabel", ".b_focusTextLarge", ".b_focusTextMedium", ".b_focusTextSmall", "h2", "h3"):
@@ -574,9 +580,11 @@ def _parse_domestic_search_html(
         href = str(anchor.get("href", "") or "").strip()
         if not href or href.startswith(("#", "javascript:", "mailto:")):
             continue
-        absolute = urljoin(base_url, unescape(href))
-        parsed = urlparse(absolute)
-        if parsed.scheme not in {"http", "https"}:
+        try:
+            absolute = urljoin(base_url, unescape(href))
+        except ValueError:
+            continue
+        if _parse_http_url(absolute) is None:
             continue
         if allowed_domains and not _domain_allowed(absolute, allowed_domains):
             continue
@@ -677,7 +685,9 @@ class WebFreeSearchTool(Tool):
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
         _record_search_response(debug_run_id, "duckduckgo", query, url, final_url, status, html, truncated)
         if WebFreeSearchTool._is_ddg_challenge_page(status, html):
-            raise WebContentError("blocked", "DuckDuckGo requires human verification; do not bypass it via another endpoint.")
+            raise WebContentError(
+                "blocked", "DuckDuckGo requires human verification; do not bypass it via another endpoint.",
+            )
         if truncated:
             raise WebContentError("truncated", "DuckDuckGo response exceeded the search response size limit.")
         if status != 200:
@@ -899,7 +909,9 @@ class WebFreeSearchTool(Tool):
                 break
             market = supported.get(value.lower())
             if market is None:
-                raise WebContentError("invalid_input", f"Unsupported {name}; use en-US or zh-CN (fallback also accepts none).")
+                raise WebContentError(
+                    "invalid_input", f"Unsupported {name}; use en-US or zh-CN (fallback also accepts none).",
+                )
             if market not in markets:
                 markets.append(market)
         return markets
@@ -957,7 +969,10 @@ class WebFreeSearchTool(Tool):
         if provider != "auto":
             if provider not in {"bing", "duckduckgo"}:
                 raise WebContentError("invalid_input", "Unknown free-search provider; use auto, bing, or duckduckgo.")
-            engines = [(name, runner) for name, runner in engines if name == provider or (provider == "duckduckgo" and name == "duckduckgo-jina")]
+            provider_engines = {provider}
+            if provider == "duckduckgo":
+                provider_engines.add("duckduckgo-jina")
+            engines = [(name, runner) for name, runner in engines if name in provider_engines]
 
         if not engines:
             reason = (
@@ -1039,8 +1054,13 @@ class WebFreeSearchTool(Tool):
                     },
                 )
                 _, structural_decisions = _select_search_candidates(query, rows, allowed_domains=allowed_domains)
-                candidates = [(item["index"], item["row"]) for item in structural_decisions if item["relevance"] != "rejected"]
-                assessment_timeout = max(1, min(_safe_int(os.environ.get("FREE_SEARCH_ASSESSMENT_TIMEOUT_SECONDS"), 15), 60))
+                candidates = []
+                for decision in structural_decisions:
+                    if decision["relevance"] != "rejected":
+                        candidates.append((decision["index"], decision["row"]))
+                assessment_timeout = max(
+                    1, min(_safe_int(os.environ.get("FREE_SEARCH_ASSESSMENT_TIMEOUT_SECONDS"), 15), 60),
+                )
                 assessment = await assess_candidates(
                     request.model, query, candidates, original_task=request.original_task,
                     timeout_seconds=budget.remaining(assessment_timeout),
@@ -1050,7 +1070,8 @@ class WebFreeSearchTool(Tool):
                     query, rows, max_results=max_results, allowed_domains=allowed_domains, assessment=assessment,
                 )
                 tool_logger.info(
-                    "[FreeSearchAssessment] engine=%s market=%s status=%s candidates=%s selected=%s elapsed_ms=%s reason=%s error_type=%s",
+                    "[FreeSearchAssessment] engine=%s market=%s status=%s candidates=%s selected=%s "
+                    "elapsed_ms=%s reason=%s error_type=%s",
                     engine_name, market, assessment.status, len(candidates), len(filtered_rows),
                     assessment.elapsed_ms, assessment.reason, assessment.error_type,
                 )
@@ -1065,7 +1086,12 @@ class WebFreeSearchTool(Tool):
                         "candidate_count": len(rows),
                         "selected_count": len(filtered_rows),
                         "decisions": decisions,
-                        "assessment": {"status": assessment.status, "reason": assessment.reason, "elapsed_ms": assessment.elapsed_ms, "error_type": assessment.error_type},
+                        "assessment": {
+                            "status": assessment.status,
+                            "reason": assessment.reason,
+                            "elapsed_ms": assessment.elapsed_ms,
+                            "error_type": assessment.error_type,
+                        },
                         "row_summary": _summarize_rows(filtered_rows),
                         "rows": filtered_rows,
                     },
@@ -1104,8 +1130,13 @@ class WebFreeSearchTool(Tool):
             "decision",
             {"query": query, "decision": "error", "errors": errors},
         )
-        status = next((value for value in ("budget_exhausted", "blocked", "truncated", "source_error", "low_relevance", "empty") if value in failures), "transport_error")
-        raise WebContentError(status, " | ".join(errors) + ". No usable evidence returned. Do not fetch rejected results or repeatedly reformulate the same query; report what is missing.")
+        failure_priority = ("budget_exhausted", "blocked", "truncated", "source_error", "low_relevance", "empty")
+        status = next((value for value in failure_priority if value in failures), "transport_error")
+        raise WebContentError(
+            status,
+            " | ".join(errors) + ". No usable evidence returned. Do not fetch rejected results "
+            "or repeatedly reformulate the same query; report what is missing.",
+        )
 
     @staticmethod
     def _engine_display_name(engine: str) -> str:
@@ -1161,13 +1192,26 @@ class WebFreeSearchTool(Tool):
         self._on_search_results(rows)
         lines = [f"Free search results ({WebFreeSearchTool._engine_display_name(engine_used)}) for: {query}"]
         if any(row.get("relevance") != "uncertain" for row in rows):
-            lines.append("Content status: ok. These are discovery candidates, not verified facts. Publication/market time is unverified until read at the source.")
+            lines.append(
+                "Content status: ok. These are discovery candidates, not verified facts. "
+                "Publication/market time is unverified until read at the source."
+            )
         else:
-            lines.append("Content status: uncertain. Only provisional candidates were found. Verify one promising source before answering; do not treat them as relevant or current facts yet.")
+            lines.append(
+                "Content status: uncertain. Only provisional candidates were found. "
+                "Verify one promising source before answering; do not treat them as relevant or current facts yet."
+            )
         assessment_unavailable = any(row.get("assessment_status") == "unavailable" for row in rows)
         if assessment_unavailable:
-            lines.append("Assessment status: unavailable. Relevance was not assessed; these are unverified leads, not a successful relevance check. Do not retry markets just because assessment failed.")
-            lines.append("Candidates are retained up to max_results in source order, not relevance order. Compare all leads for the requested entity, evidence and original source before choosing a page; do not fetch every candidate.")
+            lines.append(
+                "Assessment status: unavailable. Relevance was not assessed; these are unverified leads, "
+                "not a successful relevance check. Do not retry markets just because assessment failed."
+            )
+            lines.append(
+                "Candidates are retained up to max_results in source order, not relevance order. "
+                "Compare all leads for the requested entity, evidence and original source before choosing a page; "
+                "do not fetch every candidate."
+            )
         for idx, row in enumerate(rows, 1):
             lines.append(f"{idx}. {row['title']}")
             lines.append(f"   URL: {row['url']}")
