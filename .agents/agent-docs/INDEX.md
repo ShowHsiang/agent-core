@@ -34,7 +34,8 @@ generated: true
 | [harness/tools/browser_move/decision](#module-17) |
 | [harness/tools/subagent](#module-18) |
 | [harness/tools/web](#module-19) |
-| [未分类](#module-20) |
+| [harness_providers](#module-20) |
+| [未分类](#module-21) |
 
 <a id="module-1"></a>
 
@@ -60,6 +61,8 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
+| [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | agent_teams, harness_providers | — | — |
+| [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | agent_teams, harness | — | — |
 | [SDD-0011](designs/archive/SDD-0011-evolvable-team-workspace/design.md) | D | 可演进 Team 工作区 | @xiajing | agent_teams | — | — |
 | [SDD-0015](designs/proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | D | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | @alan_cheng | agent_teams | — | — |
 | [SDD-0016](designs/archive/SDD-0016-third-party-agent-reliability/design.md) | D | 三方 Agent 可靠性设计 | @zhanglongmin | agent_teams | — | — |
@@ -126,6 +129,9 @@ generated: true
 | [F_20261022_2319_inline-member-worktree-isolation](features/F_20261022_2319_inline-member-worktree-isolation.md) | F | 调度模式内联成员支持 worktree 隔离 | alan_cheng | openjiuwen/agent_teams | openjiuwen/agent_teams/tools/tool_task.py, openjiuwen/agent_teams/tools/locales/cn.py, openjiuwen/agent_teams/tools/locales/en.py, openjiuwen/agent_teams/tools/locales/descs/cn/fragments/create_task_inline_member.md, openjiuwen/agent_teams/tools/locales/descs/en/fragments/create_task_inline_member.md | 无独立 D：对 F_118 内联成员参数遗漏的小范围补齐，复用既有 `isolation` 契约，无独立设计 |
 | [F_20261030_2012_teammate-swarmflow-orchestration](features/agent_teams/F_20261030_2012_teammate-swarmflow-orchestration.md) | F | 集群模式teammate支持swarmflow工具（agent-core 侧实现） | @xiajing | openjiuwen/agent_teams | openjiuwen/agent_teams/workflow/swarmflow_infra.py, openjiuwen/agent_teams/workflow/tool_swarmflow.py | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+| [F_20261110_1851_leader-external-harness](features/F_20261110_1851_leader-external-harness.md) | F | Leader 三方 Harness 插拔实施与决策归档 | alan_cheng | agent_teams | openjiuwen/agent_teams/spawn/external_leader.py, openjiuwen/agent_teams/spawn/external_cli_spawn.py, openjiuwen/agent_teams/external/member_runtime.py, openjiuwen/agent_teams/external/cli_agent/spawn.py, openjiuwen/agent_teams/external/tool_gateway.py, openjiuwen/agent_teams/external/cli_agent/claude/sdk_mcp.py, openjiuwen/agent_teams/agent/agent_configurator.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/prompts/sections.py, openjiuwen/agent_teams/rails/team_policy_rail.py, openjiuwen/agent_teams/schema/blueprint.py, openjiuwen/agent_teams/schema/team.py | [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) |
+| [F_20261110_1912_view-task-names-the-assignee-and-its-status](features/F_20261110_1912_view-task-names-the-assignee-and-its-status.md) | F | view_task 点名负责人及其成员状态 | alan_cheng | agent_teams | openjiuwen/agent_teams/tools/tool_task.py, openjiuwen/agent_teams/tools/task_manager.py, openjiuwen/agent_teams/schema/task.py, openjiuwen/agent_teams/tools/locales/descs/cn/task/view_task.md, openjiuwen/agent_teams/tools/locales/descs/en/task/view_task.md | 无独立 D：小范围渲染与读取增强，方案在会话中与需求方确认，未单独立 D 文档 |
+| [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | agent_teams, harness | openjiuwen/agent_teams/goal.py, openjiuwen/agent_teams/agent/goal_coordinator.py, openjiuwen/agent_teams/rails/team_goal_rail.py, openjiuwen/agent_teams/rails/elements.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/harness/team_harness.py, openjiuwen/agent_teams/harness/control.py, openjiuwen/agent_teams/harness/state.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/agent/agent_configurator.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/member_activity.py, openjiuwen/agent_teams/agent/spawn_manager.py, openjiuwen/agent_teams/agent/coordination/handlers/agent_lifecycle.py, openjiuwen/agent_teams/agent/coordination/handlers/team_completion.py, openjiuwen/agent_teams/schema/team.py, openjiuwen/agent_teams/schema/blueprint.py, openjiuwen/agent_teams/tools/member_options.py, openjiuwen/agent_teams/tools/team.py, openjiuwen/agent_teams/tools/tool_member.py, openjiuwen/agent_teams/i18n.py, openjiuwen/harness/rails/task_completion_rail.py, tests/system_tests/agent_swarm/goal/agent_team_goal_mode_e2e.py | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20_human-agent-mailbox-unread-flip](features/agent_teams/F_20_human-agent-mailbox-unread-flip.md) | F | Human-Agent Mailbox: Flip Auto-Read Off | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_external-agent-access](features/agent_teams/F_21_external-agent-access.md) | F | External Agent Access: skill+cli / mcp Wrappers | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
 | [F_21_team-completion-auto-pause](features/agent_teams/F_21_team-completion-auto-pause.md) | F | Team Completion Auto-Pause | alan_cheng | openjiuwen/agent_teams | — | 待核实 |
@@ -364,6 +370,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
+| [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) | D | Team Leader 与成员 Goal 模式设计方案 | alan_cheng | agent_teams, harness | — | — |
 | [SDD-0006](designs/archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | D | 原生 Harness 异步工具管控框架与磁盘溢写 | @alan_cheng | harness | — | — |
 | [SDD-0022](designs/proposals/SDD-0022-trajectory-observability-framework/design.md) | D | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | @alan_cheng | extensions/observability, harness, agent_teams | — | — |
 | [SDD-0024](designs/proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | D | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | @alan_cheng | agent_evolving, harness | — | — |
@@ -377,7 +384,9 @@ generated: true
 | [F_05_browser-task-integrity](features/harness/F_05_browser-task-integrity.md) | F | F_05 Browser Task Integrity | m056838700 | openjiuwen/harness | — | 待核实 |
 | [F_05_claude-turn-boundary-from-delivery-receipts](features/harness/F_05_claude-turn-boundary-from-delivery-receipts.md) | F | F_05 Claude Turn Boundaries from Delivery Receipts | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_06_browser-execution-and-completion](features/harness/F_06_browser-execution-and-completion.md) | F | Browser Execution and Completion Boundaries | m056838700 | openjiuwen/harness | — | 待核实 |
+| [F_06_opt-in-stream-task-lifecycle](features/harness/F_06_opt-in-stream-task-lifecycle.md) | F | F_06 可选流式后台任务生命周期 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_browser-jev-policy](features/harness/F_07_browser-jev-policy.md) | F | Browser Jev Policy with LLM Fallback | 待确认 | openjiuwen/harness | — | 待核实 |
+| [F_07_session-checkpointer-injection](features/harness/F_07_session-checkpointer-injection.md) | F | F_07 Session 级 checkpointer 注入 | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_07_third-party-harness-provider-packages](features/harness/F_07_third-party-harness-provider-packages.md) | F | 第三方 Harness Provider 包：entry point 发现与生成 skill | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_08_browser-jev-handover](features/harness/F_08_browser-jev-handover.md) | F | Browser Jev Segmented Handover | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_08_provider-owned-model-config](features/harness/F_08_provider-owned-model-config.md) | F | Provider 自有的模型映射：`ModelChoice` + `model_config` | alan_cheng | openjiuwen/harness | — | 待核实 |
@@ -396,6 +405,7 @@ generated: true
 | [F_19_browser-observation-first-results](features/harness/F_19_browser-observation-first-results.md) | F | Browser observation-first results | 待确认 | openjiuwen/harness | — | 待核实 |
 | [F_20261027_1810_ttse-plugin-runtime](features/F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
 | [F_20261103_0928_model-group-routed-model](features/F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
+| [F_20261110_1922_team-goal-mode](features/F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | agent_teams, harness | openjiuwen/agent_teams/goal.py, openjiuwen/agent_teams/agent/goal_coordinator.py, openjiuwen/agent_teams/rails/team_goal_rail.py, openjiuwen/agent_teams/rails/elements.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/harness/team_harness.py, openjiuwen/agent_teams/harness/control.py, openjiuwen/agent_teams/harness/state.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/agent/agent_configurator.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/member_activity.py, openjiuwen/agent_teams/agent/spawn_manager.py, openjiuwen/agent_teams/agent/coordination/handlers/agent_lifecycle.py, openjiuwen/agent_teams/agent/coordination/handlers/team_completion.py, openjiuwen/agent_teams/schema/team.py, openjiuwen/agent_teams/schema/blueprint.py, openjiuwen/agent_teams/tools/member_options.py, openjiuwen/agent_teams/tools/team.py, openjiuwen/agent_teams/tools/tool_member.py, openjiuwen/agent_teams/i18n.py, openjiuwen/harness/rails/task_completion_rail.py, tests/system_tests/agent_swarm/goal/agent_team_goal_mode_e2e.py | [D-20261110-1903-team-goal-mode](designs/active/D-20261110-1903-team-goal-mode/design.md) |
 | [F_20_react-iteration-limit](features/harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_browser-decision-observation-handoff](features/harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
@@ -491,6 +501,14 @@ generated: true
 | [B_20261104_1359_search-assessment-runtime](bugfix/harness/B_20261104_1359_search-assessment-runtime.md) | B | 搜索评估截断、降级候选丢失与伪正文成功修复 | ShowHsiang | openjiuwen/harness/tools/web, openjiuwen/core/foundation/llm | openjiuwen/harness/tools/web/_assessment.py, openjiuwen/harness/tools/web/free_search.py, openjiuwen/harness/tools/web/fetch_webpage.py, openjiuwen/harness/tools/web/_quality.py, openjiuwen/core/foundation/llm/reasoning.py, tests/unit_tests/harness/tools/web/test_search_assessment.py, tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py, tests/unit_tests/core/foundation/llm/test_reasoning_resolver.py | 无独立 D：用户根据日志评估建议明确要求继续修复；沿用既有检索方案，不另起独立设计。 |
 
 <a id="module-20"></a>
+
+## harness_providers
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [D-20261110-1839-leader-external-harness](designs/active/D-20261110-1839-leader-external-harness/design.md) | D | Leader 三方 Harness 插拔设计方案 | alan_cheng | agent_teams, harness_providers | — | — |
+
+<a id="module-21"></a>
 
 ## 未分类
 
