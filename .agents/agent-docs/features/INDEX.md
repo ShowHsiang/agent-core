@@ -1,7 +1,7 @@
 ---
 title: 实施与决策 F索引
-author: xinyang_bali
-author_email: 835397263@qq.com
+author: ShowHsiang
+author_email: xiangxiaoneng@h-partners.com
 generated: true
 ---
 
@@ -18,13 +18,16 @@ generated: true
 | [agent_evolving/ttse](#module-1) |
 | [agent_teams](#module-2) |
 | [core/foundation/llm](#module-3) |
-| [extensions/observability](#module-4) |
-| [harness](#module-5) |
-| [harness/prompts/tools](#module-6) |
-| [harness/rails](#module-7) |
-| [harness/subagents](#module-8) |
-| [harness/tools/browser_move](#module-9) |
-| [harness/tools/web](#module-10) |
+| [core/single_agent](#module-4) |
+| [extensions/observability](#module-5) |
+| [harness](#module-6) |
+| [harness/prompts/tools](#module-7) |
+| [harness/rails](#module-8) |
+| [harness/subagents](#module-9) |
+| [harness/tools/browser_move](#module-10) |
+| [harness/tools/web](#module-11) |
+| [jiuwenswarm/jiuwenswarm/channels/web/frontend](#module-12) |
+| [jiuwenswarm/jiuwenswarm/server/runtime](#module-13) |
 
 <a id="module-1"></a>
 
@@ -205,13 +208,21 @@ generated: true
 
 <a id="module-4"></a>
 
+## core/single_agent
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261111_1938_react-runtime-bai](F_20261111_1938_react-runtime-bai.md) | F | ReAct Runtime Memory 与 JEV 优先 BAI 最小闭环 | ShowHsiang | openjiuwen/core/single_agent, openjiuwen/harness, jiuwenswarm/jiuwenswarm/server/runtime, jiuwenswarm/jiuwenswarm/channels/web/frontend | openjiuwen/core/single_agent/runtime_monitor/schema.py, openjiuwen/core/single_agent/runtime_monitor/memory.py, openjiuwen/core/single_agent/runtime_monitor/evaluator.py, openjiuwen/core/single_agent/runtime_monitor/monitor.py, openjiuwen/core/single_agent/runtime_monitor/__init__.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/agent/react_agent/test_runtime_monitor.py, tests/unit_tests/agent/react_agent/test_runtime_monitor_integration.py, jiuwenswarm/pyproject.toml, jiuwenswarm/scripts/use-local-agent-core.ps1, jiuwenswarm/jiuwenswarm/resources/config.yaml, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/runtime_monitor.py, jiuwenswarm/jiuwenswarm/server/runtime/session/session_history.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/historyRestore.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/runtimeMonitorNotices.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/utils/wsEventDedup.ts, jiuwenswarm/tests/unit_tests/agentserver/test_runtime_monitor.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/tests/runtimeMonitorNotices.test.mjs | [D-20261029-1613-react-runtime-intervention](../designs/active/D-20261029-1613-react-runtime-intervention/design.md) |
+
+<a id="module-5"></a>
+
 ## extensions/observability
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 
-<a id="module-5"></a>
+<a id="module-6"></a>
 
 ## harness
 
@@ -249,6 +260,7 @@ generated: true
 | [F_20261027_1810_ttse-plugin-runtime](F_20261027_1810_ttse-plugin-runtime.md) | F | TTSE 插件构造上下文与关闭生命周期 | xinyang_bali | openjiuwen/harness | openjiuwen/harness/manifest/meta_elements.py, openjiuwen/harness/extension_binder.py, openjiuwen/harness/rails/evolution/ttse_rail.py | 无独立 D：用户确认执行外部 TTSE Rail 插件适配方案，原文位于 D:/files/自演进/方案/ttse适配code agent。 |
 | [F_20261103_0928_model-group-routed-model](F_20261103_0928_model-group-routed-model.md) | F | 模型组路由模型的全程命名与可观测 | hh0205 | openjiuwen/agent_teams, openjiuwen/core/foundation/llm, openjiuwen/extensions/observability, openjiuwen/harness | openjiuwen/core/foundation/llm/model_clients/intelli_router_model_client.py, openjiuwen/core/foundation/llm/routing/intelli_router_errors.py, openjiuwen/core/runner/callback/events.py, openjiuwen/extensions/observability/callback_handler.py, openjiuwen/harness/image_modality_probe.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/reliability/handler.py, openjiuwen/agent_teams/reliability/rail.py, openjiuwen/agent_teams/reliability/reporter.py, openjiuwen/agent_teams/prompts/messages.py, openjiuwen/agent_teams/team_context.py | 无独立 D：issue |
 | [F_20261110_1922_team-goal-mode](F_20261110_1922_team-goal-mode.md) | F | Team Leader 与成员 Goal 模式实施与决策归档 | alan_cheng | agent_teams, harness | openjiuwen/agent_teams/goal.py, openjiuwen/agent_teams/agent/goal_coordinator.py, openjiuwen/agent_teams/rails/team_goal_rail.py, openjiuwen/agent_teams/rails/elements.py, openjiuwen/agent_teams/harness/native_harness.py, openjiuwen/agent_teams/harness/team_harness.py, openjiuwen/agent_teams/harness/control.py, openjiuwen/agent_teams/harness/state.py, openjiuwen/agent_teams/agent/team_agent.py, openjiuwen/agent_teams/agent/agent_configurator.py, openjiuwen/agent_teams/agent/stream_controller.py, openjiuwen/agent_teams/agent/member_activity.py, openjiuwen/agent_teams/agent/spawn_manager.py, openjiuwen/agent_teams/agent/coordination/handlers/agent_lifecycle.py, openjiuwen/agent_teams/agent/coordination/handlers/team_completion.py, openjiuwen/agent_teams/schema/team.py, openjiuwen/agent_teams/schema/blueprint.py, openjiuwen/agent_teams/tools/member_options.py, openjiuwen/agent_teams/tools/team.py, openjiuwen/agent_teams/tools/tool_member.py, openjiuwen/agent_teams/i18n.py, openjiuwen/harness/rails/task_completion_rail.py, tests/system_tests/agent_swarm/goal/agent_team_goal_mode_e2e.py | [D-20261110-1903-team-goal-mode](../designs/active/D-20261110-1903-team-goal-mode/design.md) |
+| [F_20261111_1938_react-runtime-bai](F_20261111_1938_react-runtime-bai.md) | F | ReAct Runtime Memory 与 JEV 优先 BAI 最小闭环 | ShowHsiang | openjiuwen/core/single_agent, openjiuwen/harness, jiuwenswarm/jiuwenswarm/server/runtime, jiuwenswarm/jiuwenswarm/channels/web/frontend | openjiuwen/core/single_agent/runtime_monitor/schema.py, openjiuwen/core/single_agent/runtime_monitor/memory.py, openjiuwen/core/single_agent/runtime_monitor/evaluator.py, openjiuwen/core/single_agent/runtime_monitor/monitor.py, openjiuwen/core/single_agent/runtime_monitor/__init__.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/agent/react_agent/test_runtime_monitor.py, tests/unit_tests/agent/react_agent/test_runtime_monitor_integration.py, jiuwenswarm/pyproject.toml, jiuwenswarm/scripts/use-local-agent-core.ps1, jiuwenswarm/jiuwenswarm/resources/config.yaml, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/runtime_monitor.py, jiuwenswarm/jiuwenswarm/server/runtime/session/session_history.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/historyRestore.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/runtimeMonitorNotices.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/utils/wsEventDedup.ts, jiuwenswarm/tests/unit_tests/agentserver/test_runtime_monitor.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/tests/runtimeMonitorNotices.test.mjs | [D-20261029-1613-react-runtime-intervention](../designs/active/D-20261029-1613-react-runtime-intervention/design.md) |
 | [F_20_react-iteration-limit](harness/F_20_react-iteration-limit.md) | F | F_20 ReAct 迭代耗尽后的结构化结果 | openJiuwen-bot | openjiuwen/harness | — | 待核实 |
 | [F_21_browser-decision-observation-handoff](harness/F_21_browser-decision-observation-handoff.md) | F | Browser decision observation and local handoff | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_21_cua-desktop-subagent](harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
@@ -265,7 +277,7 @@ generated: true
 | [F_29_browser-shared-state-and-source-delivery](harness/F_29_browser-shared-state-and-source-delivery.md) | F | Browser shared-state lifecycle and complete retained-source delivery | ShowHsiang | openjiuwen/harness | — | 待核实 |
 | [F_30_browser-output-and-dispatch-contracts](F_30_browser-output-and-dispatch-contracts.md) | F | Browser output limits and local dispatch contracts | ShowHsiang | openjiuwen/harness | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/policy_page_action.py, tests/unit_tests/harness/tools/browser_move/test_browser_contract_compatibility.py | 无独立 D：Implements the approved multiversion analysis section 19 using existing browser contracts. |
 
-<a id="module-6"></a>
+<a id="module-7"></a>
 
 ## harness/prompts/tools
 
@@ -273,7 +285,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261103_1124_web-retrieval-quality](F_20261103_1124_web-retrieval-quality.md) | F | 免费 Web 检索质量、抓取可靠性与调用预算 | ShowHsiang | openjiuwen/harness/tools/web, openjiuwen/harness/rails, openjiuwen/harness/prompts/tools | openjiuwen/harness/tools/web/free_search.py, openjiuwen/harness/tools/web/fetch_webpage.py, openjiuwen/harness/tools/web/_http.py, openjiuwen/harness/tools/web/_budget.py, openjiuwen/harness/tools/web/_assessment.py, openjiuwen/harness/tools/web/_quality.py, openjiuwen/harness/tools/web/_common.py, openjiuwen/harness/rails/web_research_rail.py, openjiuwen/harness/prompts/tools/web_tools.py, tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py, tests/unit_tests/harness/tools/web/test_web_tools_v2.py, tests/unit_tests/harness/tools/web/test_free_search_recall.py, tests/unit_tests/harness/tools/web/test_bing_market_routing.py, tests/unit_tests/harness/tools/web/test_search_assessment.py, tests/unit_tests/harness/tools/web/conftest.py, tests/system_tests/harness/search_assessment_benchmark.py, tests/system_tests/harness/fixtures/search_assessment_cases.json, pyproject.toml | 无独立 D：用户已在对话中确认基于实际案例的调整策略，本次直接落实既有工具链修复，无独立 D。 |
 
-<a id="module-7"></a>
+<a id="module-8"></a>
 
 ## harness/rails
 
@@ -281,7 +293,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261103_1124_web-retrieval-quality](F_20261103_1124_web-retrieval-quality.md) | F | 免费 Web 检索质量、抓取可靠性与调用预算 | ShowHsiang | openjiuwen/harness/tools/web, openjiuwen/harness/rails, openjiuwen/harness/prompts/tools | openjiuwen/harness/tools/web/free_search.py, openjiuwen/harness/tools/web/fetch_webpage.py, openjiuwen/harness/tools/web/_http.py, openjiuwen/harness/tools/web/_budget.py, openjiuwen/harness/tools/web/_assessment.py, openjiuwen/harness/tools/web/_quality.py, openjiuwen/harness/tools/web/_common.py, openjiuwen/harness/rails/web_research_rail.py, openjiuwen/harness/prompts/tools/web_tools.py, tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py, tests/unit_tests/harness/tools/web/test_web_tools_v2.py, tests/unit_tests/harness/tools/web/test_free_search_recall.py, tests/unit_tests/harness/tools/web/test_bing_market_routing.py, tests/unit_tests/harness/tools/web/test_search_assessment.py, tests/unit_tests/harness/tools/web/conftest.py, tests/system_tests/harness/search_assessment_benchmark.py, tests/system_tests/harness/fixtures/search_assessment_cases.json, pyproject.toml | 无独立 D：用户已在对话中确认基于实际案例的调整策略，本次直接落实既有工具链修复，无独立 D。 |
 
-<a id="module-8"></a>
+<a id="module-9"></a>
 
 ## harness/subagents
 
@@ -289,7 +301,7 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-9"></a>
+<a id="module-10"></a>
 
 ## harness/tools/browser_move
 
@@ -297,10 +309,26 @@ generated: true
 |---|---|---|---|---|---|---|
 | [F_20261029_1852_optional-handoff-and-resume](F_20261029_1852_optional-handoff-and-resume.md) | F | Optional browser handoff recovery and invocation-exit lifecycle | ShowHsiang | openjiuwen/harness/subagents, openjiuwen/harness/tools/browser_move | openjiuwen/harness/subagents/browser_agent.py, openjiuwen/harness/tools/browser_move/decision/policy_model.py, openjiuwen/harness/tools/browser_move/playwright_runtime/phase_contract.py, openjiuwen/harness/tools/browser_move/playwright_runtime/runtime.py, openjiuwen/harness/tools/browser_move/controllers/action.py, openjiuwen/harness/tools/browser_move/playwright_runtime/execution_journal.py, openjiuwen/harness/tools/browser_move/playwright_runtime/browser_logging.py, tests/unit_tests/harness/tools/browser_move/test_browser_optional_handoff_recovery.py, tests/unit_tests/harness/tools/browser_move/test_browser_receipt_diagnostics.py, tests/unit_tests/harness/tools/browser_move/test_browser_decision_observation_handoff.py | 无独立 D：Implements the approved consolidated multiversion report section 22 using existing browser contracts. |
 
-<a id="module-10"></a>
+<a id="module-11"></a>
 
 ## harness/tools/web
 
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [F_20261103_1124_web-retrieval-quality](F_20261103_1124_web-retrieval-quality.md) | F | 免费 Web 检索质量、抓取可靠性与调用预算 | ShowHsiang | openjiuwen/harness/tools/web, openjiuwen/harness/rails, openjiuwen/harness/prompts/tools | openjiuwen/harness/tools/web/free_search.py, openjiuwen/harness/tools/web/fetch_webpage.py, openjiuwen/harness/tools/web/_http.py, openjiuwen/harness/tools/web/_budget.py, openjiuwen/harness/tools/web/_assessment.py, openjiuwen/harness/tools/web/_quality.py, openjiuwen/harness/tools/web/_common.py, openjiuwen/harness/rails/web_research_rail.py, openjiuwen/harness/prompts/tools/web_tools.py, tests/unit_tests/harness/tools/web/test_web_retrieval_quality.py, tests/unit_tests/harness/tools/web/test_web_tools_v2.py, tests/unit_tests/harness/tools/web/test_free_search_recall.py, tests/unit_tests/harness/tools/web/test_bing_market_routing.py, tests/unit_tests/harness/tools/web/test_search_assessment.py, tests/unit_tests/harness/tools/web/conftest.py, tests/system_tests/harness/search_assessment_benchmark.py, tests/system_tests/harness/fixtures/search_assessment_cases.json, pyproject.toml | 无独立 D：用户已在对话中确认基于实际案例的调整策略，本次直接落实既有工具链修复，无独立 D。 |
+
+<a id="module-12"></a>
+
+## jiuwenswarm/jiuwenswarm/channels/web/frontend
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261111_1938_react-runtime-bai](F_20261111_1938_react-runtime-bai.md) | F | ReAct Runtime Memory 与 JEV 优先 BAI 最小闭环 | ShowHsiang | openjiuwen/core/single_agent, openjiuwen/harness, jiuwenswarm/jiuwenswarm/server/runtime, jiuwenswarm/jiuwenswarm/channels/web/frontend | openjiuwen/core/single_agent/runtime_monitor/schema.py, openjiuwen/core/single_agent/runtime_monitor/memory.py, openjiuwen/core/single_agent/runtime_monitor/evaluator.py, openjiuwen/core/single_agent/runtime_monitor/monitor.py, openjiuwen/core/single_agent/runtime_monitor/__init__.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/agent/react_agent/test_runtime_monitor.py, tests/unit_tests/agent/react_agent/test_runtime_monitor_integration.py, jiuwenswarm/pyproject.toml, jiuwenswarm/scripts/use-local-agent-core.ps1, jiuwenswarm/jiuwenswarm/resources/config.yaml, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/runtime_monitor.py, jiuwenswarm/jiuwenswarm/server/runtime/session/session_history.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/historyRestore.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/runtimeMonitorNotices.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/utils/wsEventDedup.ts, jiuwenswarm/tests/unit_tests/agentserver/test_runtime_monitor.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/tests/runtimeMonitorNotices.test.mjs | [D-20261029-1613-react-runtime-intervention](../designs/active/D-20261029-1613-react-runtime-intervention/design.md) |
+
+<a id="module-13"></a>
+
+## jiuwenswarm/jiuwenswarm/server/runtime
+
+| ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
+|---|---|---|---|---|---|---|
+| [F_20261111_1938_react-runtime-bai](F_20261111_1938_react-runtime-bai.md) | F | ReAct Runtime Memory 与 JEV 优先 BAI 最小闭环 | ShowHsiang | openjiuwen/core/single_agent, openjiuwen/harness, jiuwenswarm/jiuwenswarm/server/runtime, jiuwenswarm/jiuwenswarm/channels/web/frontend | openjiuwen/core/single_agent/runtime_monitor/schema.py, openjiuwen/core/single_agent/runtime_monitor/memory.py, openjiuwen/core/single_agent/runtime_monitor/evaluator.py, openjiuwen/core/single_agent/runtime_monitor/monitor.py, openjiuwen/core/single_agent/runtime_monitor/__init__.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/deep_agent.py, tests/unit_tests/agent/react_agent/test_runtime_monitor.py, tests/unit_tests/agent/react_agent/test_runtime_monitor_integration.py, jiuwenswarm/pyproject.toml, jiuwenswarm/scripts/use-local-agent-core.ps1, jiuwenswarm/jiuwenswarm/resources/config.yaml, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py, jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter/runtime_monitor.py, jiuwenswarm/jiuwenswarm/server/runtime/session/session_history.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/historyRestore.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/features/runtimeMonitorNotices.ts, jiuwenswarm/jiuwenswarm/channels/web/frontend/src/utils/wsEventDedup.ts, jiuwenswarm/tests/unit_tests/agentserver/test_runtime_monitor.py, jiuwenswarm/jiuwenswarm/channels/web/frontend/tests/runtimeMonitorNotices.test.mjs | [D-20261029-1613-react-runtime-intervention](../designs/active/D-20261029-1613-react-runtime-intervention/design.md) |

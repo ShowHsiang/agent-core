@@ -6,7 +6,8 @@ id: S_02_deep-agent-architecture
 type: S
 modules:
 - openjiuwen/harness
-files: []
+files:
+- openjiuwen/harness/deep_agent.py
 author_email: yangzequ1@huawei.com
 ---
 
@@ -18,7 +19,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-28 |
+| 最近一次修订日期 | 2026-11-11 |
 | 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_06_opt-in-stream-task-lifecycle.md` |
 
 ## 范围 / 边界
@@ -136,6 +137,16 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 - `abort` 触发 `_cancel_session_deep_tasks` + `_release_session_subagent_controls`，
   不抛异常（幂等）。
 
+### 可选 RuntimeMonitor
+
+`set_runtime_monitor(monitor: RuntimeMonitor | None) -> DeepAgent` 挂载 SDK 的进展监控，返回 self。当前内层 ReAct 及 `_create_react_agent` 重建实例都接收同一 monitor；传 None 关闭。该依赖不写入 Card/DeepAgentConfig，不改变公开 factory 的构造参数和 harness 顶层导出。
+
+外层 invoke/stream 开始时建立自动任务；内层续轮、HITL/workflow 恢复和 `run_one_round` follow-up 延续窗口，外层结束时完成建议观察。宿主显式 `start_task` 的业务任务不因单次 invoke 完成而重建。Session 保存状态，monitor 自身不持有跨 session 的事实窗口。
+
+外层任务收尾在完成建议观察后异步发布独立快照，通知受 SDK 截止时间约束；宿主未注册通知回调时不新增 I/O。
+
+监控不产生 task-loop 控制事件、不覆盖权限或停止条件，BACKTRACK 不调用恢复动作。算法、失败语义和接口以 [S_02_runtime-monitor](../core_runtime/S_02_runtime-monitor.md) 为准。
+
 ## 数据结构
 
 ### InteractionPhase 状态机
@@ -187,3 +198,4 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 - `_load_goal_record_locked` / `_promote_loop_follow_ups` 的 goal 语义见 `S_11`。
 - `switch_mode` / plan 文件路径解析最终落到 `tools/agent_mode_tools.py` 的
   `resolve_plan_file_path` / `get_or_create_plan_slug`，见 `S_05`。
+

@@ -18,7 +18,7 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/__init__.py`、`openjiuwen/harness/factory.py`、`openjiuwen/harness/schema/config.py`、`openjiuwen/harness/extension_binder.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-11-11 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -79,6 +79,10 @@ author_email: yangzequ1@huawei.com
 9. `Registry` 约束：`TransportSpec` / `StorageSpec` 的注册表派发在 agent_teams 侧
    （`S_01_public-api-and-spec-flow`）；harness 侧同类机制是 `manifest` 的 catalog，
    见 `S_12_manifest-declarative-assembly`。
+
+## 可选进展监控装配
+
+工厂构造后通过 DeepAgent.set_runtime_monitor(monitor) 注入可选 SDK 运行依赖；None 关闭。它不新增 factory 参数、Card/Config 字段或 harness 顶层导出。生命周期见 [S_02](S_02_deep-agent-architecture.md)，评估协议见 [runtime monitor 规约](../core_runtime/S_02_runtime-monitor.md)。
 
 ## 接口契约
 
@@ -203,3 +207,4 @@ def create_deep_agent(
   异步子代理运行时见 `S_10_subagent-runtime`。
 - 顶层懒加载 `__getattr__` 模式与 `task_loop/__init__.py` / `schema/__init__.py` 的子包懒加载
   同构，但各自独立维护，不共享实现。
+
