@@ -106,6 +106,7 @@ from openjiuwen.core.single_agent.rail.base import (
     reset_usage_invocation_id,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.runtime_monitor.monitor import RUNTIME_MONITOR_CONTEXT_KEY, RuntimeMonitor
 
 _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
@@ -616,6 +617,38 @@ class ReActAgent(BaseAgent):
         self._tool_fact_journals: Dict[str, Dict[str, ToolMessage]] = {}
         # Optional per-instance check of each final model request; off unless installed.
         self._final_request_check: Optional[FinalRequestCheck] = None
+        self._runtime_monitor: RuntimeMonitor | None = None
+        self._runtime_monitor_reuse_task = False
+
+    def set_runtime_monitor(self, monitor: RuntimeMonitor | None) -> "ReActAgent":
+        """Attach optional progress feedback. None preserves the original ReAct loop."""
+        self._runtime_monitor = monitor
+        return self
+
+    @staticmethod
+    def _runtime_event(ctx: AgentCallbackContext, method: str, *args, **kwargs):
+        if not isinstance(ctx.extra, dict):
+            return None
+        run = ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY)
+        if run is None:
+            return None
+        try:
+            return getattr(run, method)(*args, **kwargs)
+        except Exception as exc:
+            # Monitoring is advisory; a reporting failure cannot alter tool results.
+            logger.warning("Runtime monitor disabled for this invoke: %s", type(exc).__name__)
+            ctx.extra.pop(RUNTIME_MONITOR_CONTEXT_KEY, None)
+            return None
+
+    async def _evaluate_runtime_progress(self, ctx: AgentCallbackContext) -> None:
+        run = ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY)
+        if run is not None:
+            try:
+                await run.evaluate_pending()
+                await run.monitor.publish(run.session)
+            except Exception as exc:
+                logger.warning("Runtime evaluation disabled for this invoke: %s", type(exc).__name__)
+                ctx.extra.pop(RUNTIME_MONITOR_CONTEXT_KEY, None)
 
     def set_final_request_check(self, check: Optional["FinalRequestCheck"]) -> None:
         """Install the check of each final model request on this instance, or remove it with None.
@@ -1239,6 +1272,11 @@ class ReActAgent(BaseAgent):
             ctx.inputs.tools = None
         usage_prompt_sections = tuple(self._context_usage_prompt_sections())
         final_system = [SystemMessage(content=self.prompt_builder.build())]
+        if not ctx.extra.get("_finalizing_max_iterations"):
+            hint = self._runtime_event(ctx, "model_hint")
+            if hint:
+                final_system.append(SystemMessage(content=hint))
+                usage_prompt_sections += ((ContextCategory.SYSTEM_PROMPT, hint, "system_message"),)
         await self._sync_prompt_attachments(ctx, ctx.context)
 
         context_window_kwargs = self._build_context_window_kwargs(
@@ -1896,6 +1934,7 @@ class ReActAgent(BaseAgent):
             extra_kwargs["logprobs"] = True
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
+        self._runtime_event(ctx, "request_dispatched", ctx.inputs.messages, ctx.context_usage_request_id)
         if not ctx.extra.get("_streaming"):
             try:
                 ai_message = await llm.invoke(
@@ -2453,6 +2492,15 @@ class ReActAgent(BaseAgent):
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
         journal_key, retention = self._open_tool_fact_journal(session)
+        if self._runtime_monitor is not None and ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY) is not None:
+            retain_result = retention.get("on_tool_result")
+
+            def record_runtime_result(tool_call, message):
+                if retain_result is not None:
+                    retain_result(tool_call, message)
+                self._runtime_event(ctx, "partial_result", tool_call, message)
+
+            retention["on_tool_result"] = record_runtime_result
         results = await self.ability_manager.execute(
             ctx=ctx,
             tool_call=tool_calls,
@@ -2471,6 +2519,13 @@ class ReActAgent(BaseAgent):
                     ctx.extra.setdefault("_iteration_observations", []).append(observation)
 
         await self._add_tool_result_images(ctx, results, context, journal_key=journal_key)
+        if self._runtime_monitor is not None and ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY) is not None:
+            interrupted_ids = {
+                tool_calls[index].id for index, (result, _) in enumerate(results)
+                if isinstance(result, ToolInterruptException) or self._hitl_handler.is_sub_agent_interrupt(result)
+                or self._is_interrupted(result)
+            }
+            self._runtime_event(ctx, "tool_results", tool_calls, results, interrupted_ids)
         return results
 
     async def _add_tool_result_images(
@@ -3081,6 +3136,15 @@ class ReActAgent(BaseAgent):
 
                 state_loaded_at = time.monotonic()
 
+                if self._runtime_monitor is not None:
+                    try:
+                        ctx.extra[RUNTIME_MONITOR_CONTEXT_KEY] = self._runtime_monitor.bind(
+                            session, str(ctx.extra.get("_original_query") or user_input),
+                            resume=bool(interruption_state or resume_continuation or self._runtime_monitor_reuse_task),
+                        )
+                    except Exception as exc:
+                        logger.warning("Runtime monitor could not bind: %s", type(exc).__name__)
+
                 context = await self._init_context(session)
                 ctx.context = context
                 if cast(ReActAgentConfig, self._config).on_max_iterations != "error" and (
@@ -3191,11 +3255,21 @@ class ReActAgent(BaseAgent):
                                 source="steering",
                                 prefix="[STEERING] ",
                             )
+                            self._runtime_event(ctx, "steer", steering)
 
                         if self.ability_manager.registry_revision != tools_revision:
                             tools = await self.ability_manager.list_tool_info()
                             tools_revision = self.ability_manager.registry_revision
 
+                        await self._evaluate_runtime_progress(ctx)
+                        if ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY) is not None and ctx.has_pending_steering():
+                            # New user input may have arrived while the evaluator was awaiting a response.
+                            late_steering = await self._drain_steering_batch(ctx)
+                            if late_steering:
+                                await self._admit_user_message(
+                                    ctx, context, late_steering, source="steering", prefix="[STEERING] ",
+                                )
+                                self._runtime_event(ctx, "steer", late_steering)
                         ai_message = await self._call_model(
                             ctx,
                             context,
@@ -3222,6 +3296,7 @@ class ReActAgent(BaseAgent):
                                 finish_reason=ai_message.finish_reason,
                             )
                         )
+                        self._runtime_event(ctx, "begin_step", ai_message)
 
                         if not ai_message.tool_calls:
                             force_model_continue = ctx.consume_model_continue_request()
@@ -3355,12 +3430,24 @@ class ReActAgent(BaseAgent):
             raise  # Preserve the original ReAct failure for the caller
         finally:
             try:
-                if need_cleanup and not stream_lifecycle_owner:
-                    if not abort_persisted:
-                        await self.context_engine.save_contexts(session)
-                    await session.close_stream()
-                    if not abort_persisted:
-                        await session.commit()
+                self._runtime_event(
+                    ctx, "finish",
+                    interrupted=isinstance(invoke_inputs.result, dict) and
+                    invoke_inputs.result.get("result_type") == "interrupt",
+                    aborted=invoke_inputs.result is None,
+                    continuing=self._runtime_monitor_reuse_task,
+                )
+                runtime_run = ctx.extra.get(RUNTIME_MONITOR_CONTEXT_KEY)
+                try:
+                    if runtime_run is not None:
+                        await runtime_run.monitor.publish(session)
+                finally:
+                    if need_cleanup and not stream_lifecycle_owner:
+                        if not abort_persisted:
+                            await self.context_engine.save_contexts(session)
+                        await session.close_stream()
+                        if not abort_persisted:
+                            await session.commit()
             finally:
                 reset_usage_attribution(attribution_token)
                 reset_usage_invocation_id(invocation_token)

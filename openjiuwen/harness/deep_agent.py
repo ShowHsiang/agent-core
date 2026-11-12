@@ -54,6 +54,7 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.runtime_monitor import RuntimeMonitor
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -361,6 +362,7 @@ class DeepAgent(BaseAgent):
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
+        self._runtime_monitor: RuntimeMonitor | None = None
         self._moa_scope_owner: Any = None
         super().__init__(card)
 
@@ -966,8 +968,39 @@ class DeepAgent(BaseAgent):
     ) -> "DeepAgent":
         """Inject an inner agent implementation for runtime wiring/tests."""
         self._react_agent = cast(ReActAgent, react_agent)
+        if self._runtime_monitor is not None:
+            self.set_runtime_monitor(self._runtime_monitor)
         self._initialized = initialized
         return self
+
+    def set_runtime_monitor(self, monitor: RuntimeMonitor | None) -> "DeepAgent":
+        """Forward optional SDK progress monitoring to the current and future inner agent."""
+        self._runtime_monitor = monitor
+        if self._react_agent is not None:
+            self._react_agent.set_runtime_monitor(monitor)
+            self._react_agent._runtime_monitor_reuse_task = monitor is not None
+        return self
+
+    def _prepare_runtime_monitor_task(self, session, inputs, *, continuation=False, task_id=None) -> None:
+        if self._runtime_monitor is None:
+            return
+        try:
+            memory = self._runtime_monitor.get_memory(session)
+            resume = continuation or self._is_resume_input(inputs) or bool(memory and memory.pending_step())
+            self._runtime_monitor.bind(session, str(inputs.query), resume=resume, task_id=task_id)
+        except Exception as exc:
+            logger.warning("Runtime monitor could not prepare task: %s", type(exc).__name__)
+
+    async def _finish_runtime_monitor_task(self, session, result, *, continuing=False) -> None:
+        if self._runtime_monitor is None or session is None:
+            return
+        try:
+            run = self._runtime_monitor.bind(session, "", resume=True)
+            run.finish(interrupted=isinstance(result, dict) and result.get("result_type") == "interrupt",
+                       aborted=result is None, continuing=continuing)
+            await self._runtime_monitor.publish(session)
+        except Exception as exc:
+            logger.warning("Runtime monitor could not finish task: %s", type(exc).__name__)
 
     @property
     def is_initialized(self) -> bool:
@@ -1308,6 +1341,9 @@ class DeepAgent(BaseAgent):
 
         agent = ReActAgent(inner_card)
         agent.configure(react_config)
+        if self._runtime_monitor is not None:
+            agent.set_runtime_monitor(self._runtime_monitor)
+            agent._runtime_monitor_reuse_task = True
 
         # Store builder on both agents (same object):
         #   - DeepAgent.system_prompt_builder: rails initialized on the outer
@@ -3388,6 +3424,7 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
+        self._prepare_runtime_monitor_task(session, invoke_inputs)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3434,14 +3471,17 @@ class DeepAgent(BaseAgent):
                 proposal_succeeded = True
                 return invoke_inputs.result
             finally:
-                if proposal_binding is not None:
-                    proposal_owner.finish_work(
-                        proposal_binding.identity, result=invoke_inputs.result, succeeded=proposal_succeeded,
-                    )
-                    proposal_owner.reset(proposal_tokens)
-                self._invoke_active = False
-                if owns_session and session is not None:
-                    await session.post_run()
+                try:
+                    await self._finish_runtime_monitor_task(session, invoke_inputs.result)
+                finally:
+                    if proposal_binding is not None:
+                        proposal_owner.finish_work(
+                            proposal_binding.identity, result=invoke_inputs.result, succeeded=proposal_succeeded,
+                        )
+                        proposal_owner.reset(proposal_tokens)
+                    self._invoke_active = False
+                    if owns_session and session is not None:
+                        await session.post_run()
 
     async def stream(
         self,
@@ -3473,6 +3513,7 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
+        self._prepare_runtime_monitor_task(session, invoke_inputs)
         host_iteration_limit = self._deep_config.max_iterations_hard_limit if self._deep_config else None
         task_loop_enabled = bool(
             self._deep_config
@@ -3550,17 +3591,22 @@ class DeepAgent(BaseAgent):
                 if invoke_inputs.result is not None:
                     yield self._finalized_answer_chunk(terminal_chunk, invoke_inputs.result)
             finally:
-                if proposal_binding is not None:
-                    proposal_result = invoke_inputs.result
-                    if proposal_succeeded and proposal_result is None and interrupted:
-                        proposal_result = {"result_type": "interrupt"}
-                    proposal_owner.finish_work(
-                        proposal_binding.identity, result=proposal_result, succeeded=proposal_succeeded,
+                try:
+                    await self._finish_runtime_monitor_task(
+                        session, {"result_type": "interrupt"} if interrupted else invoke_inputs.result,
                     )
-                    proposal_owner.reset(proposal_tokens)
-                self._invoke_active = False
-                if owns_session and session is not None:
-                    await session.post_run()
+                finally:
+                    if proposal_binding is not None:
+                        proposal_result = invoke_inputs.result
+                        if proposal_succeeded and proposal_result is None and interrupted:
+                            proposal_result = {"result_type": "interrupt"}
+                        proposal_owner.finish_work(
+                            proposal_binding.identity, result=proposal_result, succeeded=proposal_succeeded,
+                        )
+                        proposal_owner.reset(proposal_tokens)
+                    self._invoke_active = False
+                    if owns_session and session is not None:
+                        await session.post_run()
 
     async def follow_up(
         self,
@@ -3815,6 +3861,9 @@ class DeepAgent(BaseAgent):
                     "context": copy.deepcopy(work.context),
                 }
             invoke_inputs = self._normalize_inputs(inputs)
+            self._prepare_runtime_monitor_task(
+                session, invoke_inputs, continuation=work.is_follow_up, task_id=task_id,
+            )
             is_resume_input = self._is_resume_input(invoke_inputs)
             ctx = AgentCallbackContext(
                 agent=self, inputs=invoke_inputs, session=session
@@ -3878,7 +3927,10 @@ class DeepAgent(BaseAgent):
                     succeeded=proposal_succeeded, continuing=next_work is not None,
                 )
                 proposal_owner.reset(proposal_tokens)
-            self._invoke_active = False
+            try:
+                await self._finish_runtime_monitor_task(session, proposal_result, continuing=next_work is not None)
+            finally:
+                self._invoke_active = False
 
     def _build_interaction_next_work(
         self,
