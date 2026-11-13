@@ -176,3 +176,14 @@ SDK 使用配置的 `origin`（`https://gitcode.com/m056838700/agent-core.git`�
 SDK 按实现、测试、文档组织三个连续提交，应用提交适配及联调材料。推送使用普通同名分支推送，不改写远端历史；推送是否成功以 Git 远端校验为准。本次仅修改分支引用及联调说明，前节行为测试证据仍适用，完整依赖锁限制保持不变。
 
 用户在提交准备期间明确回复“本次不关联 issue”，因此本次提交不添加 `Refs: #...` footer；未修改仓库的通用提交规则。
+
+
+## 2026-11-13：官方 develop 基线同步与共享 JEV 配置
+
+用户进一步确认两个分支需要集成各自官方最新 develop，应用 JEV 必须复用浏览器 Agent / 前端“决策模型”配置。SDK `react-runtime-bai` 已通过合并提交 `ac1007990` 纳入官方 `fbe6a0d903522712de8094bffd1017964280bdae`；合并冲突仅在生成索引，通过 sync_documents 重建。原有 SDK 实现、测试提交保持在历史中，没有改写或强推。
+
+基线更新后的 SDK 相关回归：runtime monitor 单测与 ReAct 集成、JEV System One 客户端、DeepAgent、rail routing、task completion 共 **207 passed**（Windows / Python venv）。没有运行格式化或静态检查，也未调用真实模型服务。
+
+应用 `runtime-bai-adaptation` 纳入官方 `f5638897d03df426c82fd3a9e9417b59cde7f504`（先合入 `4b7a8d3f9` 后再纳入其更新），仍以 editable 导入本 SDK。应用通过现有 resolve_jev_connection 复用 browser.decision；没有增加 SDK 配置 API。应用侧配置迁移、凭据生命周期、测试及依赖限制的事实维护在 [应用 F](../../../../jiuwenswarm/.agents/agent-docs/features/F_20261113_1109_runtime-bai-shared-jev.md) 和该仓 S_01_runtime-monitor，不在此重复维护。
+
+完整依赖锁仍未解决：最新应用要求 OpenTelemetry SDK <1.42，本 SDK 要求 >=1.45.1。已验证的 editable 联调不代表干净环境安装或生产打包兼容。成本预测继续排除，恢复层等待独立实现集成。
