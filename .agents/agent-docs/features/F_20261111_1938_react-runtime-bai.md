@@ -187,3 +187,5 @@ SDK 按实现、测试、文档组织三个连续提交，应用提交适配及�
 应用 `runtime-bai-adaptation` 纳入官方 `f5638897d03df426c82fd3a9e9417b59cde7f504`（先合入 `4b7a8d3f9` 后再纳入其更新），仍以 editable 导入本 SDK。应用通过现有 resolve_jev_connection 复用 browser.decision；没有增加 SDK 配置 API。应用侧配置迁移、凭据生命周期、测试及依赖限制的事实维护在 [应用 F](../../../../jiuwenswarm/.agents/agent-docs/features/F_20261113_1109_runtime-bai-shared-jev.md) 和该仓 S_01_runtime-monitor，不在此重复维护。
 
 完整依赖锁仍未解决：最新应用要求 OpenTelemetry SDK <1.42，本 SDK 要求 >=1.45.1。已验证的 editable 联调不代表干净环境安装或生产打包兼容。成本预测继续排除，恢复层等待独立实现集成。
+
+交付推送期间应用官方 develop 再次更新，最终应用已纳入 `9f403d1ca27cfb73a5521a7c7d7e1f517c0dc61d`。扩展历史读取链检视补齐应用提示事件的查询白名单，最终应用后端 **500 passed**，前端 **128 passed**；SDK 行为代码未再改动，前述 **207 passed** 证据仍适用。该续次合并与历史分页回归事实继续由上述应用 F 维护。
