@@ -1,7 +1,6 @@
 ---
 title: 实施与决策 F索引
-author: xinyang_bali
-author_email: 835397263@qq.com
+author: sync_documents.py
 generated: true
 ---
 
@@ -18,8 +17,11 @@ generated: true
 | [agent_evolving/trajectory](#module-agent_evolving-trajectory) |
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
+| [core.runner.resources_manager](#module-core-runner-resources_manager) |
+| [core.session.tracer](#module-core-session-tracer) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/observability](#module-extensions-observability) |
 | [harness](#module-harness) |
 | [harness/prompts/tools](#module-harness-prompts-tools) |
@@ -207,6 +209,22 @@ generated: true
 | [F_98_native-checkpoint-and-endpoint-recovery](agent_teams/F_98_native-checkpoint-and-endpoint-recovery.md) | F | NativeHarness 冷恢复与原端点重连恢复 | alan_cheng | 待核实 |
 | [F_99_dsh-composition-capabilities](agent_teams/F_99_dsh-composition-capabilities.md) | F | DSH 启动能力适配与 SDK 升级 | alan_cheng | 待核实 |
 
+<a id="module-core-runner-resources_manager"></a>
+
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-core-session-tracer"></a>
+
+## core.session.tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
 <a id="module-core-foundation-llm"></a>
 
 ## core/foundation/llm
@@ -223,6 +241,14 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
 | [F_20261104_1720_tool-execution-environment](F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
+
+<a id="module-extensions-tracer_otel"></a>
+
+## extensions.tracer_otel
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
 <a id="module-extensions-observability"></a>
 
@@ -304,6 +330,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [F-20261107-1700-coding-document-memory](F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
 | [F_20261103_1124_web-retrieval-quality](F_20261103_1124_web-retrieval-quality.md) | F | 免费 Web 检索质量、抓取可靠性与调用预算 | ShowHsiang | 无独立 D：用户已在对话中确认基于实际案例的调整策略，本次直接落实既有工具链修复，无独立 D。 |
 
 <a id="module-harness-subagents"></a>

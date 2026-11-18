@@ -1,7 +1,6 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: sync_documents.py
 generated: true
 ---
 
@@ -20,12 +19,15 @@ generated: true
 | [agent_evolving/ttse](#module-agent_evolving-ttse) |
 | [agent_teams](#module-agent_teams) |
 | [agent_teams/workflow](#module-agent_teams-workflow) |
+| [core.runner.resources_manager](#module-core-runner-resources_manager) |
+| [core.session.tracer](#module-core-session-tracer) |
 | [core/context_engine](#module-core-context_engine) |
 | [core/controller](#module-core-controller) |
 | [core/foundation/llm](#module-core-foundation-llm) |
 | [core/runner/drunner/dmessage_queue](#module-core-runner-drunner-dmessage_queue) |
 | [core/session](#module-core-session) |
 | [core/sys_operation](#module-core-sys_operation) |
+| [extensions.tracer_otel](#module-extensions-tracer_otel) |
 | [extensions/a2a](#module-extensions-a2a) |
 | [extensions/observability](#module-extensions-observability) |
 | [harness](#module-harness) |
@@ -256,6 +258,7 @@ generated: true
 | [B_20261104_2030_cancellation-cause-lifecycle](bugfix/core_runtime/B_20261104_2030_cancellation-cause-lifecycle.md) | B | 压缩取消一律误报 failed 及标记生命周期残留窗口缺陷 | CharlesWang2030 | 无独立 D：c4e52b7c 引入 cancellation cause 注册表属于常规缺陷修复，未归档独立设计；本次为对该提交检视发现的标记生命周期缺陷的后续修复，沿用注册表现有契约（TTL、非消费式 resolve、前缀继承）。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
 | [B_20261105_0911_swarmflow-thirdparty-trajectory](bugfix/agent_teams/B_20261105_0911_swarmflow-thirdparty-trajectory.md) | B | Swarmflow 三方 Agent 轨迹未绑定成员身份 | wangcan103 | 无独立 D：小范围补齐既有 HarnessTrajectoryRecorder 的 Swarmflow 接线，不新增协议或公开 API。 |
+| [B_20261117_1626_directed-assignment-notice-dropped](bugfix/agent_teams/B_20261117_1626_directed-assignment-notice-dropped.md) | B | 定向指派/改派的通知被接收端 pending 判据丢弃，新 owner 永不唤醒 | xiajing | 无独立 D：缺陷修复只改消费端投递判据，不新增契约与机制；依据见 S_03（TASK_CLAIMED 定向投递）与 jiuwenswarm 问题 |
 | [S_01_public-api-and-spec-flow](specs/agent_teams/S_01_public-api-and-spec-flow.md) | S | S_01 公开 API 表面与 Spec 流 | alan_cheng | — |
 | [S_02_team-agent-architecture](specs/agent_teams/S_02_team-agent-architecture.md) | S | TeamAgent 架构规约 | alan_cheng | — |
 | [S_03_coordination-protocol](specs/agent_teams/S_03_coordination-protocol.md) | S | Coordination Protocol | alan_cheng | — |
@@ -311,6 +314,22 @@ generated: true
 | [SDD-0030](designs/proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | D | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | @chenchunzhou | — |
 | [SDD-0031](designs/proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | D | 集群模式teammate支持swarmflow工具 | @xiajing | — |
 | [B_20261102_1120_avatar-child-session-trace-root](bugfix/agent_teams/B_20261102_1120_avatar-child-session-trace-root.md) | B | Swarmflow avatar child session 找不到 Team 轨迹 root | wangcan103 | 无独立 D：普通缺陷修复；沿用 S_18 的 session 隔离契约，无独立设计 |
+
+<a id="module-core-runner-resources_manager"></a>
+
+## core.runner.resources_manager
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
+
+<a id="module-core-session-tracer"></a>
+
+## core.session.tracer
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
 <a id="module-core-context_engine"></a>
 
@@ -368,6 +387,14 @@ generated: true
 |---|---|---|---|---|
 | [F_20261104_1720_tool-execution-environment](features/F_20261104_1720_tool-execution-environment.md) | F | 工具执行环境作用域 | alan_cheng | 无独立 D：无独立 D；在现有 harness 工具调用与 team 会话存储契约上的小范围扩展。 |
 | [B_20261104_2054_recovered-context-seed-and-execution-environment](bugfix/agent_teams/B_20261104_2054_recovered-context-seed-and-execution-environment.md) | B | 冷恢复后成员策略 seed 与执行环境传递修复 | alan_cheng | 无独立 D：无独立 D；修复 F_20261104_1720_tool-execution-environment / F_20261104_1721_session-execution-settings 在冷恢复与远程调用路径上的遗漏。 |
+
+<a id="module-extensions-tracer_otel"></a>
+
+## extensions.tracer_otel
+
+| ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
+|---|---|---|---|---|
+| [F_20261105_1405_otel-decorator-llm-telemetry](features/F_20261105_1405_otel-decorator-llm-telemetry.md) | F | 装饰器 llm span 遥测纯新增（弃外保内） | yidaaichixia | 无独立 D：方案在遥测重构评审讨论与 GitCode PR 线程（!3570/!3571 撤回后重做为纯新增线）中确认，无独立 D 文档。 |
 
 <a id="module-extensions-a2a"></a>
 
@@ -488,6 +515,7 @@ generated: true
 
 | ID / 文档 | 类型 | 标题 | 作者 | 关联 D |
 |---|---|---|---|---|
+| [F-20261107-1700-coding-document-memory](features/F_20261107_1700_coding-document-memory.md) | F | Coding 文档记忆 Rail | Wang Tao | 无独立 D：依据本会话已确认的跨仓 Coding 文档记忆方案及后续交互轮次复用决定；AutoMemory 保留宿主原有开关。 |
 | [F_20261103_1124_web-retrieval-quality](features/F_20261103_1124_web-retrieval-quality.md) | F | 免费 Web 检索质量、抓取可靠性与调用预算 | ShowHsiang | 无独立 D：用户已在对话中确认基于实际案例的调整策略，本次直接落实既有工具链修复，无独立 D。 |
 
 <a id="module-harness-subagents"></a>
