@@ -54,7 +54,6 @@ from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
     ExternalCliMemberSpec,
     TeamLifecycle,
-    TeamGoalSpec,
     TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
@@ -103,7 +102,6 @@ __all__ = [
     "TeamEvent",
     "TeamLifecycle",
     "ExternalCliMemberSpec",
-    "TeamGoalSpec",
     "TeamMemberSpec",
     "TeamOutputSchema",
     "TeamRole",

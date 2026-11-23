@@ -59,7 +59,6 @@ from openjiuwen.agent_teams.schema.task import (
 )
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
-    TASK_TERMINAL_STATUSES,
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
@@ -68,18 +67,6 @@ from openjiuwen.agent_teams.tools.database.graph import TASK_TERMINAL_STATUSES, 
 from openjiuwen.agent_teams.tools.models import TeamTaskReviewVoteBase
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
-
-
-def _open_assignee_status(task: TeamTaskBase, member_statuses: dict[str, str]) -> str | None:
-    """Status of the member holding an open task, or ``None``.
-
-    Only an open task has an owner worth chasing: once the task is terminal
-    the assignee is history, and reporting that member's current status next
-    to it would read as a problem on a task that needs nothing.
-    """
-    if not task.assignee or task.status in TASK_TERMINAL_STATUSES:
-        return None
-    return member_statuses.get(task.assignee)
 
 
 def _now_iso() -> str:
@@ -277,7 +264,12 @@ class TeamTaskManager:
         created: list[TeamTaskBase] = []
         for node in new_tasks:
             status = status_by_id.get(node.task_id, node.initial_status)
-            await self._publish_task_created(node.task_id, status)
+            await self._publish_task_created(
+                node.task_id,
+                status,
+                member_name=node.assignee or None,
+                parent_task_id=node.parent_task_id,
+            )
             task = TeamTaskBase(
                 task_id=node.task_id,
                 team_name=self.team_name,
@@ -332,8 +324,23 @@ class TeamTaskManager:
             return TaskCreateResult.fail(f"Failed to create task {task_id or title!r}: {result.reason}")
         return TaskCreateResult.success(result.tasks[0])
 
-    async def _publish_task_created(self, task_id: str, status: str) -> None:
-        """Publish a task-created event; log-and-continue on failure."""
+    async def _publish_task_created(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        member_name: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+    ) -> None:
+        """Publish a task-created event; log-and-continue on failure.
+
+        ``member_name`` carries the task's assignee at creation time (scheduled
+        dispatch seeds every task ``PENDING`` with an assignee). Trajectory
+        consumers read it to attribute a pending task to its owner before the
+        scheduler starts it; unassigned tasks leave it ``None``.
+        ``parent_task_id`` marks a member-split subtask (F_128); its creation
+        suspends the parent, which emits no event of its own.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -342,6 +349,8 @@ class TeamTaskManager:
                         team_name=self.team_name,
                         task_id=task_id,
                         status=status,
+                        member_name=member_name,
+                        parent_task_id=parent_task_id,
                     )
                 ),
             )
@@ -367,7 +376,6 @@ class TeamTaskManager:
         # hundreds of per-task queries / connection checkouts.
         tasks = await self.list_tasks(status=status)
         all_deps = await self.db.task.get_team_dependencies(self.team_name)
-        member_statuses = await self._member_statuses()
         unresolved_by_task: dict[str, list[str]] = defaultdict(list)
         for dep in all_deps:
             if not dep.resolved:
@@ -383,7 +391,6 @@ class TeamTaskManager:
                 title=task.title,
                 status=task.status,
                 assignee=task.assignee,
-                assignee_status=_open_assignee_status(task, member_statuses),
                 blocked_by=unresolved_by_task.get(task.task_id, []),
                 parent_task_id=task.parent_task_id,
                 stale_against=stale_against(task, revisions.get(task.parent_task_id or "")),
@@ -416,7 +423,6 @@ class TeamTaskManager:
         subtask_rows = await self.db.task.get_subtasks(self.team_name, task_id)
         subtasks = [row.task_id for row in subtask_rows]
         stale_subtasks = [row.task_id for row in subtask_rows if stale_against(row, task.revision or 0) is not None]
-        member_statuses = await self._member_statuses()
 
         return TaskDetail(
             task_id=task.task_id,
@@ -424,7 +430,6 @@ class TeamTaskManager:
             content=task.content,
             status=task.status,
             assignee=task.assignee,
-            assignee_status=_open_assignee_status(task, member_statuses),
             reviewer=task.reviewers(),
             review_round=task.review_round,
             max_review_rounds=task.max_review_rounds,
@@ -438,11 +443,6 @@ class TeamTaskManager:
             revision=task.revision or 0,
             updated_at=task.updated_at,
         )
-
-    async def _member_statuses(self) -> dict[str, str]:
-        """Map every team member to its current status (one roster projection)."""
-        rows = await self.db.member.get_member_roster(self.team_name)
-        return {name: status for name, _display_name, status in rows}
 
     async def list_review_tasks(self, reviewer_name: str) -> TaskListResult:
         """List IN_REVIEW tasks awaiting ``reviewer_name`` (verify-gate view).
@@ -931,10 +931,9 @@ class TeamTaskManager:
         """Snapshot the current-round vote tally of one IN_REVIEW task.
 
         Groups reviewers by type: verifier and challenger form the binary
-        (pass/fail) pool; inspector votes are scored floats (0~1) that carry
-        their feedback bodies alongside the scores. Latest vote per reviewer
-        wins; votes from members no longer on the task's reviewer list are
-        ignored.
+        (pass/fail) pool; inspector votes are scored floats (0~1). Latest
+        vote per reviewer wins; votes from members no longer on the task's
+        reviewer list are ignored.
         """
         votes = await self.db.task.get_review_votes(task.task_id, task.review_round)
         reviewers = task.reviewers()
@@ -962,7 +961,6 @@ class TeamTaskManager:
 
         # Inspector pool: scored votes
         inspector_scores: dict[str, float] = {}
-        inspector_feedback: dict[str, str] = {}
         inspector_count = 0
         inspector_voted = 0
 
@@ -976,9 +974,6 @@ class TeamTaskManager:
                         inspector_scores[name] = float(latest_decision[name])
                     except (ValueError, TypeError):
                         pass
-                    feedback = latest_feedback[name]
-                    if feedback:
-                        inspector_feedback[name] = feedback
             else:
                 # verifier or challenger
                 verdict_total += 1
@@ -1016,7 +1011,6 @@ class TeamTaskManager:
             "inspector_count": inspector_count,
             "inspector_voted": inspector_voted,
             "inspector_scores": inspector_scores,
-            "inspector_feedback": inspector_feedback,
             "inspector_avg": inspector_avg,
         }
 
@@ -1878,6 +1872,7 @@ class TeamTaskManager:
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=member_name,
+                resumed=bool(task.resume_pending),
             ),
             error_label=f"Task started event for {task_id}",
         )

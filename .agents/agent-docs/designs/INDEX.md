@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-11-13T11:32+08:00 -->
+<!-- generated-at: 2026-11-23T18:16+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -17,17 +17,14 @@ generated: true
 | 模块 |
 |---|
 | [agent_evolving](#module-1) |
-| [agent_evolving/trajectory](#module-2) |
-| [agent_teams](#module-3) |
-| [agent_teams/workflow](#module-4) |
-| [core/foundation/llm](#module-5) |
-| [core/foundation/llm/system_one](#module-6) |
-| [core/single_agent](#module-7) |
-| [extensions/observability](#module-8) |
-| [harness](#module-9) |
-| [harness_providers](#module-10) |
-| [jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter](#module-11) |
-| [未分类](#module-12) |
+| [agent_teams](#module-2) |
+| [agent_teams/workflow](#module-3) |
+| [core/foundation/llm/system_one](#module-4) |
+| [core/single_agent](#module-5) |
+| [extensions/observability](#module-6) |
+| [harness](#module-7) |
+| [jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter](#module-8) |
+| [未分类](#module-9) |
 
 <a id="module-1"></a>
 
@@ -41,16 +38,6 @@ generated: true
 
 <a id="module-2"></a>
 
-## agent_evolving/trajectory
-
-### 开发中 (active)
-
-| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
-|---|---|---|---|---|---|
-| [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
-
-<a id="module-3"></a>
-
 ## agent_teams
 
 ### 开发前 (proposals)
@@ -63,13 +50,6 @@ generated: true
 | [SDD-0030](proposals/SDD-0030-swarmflow-agent-group-expert-worker/design.md) | Swarmflow 专家 worker：agent_template 算子参数复用专家团成员 | draft | @chenchunzhou | core | 2026-10-15 |
 | [SDD-0031](proposals/SDD-0031-teammate-swarmflow-orchestration/design.md) | 集群模式teammate支持swarmflow工具 | draft | @xiajing | core | 2026-11-03 |
 
-### 开发中 (active)
-
-| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
-|---|---|---|---|---|---|
-| [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
-| [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
-
 ### 开发后 (archive)
 
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
@@ -78,7 +58,7 @@ generated: true
 | [SDD-0016](archive/SDD-0016-third-party-agent-reliability/design.md) | 三方 Agent 可靠性设计 | shipped | @zhanglongmin | core | 2026-08-31 |
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 
-<a id="module-4"></a>
+<a id="module-3"></a>
 
 ## agent_teams/workflow
 
@@ -113,17 +93,7 @@ generated: true
 | [SDD-0018](archive/SDD-0018-swarmflow-team-runtime-binding/design.md) | Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑） | shipped | @chenchunzhou | core | 2026-09-18 |
 | [SDD-0027](archive/SDD-0027-swarmflow-per-run-journal-wal-split/design.md) | Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理 | shipped | @xiajing | core | 2026-09-16 |
 
-<a id="module-5"></a>
-
-## core/foundation/llm
-
-### 开发中 (active)
-
-| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
-|---|---|---|---|---|---|
-| [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
-
-<a id="module-6"></a>
+<a id="module-4"></a>
 
 ## core/foundation/llm/system_one
 
@@ -133,7 +103,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261029-1613-react-runtime-intervention](active/D-20261029-1613-react-runtime-intervention/design.md) | ReAct、Runtime Memory 与 BAI 最小干预闭环 | in-development | ShowHsiang | core | 2026-11-12 |
 
-<a id="module-7"></a>
+<a id="module-5"></a>
 
 ## core/single_agent
 
@@ -143,7 +113,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261029-1613-react-runtime-intervention](active/D-20261029-1613-react-runtime-intervention/design.md) | ReAct、Runtime Memory 与 BAI 最小干预闭环 | in-development | ShowHsiang | core | 2026-11-12 |
 
-<a id="module-8"></a>
+<a id="module-6"></a>
 
 ## extensions/observability
 
@@ -154,13 +124,7 @@ generated: true
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0023](proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | draft | @alan_cheng | observability | 2026-09-15 |
 
-### 开发中 (active)
-
-| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
-|---|---|---|---|---|---|
-| [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
-
-<a id="module-9"></a>
+<a id="module-7"></a>
 
 ## harness
 
@@ -176,8 +140,6 @@ generated: true
 | ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [D-20261029-1613-react-runtime-intervention](active/D-20261029-1613-react-runtime-intervention/design.md) | ReAct、Runtime Memory 与 BAI 最小干预闭环 | in-development | ShowHsiang | core | 2026-11-12 |
-| [D-20261110-1903-team-goal-mode](active/D-20261110-1903-team-goal-mode/design.md) | Team Leader 与成员 Goal 模式设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
-| [D-20261112-1120-goal-assessment-isolation](active/D-20261112-1120-goal-assessment-isolation/design.md) | Goal 独立评估的轨迹与执行上下文隔离 | in-development | alan_cheng | observability | 2026-11-12 |
 
 ### 开发后 (archive)
 
@@ -185,17 +147,7 @@ generated: true
 |---|---|---|---|---|---|
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
-<a id="module-10"></a>
-
-## harness_providers
-
-### 开发中 (active)
-
-| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
-|---|---|---|---|---|---|
-| [D-20261110-1839-leader-external-harness](active/D-20261110-1839-leader-external-harness/design.md) | Leader 三方 Harness 插拔设计方案 | in-development | alan_cheng | harness | 2026-11-10 |
-
-<a id="module-11"></a>
+<a id="module-8"></a>
 
 ## jiuwenswarm/jiuwenswarm/server/runtime/agent_adapter
 
@@ -205,7 +157,7 @@ generated: true
 |---|---|---|---|---|---|
 | [D-20261029-1613-react-runtime-intervention](active/D-20261029-1613-react-runtime-intervention/design.md) | ReAct、Runtime Memory 与 BAI 最小干预闭环 | in-development | ShowHsiang | core | 2026-11-12 |
 
-<a id="module-12"></a>
+<a id="module-9"></a>
 
 ## 未分类
 

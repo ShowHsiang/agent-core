@@ -100,13 +100,6 @@ class TeamMemberOptions(BaseModel):
             "member settles into once the scheduler finds nothing left on its board."
         ),
     )
-    goal: bool | None = Field(
-        default=None,
-        description=(
-            "Per-member goal-mode switch. None follows the team's member_goal; "
-            "False opts this member out. Has no effect when the team has no member_goal."
-        ),
-    )
     permissions_override: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -189,11 +182,9 @@ def build_member_options(
     permissions_override: dict[str, str] | None = None,
     lifetime: MemberLifetime | None = None,
     agent_template: MemberAgentTemplate | None = None,
-    goal: bool | None = None,
 ) -> str | None:
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
-    parsed.goal = goal
     parsed.agent_template = agent_template
     parsed.lifetime = lifetime
     parsed.model_ref = _model_ref_from_mapping(model_ref)
@@ -309,14 +300,6 @@ def get_member_cli_agent(record: object) -> str | None:
 def get_member_worktree(record: object) -> MemberWorktreeOptions | None:
     """Return the member's worktree options from options."""
     return get_member_options(record).worktree
-
-
-def get_member_goal(record: object) -> bool | None:
-    """Return the member's own goal-mode switch from options.
-
-    ``None`` means the member follows the team's ``member_goal``.
-    """
-    return get_member_options(record).goal
 
 
 def get_member_permissions_override(record: object) -> dict[str, str] | None:

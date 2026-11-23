@@ -13,7 +13,6 @@ from typing import Any, Final, Literal, TypeAlias
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
     is_compaction_span,
-    is_goal_assessment_span,
     iter_spans,
     read_llm_exchange,
     read_tool_call,
@@ -320,7 +319,7 @@ def project_trajectory_messages(
     for span in sorted(iter_spans(trajectory), key=span_sort_key):
         category = span_category(span)
         if category == "llm":
-            if is_compaction_span(span) or is_goal_assessment_span(span):
+            if is_compaction_span(span):
                 continue
             raw_prompt, raw_completions = read_llm_exchange(span)
             window = window_for_inference(replay, span)

@@ -189,3 +189,9 @@ SDK 按实现、测试、文档组织三个连续提交，应用提交适配及�
 完整依赖锁仍未解决：最新应用要求 OpenTelemetry SDK <1.42，本 SDK 要求 >=1.45.1。已验证的 editable 联调不代表干净环境安装或生产打包兼容。成本预测继续排除，恢复层等待独立实现集成。
 
 交付推送期间应用官方 develop 再次更新，最终应用已纳入 `9f403d1ca27cfb73a5521a7c7d7e1f517c0dc61d`。扩展历史读取链检视补齐应用提示事件的查询白名单，最终应用后端 **500 passed**，前端 **128 passed**；SDK 行为代码未再改动，前述 **207 passed** 证据仍适用。该续次合并与历史分页回归事实继续由上述应用 F 维护。
+
+## 2026-11-23 正式发布基线
+
+用户选择以正式 release 作运行基线并保留分支特性和 Git 历史。SDK 采用官方 `v0.1.21`（与 `main` 同指 `102e6925407efceb0952a8244594beb5a5d18a8b`）。以此前的官方 `fbe6a0d90` 识别特性分支的实际增量，将其三方合入发布快照。合并以原特性提交 `aa23ac529` 和发布提交为双亲。ReAct/DeepAgent 挂载与生命周期、Runtime Memory、JEV/LLM 评估器及对应测试共用发布版执行代码。生成索引按合并后的文档重建。
+
+基于本次候选复验 ReAct 监控单测及集成、JEV System One、DeepAgent、rail 路由与 task completion，Windows 开发环境 **203 项通过**。应用发布基线为 `releases/0.2.9`（`fdaec9d18`）。应用锁文件已选用相邻 `../agent-core` 的 editable `0.1.21`，此前 develop 组合的 OpenTelemetry 约束冲突在本次正式版本组合上已经消除。应用依赖、干净安装和跨仓回归记录见[应用实施记录](../../../../jiuwenswarm/.agents/agent-docs/features/F_20261113_1109_runtime-bai-shared-jev.md)。

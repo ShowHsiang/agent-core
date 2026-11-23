@@ -271,8 +271,7 @@ def test_missing_window_commit_is_reported_as_issue() -> None:
     assert [message["content"] for message in messages] == ["hello", "hi", "hello", "hi", "again", "hi again"]
 
 
-@pytest.mark.parametrize("purpose", ["compaction", "goal_assessment"])
-def test_auxiliary_llm_spans_are_excluded_from_messages(purpose: str) -> None:
+def test_compaction_llm_spans_are_excluded_from_messages() -> None:
     user = _message("u1", "user", "hello")
     compaction = _llm_span(
         "llm-compaction",
@@ -284,7 +283,7 @@ def test_auxiliary_llm_spans_are_excluded_from_messages(purpose: str) -> None:
     compaction["attributes"] = attributes_from_map(
         {
             **{key: next(iter(value.values())) for key, value in compaction_attributes.items()},
-            semconv.OJ_REQUEST_PURPOSE: purpose,
+            semconv.OJ_REQUEST_PURPOSE: "compaction",
         }
     )
     spans = [

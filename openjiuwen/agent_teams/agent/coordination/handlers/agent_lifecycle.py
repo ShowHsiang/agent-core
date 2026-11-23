@@ -59,12 +59,6 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             content,
             run_context=event.payload.get("run_context"),
         )
-        # Goal mode: the request becomes the leader's goal only after it has
-        # been delivered. Opened first, the goal would start its own round on
-        # the idle leader and the same request would then be handled twice.
-        open_goal = getattr(self._round, "open_user_goal", None)
-        if callable(open_goal):
-            await open_goal(content)
 
     async def on_standby(self, event: EventMessage) -> None:
         """Pause periodic polling on TEAM_STANDBY."""
@@ -105,16 +99,6 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         if target_id is None or target_id != member_name:
             return
 
-        # approve_tool persisted the reply; mailbox polling handles it after
-        # the active round settles without queuing a duplicate resume query.
-        if self._round.has_in_flight_round():
-            team_logger.debug(
-                "[{}] deferring approval event for tool_call_id={} to the durable mailbox during an active round",
-                member_name,
-                payload.tool_call_id,
-            )
-            return
-
         from openjiuwen.core.session import InteractiveInput
 
         interactive_input = InteractiveInput()
@@ -132,7 +116,13 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             payload.tool_call_id,
             payload.approved,
         )
-        await self._round.resume_interrupt(interactive_input)
+        result = await self._round.resume_interrupt(interactive_input)
+        if not result.ok:
+            team_logger.debug(
+                "[{}] approval event not admitted: {}; retaining durable mail",
+                member_name,
+                result.reason,
+            )
 
     async def on_task_plan_response(self, event: EventMessage) -> None:
         """Handle a leader decision for a submitted member plan."""
@@ -162,4 +152,4 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             payload.tool_call_id,
             payload.approved,
         )
-        await self._round.resume_interrupt(interactive_input)
+        await self._round.resume_plan_interrupt(interactive_input)

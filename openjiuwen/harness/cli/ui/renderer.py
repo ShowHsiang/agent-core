@@ -16,7 +16,6 @@ Supports eight chunk types:
 
 from __future__ import annotations
 
-import io
 import re
 import sys
 from dataclasses import dataclass, field
@@ -39,29 +38,10 @@ from openjiuwen.harness.cli.ui.todo_render import (
 )
 
 
-def _write_terminal(text: str, *, utf8_redirect: bool = False) -> None:
-    """Write and flush stdout, preserving its Unicode console path.
-
-    Args:
-        text: Text to emit.
-        utf8_redirect: Use UTF-8 for redirected output on all platforms.
-            Redirected Windows output uses UTF-8 by default.
-    """
+def _write_terminal(text: str) -> None:
+    """Write user-facing text through stdout and flush streaming output."""
     stdout = sys.stdout
-    write_utf8 = utf8_redirect or sys.platform == "win32"
-    if write_utf8 and isinstance(stdout, io.TextIOWrapper) and not stdout.isatty():
-        stdout.flush()
-        stdout.buffer.write(text.encode("utf-8", errors=stdout.errors or "strict"))
-        stdout.buffer.flush()
-        return
-    try:
-        stdout.write(text)
-    except UnicodeEncodeError:
-        if sys.platform != "win32" or not isinstance(stdout, io.TextIOWrapper) or not stdout.isatty():
-            raise
-        # A legacy console can only display characters in its active encoding.
-        encoding = stdout.encoding
-        stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+    stdout.write(text)
     stdout.flush()
 
 # Chunk type constants (aligned with SDK OutputSchema.type)

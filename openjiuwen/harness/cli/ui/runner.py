@@ -1,4 +1,3 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Non-interactive run mode.
 
 Supports three output formats:
@@ -10,6 +9,7 @@ Supports three output formats:
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, AsyncIterator
 
 from rich.console import Console
@@ -20,9 +20,13 @@ from openjiuwen.harness.cli.ui.renderer import (
     CHUNK_ANSWER,
     CHUNK_LLM_OUTPUT,
     _extract_content,
-    _write_terminal,
     render_stream,
 )
+
+
+def _write_terminal(text: str) -> None:
+    """Write *text* directly to stdout (CLI user output)."""
+    os.write(1, text.encode())
 
 
 async def run_once(
@@ -94,7 +98,10 @@ async def _output_json(
         "chunks": chunk_count,
         "model": cfg.model,
     }
-    _write_terminal(json.dumps(output, ensure_ascii=False, indent=2) + "\n", utf8_redirect=True)
+    _write_terminal(
+        json.dumps(output, ensure_ascii=False, indent=2)
+    )
+    _write_terminal("\n")
     return 0
 
 
@@ -113,7 +120,8 @@ async def _output_stream_json(
                 else str(payload)
             ),
         }
-        _write_terminal(json.dumps(line, ensure_ascii=False) + "\n", utf8_redirect=True)
+        _write_terminal(json.dumps(line, ensure_ascii=False))
+        _write_terminal("\n")
     return 0
 
 
