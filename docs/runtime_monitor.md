@@ -117,4 +117,15 @@ agent.set_runtime_monitor(monitor)
 
 ReAct 在评估边界及调用收尾发布，DeepAgent 在外层任务收尾补发最终状态。也可显式 `await monitor.publish(session)`。它不额外执行 JEV/LLM 评估；未注册回调时直接返回。通知默认限时 0.25 秒，可用 `RuntimeMonitorConfig.notification_timeout` 调整；普通错误/超时只记录异常类型，取消向上传播。回调应短小、支持取消、不做同步阻塞 I/O；通知是尽力投递，宿主按 generation/advice_id 去重并读取 Session 快照补齐诊断，不将它当作事务或可靠消息队列。
 
+### 通过宿主证据关闭同版本分歧
+
+在 `EvidenceAdapter.extract` 返回的观测中填写同一组 `subject`、`property`、`scope`、`version`，SDK 即可将多个来源对同一事实的矛盾合并计数。保留原始 `Conflict.evidence_ids` 供追溯。若宿主已核验裁决来源，可以在该观测附上 `resolution_ref`。例如经过校验的签发记录可以提供以下观测。
+
+```python
+Observation(text=receipt_text, source=registry_uri, subject="shipment-17", property="gate",
+            scope="dispatch", version="G04", value=gate, resolution_ref=receipt_digest)
+```
+
+只有完整观测和匹配的事实键可以关闭分歧。冲突的裁决将问题重开，缺少结构化归属的报告继续按对计数。业务目标的验收进度仍由 `Verification` 提供。
+
 jiuwenswarm 的产品适配维护在其仓库 `docs/runtime-monitor.md`：配置与客户端生命周期、`chat.runtime_monitor` 白名单投影、聊天通知/历史回放均由应用负责，SDK 不依赖产品事件协议。

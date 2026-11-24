@@ -77,6 +77,8 @@ class Observation(BaseModel):
     scope: str | None = None
     version: str | None = None
     value: Any = None
+    # A host adapter may attest that this exact source settles this versioned property.
+    resolution_ref: str | None = Field(default=None, pattern=r"\S")
     state_before: str | None = None
     state_after: str | None = None
 
@@ -189,6 +191,9 @@ class Conflict(BaseModel):
     evidence_ids: list[str]
     basis: str
     resolved: bool = False
+    issue_key: str | None = None
+    resolution_ref: str | None = None
+    reopened_step: str | None = None
 
 
 class StepEvaluationInput(BaseModel):

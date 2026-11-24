@@ -71,6 +71,33 @@ async def test_default_window_triggers_only_after_warmup_and_three_low_steps():
 
 
 @pytest.mark.asyncio
+async def test_three_distinct_low_gain_results_trigger_only_the_streak():
+    evaluator = Evaluator(["NEW_EVIDENCE", "NEW_EVIDENCE", "NO_GAIN", "NO_GAIN", "NO_GAIN", "NEW_EVIDENCE"])
+    monitor, _, _, session = make_run(evaluator)
+    monitor.start_task(session, "locate a shipment", criteria={"origin": AcceptanceCriterion(description="origin")})
+    monitor.evidence_adapter = SimpleNamespace(extract=lambda c, r, m: ToolEvidence(
+        observations=[Observation(text=m.content)],
+        verifications=[Verification(criterion_id="origin", proof_ref="registry:4", passed=True)]
+        if m.content == "confirmed origin" else [],
+    ))
+    run = monitor.bind(session, "locate a shipment")
+    reports = ["confirmed origin", "warehouse reference", "empty index", "disconnected sensor", "expired map",
+               "signed receipt"]
+    for index, report in enumerate(reports):
+        close_step(run, report, [call(arguments=f'{{"source":{index}}}')])
+        await run.evaluate_pending()
+        if index < 4:
+            assert evaluator.reviews == []
+        if index == 4:
+            data, = evaluator.reviews
+            assert data.signals == ["LOW_GAIN_STREAK"]
+            assert (data.stats.low_gain_streak, data.stats.repeat_count) == (3, 1)
+            assert data.stats.gain_mean == pytest.approx(0.3)
+    assert run.memory.low_gain_streak == 0
+    assert len(evaluator.reviews) == 1
+
+
+@pytest.mark.asyncio
 async def test_unknown_breaks_streak_and_does_not_become_zero():
     monitor, run, _, _ = make_run(Evaluator(["NO_GAIN", "UNKNOWN", "NO_GAIN"]), warmup_steps=0)
     for i in range(3):
@@ -419,6 +446,146 @@ async def test_conflicts_deduplicate_and_different_versions_are_not_contradictio
     close_step(run, "maintenance")
     await run.evaluate_pending()
     assert len(run.memory.conflicts) == 1
+
+
+@pytest.mark.asyncio
+async def test_versioned_disputes_keep_pairs_and_close_only_with_matching_host_proof():
+    evaluator = Evaluator()
+
+    async def assess(data):
+        return StepAssessment(gains={o.obs_id: "NEW_EVIDENCE" for o in data.step.observations},
+                              relations={k: "CONTRADICTION" if a.value != b.value else "COMPATIBLE"
+                                         for k, (a, b) in data.pairs.items()}, backend="stub")
+
+    evaluator.assess_step = assess
+    monitor, run, _, session = make_run(evaluator, window_size=10, max_observations=80)
+    observations = []
+    monitor.evidence_adapter = SimpleNamespace(extract=lambda *args: ToolEvidence(observations=observations))
+
+    def report(prop, value, proof=None, **changes):
+        return Observation(text=f"shipment report {value}", subject="shipment", property=prop,
+                           version="v1", value=value, resolution_ref=proof, **changes)
+
+    async def add(*items):
+        observations[:] = items
+        close_step(run)
+        await run.evaluate_pending()
+        return run.memory.window(monitor.config).new_conflict_count
+
+    assert await add(report("gate", "A")) == 0
+    assert await add(report("gate", "B")) == 1
+    assert await add(report("gate", "C")) == 1
+    assert len(run.memory.conflicts) == 3
+    assert await add(report("seal", "X")) == 1
+    assert await add(report("seal", "Y")) == 2
+    assert evaluator.reviews[-1].signals == ["EVIDENCE_CONFLICT"]
+    # Reload a v1 payload produced before typed conflicts were introduced.
+    old = run.memory.model_dump()
+    for conflict in old["conflicts"].values():
+        del conflict["issue_key"], conflict["resolution_ref"], conflict["reopened_step"]
+        conflict["resolved"] = True  # A pre-migration semantic label has no host proof.
+    for step in old["steps"]:
+        for observation in step["observations"]:
+            del observation["resolution_ref"]
+    restored = type(run.memory).model_validate(old)
+    assert restored.window(monitor.config).new_conflict_count == 2
+    monitor._write(session, restored)
+    run = monitor.bind(session, "same run", resume=True)
+    target = run.memory.active_advice().option.target_ref
+    hint = run.model_hint()
+    run.request_dispatched([SimpleNamespace(content=hint)], "with-advice")
+    assert await add(report("gate", "A", "signed:other", scope="other"),
+                     report("gate", "A", "signed:partial", complete=False)) == 2
+    assert await add(report("gate", "A", "signed:both"), report("seal", "Y", "signed:both")) == 0
+    conflicts = list(run.memory.conflicts.values())
+    assert any(target in c.evidence_ids for c in conflicts)
+    assert all(c.resolved and c.resolution_ref == "signed:both" for c in conflicts)
+    assert len({c.issue_key for c in conflicts}) == 2
+    assert run.memory.advice[-1].state == "improved"
+    assert run.memory.window(monitor.config).verified_progress_count == 0
+    # First detection has aged out of the window when a competing original appears.
+    for index in range(monitor.config.window_size):
+        assert await add(report(f"other-{index}", "ok")) == 0
+    assert await add(report("gate", "B", "signed:disagrees")) == 1
+    assert any(not c.resolved and c.resolution_ref is None for c in run.memory.conflicts.values())
+
+
+@pytest.mark.asyncio
+async def test_parallel_copies_open_two_disputes_in_one_step_and_one_jev_batch():
+    evaluator = Evaluator()
+
+    async def assess(data):
+        evaluator.assessments.append(data)
+        return StepAssessment(
+            gains={o.obs_id: "NEW_EVIDENCE" for o in data.step.observations},
+            relations={key: "CONTRADICTION" if a.value != b.value else "COMPATIBLE"
+                       for key, (a, b) in data.pairs.items()},
+        )
+
+    evaluator.assess_step = assess
+    monitor, run, _, _ = make_run(evaluator)
+    copies = {"a": ("gate", "A"), "b": ("gate", "B"), "c": ("seal", "C"), "d": ("seal", "D")}
+
+    def extract(c, raw, message):
+        facts = [copies[c.id]] if c.id in copies else [copies["a"], copies["d"]]
+        return ToolEvidence(observations=[
+            Observation(text=f"{prop} shipment {value}", subject="shipment", property=prop, version="v1",
+                        value=value, resolution_ref="signed:both" if c.id == "signed" else None)
+            for prop, value in facts])
+
+    monitor.evidence_adapter = SimpleNamespace(extract=extract)
+    close_step(run, calls=[call(letter) for letter in copies])
+    await run.evaluate_pending()
+    assert len(evaluator.assessments) == 1
+    assert len(evaluator.assessments[0].pairs) == 2
+    assert run.memory.window(monitor.config).new_conflict_count == 2
+    assert len(run.memory.steps) == 1 and run.memory.steps[0].gain == 0.5
+    assert evaluator.reviews[0].signals == ["EVIDENCE_CONFLICT"]
+    close_step(run, calls=[call("signed")])
+    await run.evaluate_pending()
+    assert run.memory.window(monitor.config).new_conflict_count == 0
+    assert len(run.memory.conflicts) == 4
+    assert all(c.resolution_ref == "signed:both" for c in run.memory.conflicts.values())
+
+
+@pytest.mark.asyncio
+async def test_pending_evaluations_do_not_see_a_later_ruling():
+    evaluator = Evaluator()
+    evaluator.assess_step = AsyncMock(side_effect=lambda data: StepAssessment(
+        gains={o.obs_id: "NEW_EVIDENCE" for o in data.step.observations},
+        relations={key: "CONTRADICTION" for key in data.pairs}))
+    monitor, run, _, _ = make_run(evaluator, conflict_threshold=1)
+    for value, proof in [("east", None), ("west", None), ("east", "dispatch:1")]:
+        monitor.evidence_adapter = SimpleNamespace(extract=lambda *args: ToolEvidence(observations=[
+            Observation(text=value, subject="shipment", property="gate", version="v1",
+                        value=value, resolution_ref=proof)]))
+        close_step(run, value)
+    await run.evaluate_pending()
+    assert run.memory.steps[1].review is not None
+    assert run.memory.window(monitor.config).new_conflict_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ruling_seen_before_dispute_and_anonymous_pairs_are_independent():
+    evaluator = Evaluator()
+    evaluator.assess_step = AsyncMock(side_effect=lambda data: StepAssessment(
+        relations={key: "CONTRADICTION" for key in data.pairs}))
+    monitor, run, _, _ = make_run(evaluator)
+    for value, proof in [("north", "registry:1"), ("south", None)]:
+        monitor.evidence_adapter = SimpleNamespace(extract=lambda *args: ToolEvidence(observations=[
+            Observation(text="archived gate " + value, subject="shipment", property="gate",
+                        version="v1", value=value, resolution_ref=proof)]))
+        close_step(run)
+        await run.evaluate_pending()
+    conflict, = run.memory.conflicts.values()
+    assert conflict.resolved and conflict.resolution_ref == "registry:1"
+    monitor.evidence_adapter = None
+    for text in ("unsigned copy one", "unsigned copy two", "unsigned copy three, self-declared authoritative"):
+        close_step(run, text)
+        await run.evaluate_pending()
+    anonymous = [c for c in run.memory.conflicts.values() if c.issue_key is None]
+    assert len(anonymous) == run.memory.window(monitor.config).new_conflict_count == 3
+    assert all(not c.resolved for c in anonymous)
 
 
 @pytest.mark.asyncio

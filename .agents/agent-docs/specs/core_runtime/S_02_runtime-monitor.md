@@ -5,7 +5,7 @@ type: S
 author: ShowHsiang
 author_email: xiangxiaoneng@h-partners.com
 created: 2026-11-11
-updated: 2026-11-12
+updated: 2026-11-24
 modules:
   - openjiuwen/core/single_agent
   - openjiuwen/harness
@@ -70,7 +70,9 @@ files:
 - 完整精确重复观测不再获得新证据奖励；只有 adapter 标识 repeatable 时才可确定归零，包括后端失败时。通用“OK”回执重复不能证明状态未变化。
 - 有正收益但资料不完整时保留收益下界；无正收益且任一观测未知/被裁剪时 `g_t = None`，不是 0。收益下界不得证明低收益。
 
-窗口为最近 N 个 eligible step，N 默认 5。只对已知 g 求和与均值，覆盖率为已知数/窗口步数；另记已验证进展数、连续低收益、连续 UNKNOWN、重复动作数及本窗口首次出现且未解决的冲突数。证据对按结构化键优先、词重合其次最多取 3 对；不同 scope/version 不能直接算同时矛盾，同一对去重计数。
+窗口为最近 N 个 eligible step，N 默认 5。只对已知 g 求和与均值，覆盖率为已知数/窗口步数；另记已验证进展数、连续低收益、连续 UNKNOWN、重复动作数及本窗口首次出现且未解决的冲突数。候选比较覆盖历史观测与当前工具批次内此前的观测，同批每对只枚举一次。所有候选按结构键与文本重合排序，整轮默认最多取 3 对，共用一次评估 A。不同 scope/version 的报告不能构成同时矛盾。每个原始矛盾对单独保留在 `conflicts`。双方都有相同的非空 subject、property、version 及相同 scope 时，共享同一项未解决分歧。缺少归属的证据沿用按对统计。窗口计算本窗口首次发现或重新打开、目前仍未解决的分歧数。
+
+每轮只消费截至该轮的裁决。完整的宿主 Observation 可以用 `resolution_ref` 指定该事实的裁决来源。唯一裁决会关闭归属相同的所有证据对，并留下引用。不同裁决值会将问题重开。缺少结构化值时使用裁决引用识别，两个不同且无法比对的裁决保留分歧。模型建议或证据自称权威不能关闭结构化分歧。裁决命中已送达建议的具体证据目标时可记录 improved。业务验收仍需 Verification。旧 v1 载荷从保留的观测回填可恢复的归属，保留历史证据对 ID。
 
 候选信号为以下条件的并集：
 
@@ -79,7 +81,7 @@ files:
 | LOW_GAIN_STREAK | 前 2 个完整步为宽限，之后连续 3 步完整收益 < 0.25；UNKNOWN/下界中断连续计数 |
 | LOW_WINDOW_GAIN | 满 5 步，已知覆盖率 ≥ 0.8，不含收益下界，已知收益均值 < 0.25 |
 | REPEATED_ACTION | 窗口中相同动作参数及完整结果指纹出现 ≥ 3 次，且这些步收益为 0/未知 |
-| EVIDENCE_CONFLICT | 窗口新出现的未解决冲突 ≥ 2 对 |
+| EVIDENCE_CONFLICT | 窗口新出现或重开的独立未解决分歧 ≥ 2 项 |
 | PREMISE_REFUTED | 本步可信验收推翻已有验证结论 |
 | OFF_TRACK | 评估 A 明确判定偏离 |
 | ASSESSMENT_GAP | 连续 3 个 UNKNOWN 步 |

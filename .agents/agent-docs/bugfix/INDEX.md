@@ -127,6 +127,7 @@ generated: true
 | ID / 文档 | 类型 | 标题 | 作者 | 模块 | 代码文件 | 关联 D |
 |---|---|---|---|---|---|---|
 | [B_20261117_1727_anthropic-output-limit-errors](openjiuwen/core/B_20261117_1727_anthropic-output-limit-errors.md) | B | 模型输出上限截断可见错误修复 | lizhiyuan | core/foundation/llm/model_clients, core/single_agent, harness/moa | openjiuwen/core/foundation/llm/model_clients/anthropic_model_client.py, openjiuwen/core/single_agent/agents/react_agent.py, openjiuwen/harness/moa/proposal.py, tests/unit_tests/core/foundation/llm/test_anthropic_model_client.py, tests/unit_tests/agent/react_agent/test_react_agent_provider_error.py, tests/unit_tests/agent/react_agent/test_react_agent_streaming.py, tests/unit_tests/core/foundation/llm/test_reasoning_resolver.py, tests/unit_tests/harness/moa/test_moa_proposal.py | 无独立 D：用户在本轮会话确认的 Anthropic 输出上限错误处理范围，未形成独立设计文档。 |
+| [B_20261124_1538_runtime-evidence-disputes](core_runtime/B_20261124_1538_runtime-evidence-disputes.md) | B | 同一版本事实的矛盾去重与有据关闭 | ShowHsiang | openjiuwen/core/single_agent | openjiuwen/core/single_agent/runtime_monitor/schema.py, openjiuwen/core/single_agent/runtime_monitor/memory.py, tests/unit_tests/agent/react_agent/test_runtime_monitor.py | [D-20261029-1613-react-runtime-intervention](../designs/active/D-20261029-1613-react-runtime-intervention/design.md) |
 
 <a id="module-10"></a>
 

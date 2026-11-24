@@ -5,7 +5,7 @@ type: F
 author: ShowHsiang
 author_email: xiangxiaoneng@h-partners.com
 created: 2026-11-11
-updated: 2026-11-12
+updated: 2026-11-24
 modules:
   - openjiuwen/core/single_agent
   - openjiuwen/harness
@@ -189,6 +189,10 @@ SDK 按实现、测试、文档组织三个连续提交，应用提交适配及�
 完整依赖锁仍未解决：最新应用要求 OpenTelemetry SDK <1.42，本 SDK 要求 >=1.45.1。已验证的 editable 联调不代表干净环境安装或生产打包兼容。成本预测继续排除，恢复层等待独立实现集成。
 
 交付推送期间应用官方 develop 再次更新，最终应用已纳入 `9f403d1ca27cfb73a5521a7c7d7e1f517c0dc61d`。扩展历史读取链检视补齐应用提示事件的查询白名单，最终应用后端 **500 passed**，前端 **128 passed**；SDK 行为代码未再改动，前述 **207 passed** 证据仍适用。该续次合并与历史分页回归事实继续由上述应用 F 维护。
+
+## 2026-11-24 真实轨迹驱动的冲突记账修订
+
+运行时区分原始证据对与同版本的独立分歧。已登记原件可关闭分歧，验收证明独立计数。实现边界、旧载荷处理与两条轨迹的前后对照见[修复记录](../bugfix/core_runtime/B_20261124_1538_runtime-evidence-disputes.md)。
 
 ## 2026-11-23 正式发布基线
 
